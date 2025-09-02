@@ -1,0 +1,27 @@
+release/
+/build
+coverage.txt
+__pycache__
+/dist
+/vendor
+go.work
+go.work.sum
+
+# nix
+result
+
+# pystarport
+/data
+
+# Jetbrains
+.idea
+
+# vscode
+.vscode
+
+# yaml for test
+integration_tests/configs/*.yaml
+
+# direnv
+.envrc
+.direnv
