@@ -27,7 +27,7 @@ test-store:
 test-versiondb:
 	cd versiondb && go test ./...
 
-clean: clean-memiavl clean-C clean-D
+clean: clean-memiavl clean-store clean-versiondb
 
 clean-memiavl:
 	cd memiavl && go clean
