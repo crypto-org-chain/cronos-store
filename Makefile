@@ -19,13 +19,13 @@ build-versiondb:
 test: test-memiavl test-store test-versiondb
 
 test-memiavl:
-	@cd memiavl && go test -tags=objstor -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
+	@cd memiavl && go test -tags=objstore -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
 
 test-store:
-	@cd store && go test -tags=objstor -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
+	@cd store && go test -tags=objstore -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
 
 test-versiondb:
-	@cd versiondb && go test -tags=objstor -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
+	@cd versiondb && go test -tags=objstore -v -mod=readonly ./... -coverprofile=$(COVERAGE) -covermode=atomic;
 
 clean: clean-memiavl clean-store clean-versiondb
 
