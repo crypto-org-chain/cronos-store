@@ -6,7 +6,7 @@ package rootmulti
 import (
 	"fmt"
 
-	"github.com/crypto-org-chain/cronos/memiavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 
 	"cosmossdk.io/store/transient"
 	"cosmossdk.io/store/types"

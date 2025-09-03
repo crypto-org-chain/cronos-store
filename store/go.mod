@@ -1,4 +1,4 @@
-module github.com/crypto-org-chain/cronos/store
+module github.com/crypto-org-chain/cronos-store/store
 
 go 1.23.0
 
@@ -13,7 +13,7 @@ require (
 	github.com/cosmos/cosmos-sdk v0.50.4
 	github.com/cosmos/gogoproto v1.7.0
 	github.com/cosmos/ics23/go v0.10.0
-	github.com/crypto-org-chain/cronos/memiavl v0.0.4
+	github.com/crypto-org-chain/cronos-store/memiavl v0.0.4
 	github.com/spf13/cast v1.6.0
 	github.com/stretchr/testify v1.10.0
 )
@@ -170,4 +170,4 @@ replace (
 	github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20240722033504-50f1fa0c49d1
 )
 
-replace github.com/crypto-org-chain/cronos/memiavl => ../memiavl
+replace github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl

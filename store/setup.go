@@ -3,8 +3,8 @@ package store
 import (
 	"path/filepath"
 
-	"github.com/crypto-org-chain/cronos/memiavl"
-	"github.com/crypto-org-chain/cronos/store/rootmulti"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/crypto-org-chain/cronos-store/store/rootmulti"
 	"github.com/spf13/cast"
 
 	"cosmossdk.io/log"

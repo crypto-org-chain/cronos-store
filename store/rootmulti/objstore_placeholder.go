@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"cosmossdk.io/store/types"
-	"github.com/crypto-org-chain/cronos/memiavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 )
 
 func (rs *Store) GetObjKVStore(key types.StoreKey) types.ObjKVStore {

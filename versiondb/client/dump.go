@@ -17,7 +17,7 @@ import (
 	"github.com/alitto/pond"
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/iavl"
-	"github.com/crypto-org-chain/cronos/versiondb/tsrocksdb"
+	"github.com/crypto-org-chain/cronos-store/versiondb/tsrocksdb"
 	"github.com/golang/snappy"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"

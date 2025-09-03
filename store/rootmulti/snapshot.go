@@ -6,7 +6,7 @@ import (
 	"math"
 
 	protoio "github.com/cosmos/gogoproto/io"
-	"github.com/crypto-org-chain/cronos/memiavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 
 	"cosmossdk.io/store/snapshots/types"
 )

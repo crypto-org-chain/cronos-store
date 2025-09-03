@@ -1,4 +1,4 @@
-module github.com/crypto-org-chain/cronos/memiavl
+module github.com/crypto-org-chain/cronos-store/memiavl
 
 go 1.23.0
 

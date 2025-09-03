@@ -11,8 +11,8 @@ import (
 
 	"github.com/alitto/pond"
 	"github.com/cosmos/iavl"
-	"github.com/crypto-org-chain/cronos/versiondb/extsort"
-	"github.com/crypto-org-chain/cronos/versiondb/tsrocksdb"
+	"github.com/crypto-org-chain/cronos-store/versiondb/extsort"
+	"github.com/crypto-org-chain/cronos-store/versiondb/tsrocksdb"
 	"github.com/linxGnu/grocksdb"
 	"github.com/spf13/cobra"
 )

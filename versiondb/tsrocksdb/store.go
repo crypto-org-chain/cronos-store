@@ -8,7 +8,7 @@ import (
 	"math"
 
 	"github.com/cosmos/iavl"
-	"github.com/crypto-org-chain/cronos/versiondb"
+	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/linxGnu/grocksdb"
 
 	"cosmossdk.io/store/types"
@@ -41,7 +41,7 @@ type Store struct {
 	db       *grocksdb.DB
 	cfHandle *grocksdb.ColumnFamilyHandle
 
-	// see: https://github.com/crypto-org-chain/cronos/issues/1683
+	// see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 	skipVersionZero bool
 }
 
@@ -238,7 +238,7 @@ func (s Store) Flush() error {
 }
 
 // FixData fixes wrong data written in versiondb due to rocksdb upgrade, the operation is idempotent.
-// see: https://github.com/crypto-org-chain/cronos/issues/1683
+// see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 // call this before `SetSkipVersionZero(true)`.
 func (s Store) FixData(storeNames []string, dryRun bool) error {
 	for _, storeName := range storeNames {
@@ -315,7 +315,7 @@ func (s Store) loadWrongData(storeName string) ([]KVPairWithTS, error) {
 	var pairs []KVPairWithTS
 	for ; iter.Valid(); iter.Next() {
 		if binary.LittleEndian.Uint64(iter.Timestamp()) != 0 {
-			// FIXME: https://github.com/crypto-org-chain/cronos/issues/1689
+			// FIXME: https://github.com/crypto-org-chain/cronos-store/issues/1689
 			continue
 		}
 

@@ -14,8 +14,8 @@ import (
 	"github.com/alitto/pond"
 	gogotypes "github.com/cosmos/gogoproto/types"
 	"github.com/cosmos/iavl/keyformat"
-	"github.com/crypto-org-chain/cronos/memiavl"
-	"github.com/crypto-org-chain/cronos/versiondb/extsort"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/crypto-org-chain/cronos-store/versiondb/extsort"
 	"github.com/linxGnu/grocksdb"
 	"github.com/spf13/cobra"
 

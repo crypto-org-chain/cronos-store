@@ -14,7 +14,7 @@ import (
 	"github.com/alitto/pond"
 	"github.com/cosmos/gogoproto/jsonpb"
 	"github.com/cosmos/iavl"
-	"github.com/crypto-org-chain/cronos/memiavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/spf13/cobra"
 
 	storetypes "cosmossdk.io/store/types"

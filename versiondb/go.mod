@@ -1,4 +1,4 @@
-module github.com/crypto-org-chain/cronos/versiondb
+module github.com/crypto-org-chain/cronos-store/versiondb
 
 go 1.23.0
 
@@ -14,7 +14,7 @@ require (
 	github.com/cosmos/cosmos-sdk v0.50.4
 	github.com/cosmos/gogoproto v1.7.0
 	github.com/cosmos/iavl v1.2.0
-	github.com/crypto-org-chain/cronos/memiavl v0.0.3
+	github.com/crypto-org-chain/cronos-store/memiavl v0.0.3
 	github.com/golang/snappy v0.0.4
 	github.com/linxGnu/grocksdb v1.9.10-0.20250331012329-9d5f074653d1
 	github.com/spf13/cast v1.6.0
@@ -172,5 +172,5 @@ replace (
 	cosmossdk.io/store => github.com/crypto-org-chain/cosmos-sdk/store v0.0.0-20240722033504-50f1fa0c49d1
 	// release/v0.50.x
 	github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20240722033504-50f1fa0c49d1
-	github.com/crypto-org-chain/cronos/memiavl => ../memiavl
+	github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
 )
