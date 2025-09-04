@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v3
+      - uses: cachix/install-nix-action@fc6e360bedc9ee72d75e701397f0bb30dce77568 # v31.5.2
+        with:
+          nix_path: nixpkgs=channel:nixos-22.11
+          extra_nix_config: |
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+      - uses: cachix/cachix-action@6a9a34cdd93d0ae4b4b59fd678660efb08109f2f # v12
+        with:
+          name: cronos
+          signingKey: "${{ secrets.CACHIX_SIGNING_KEY }}"
+
+      - name: build binaries
+        run: |
+          # install sha256sum
+          nix-env -i coreutils -f '<nixpkgs>'
+
+          # build binaries
+          ./scripts/release.sh
+
+          # update checksum and upload
+          sha256sum *.tar.gz > "checksums.txt"
+          echo 'FILES<<EOF' >> $GITHUB_ENV
+          ls -1 *.tar.gz >> $GITHUB_ENV
+          echo "checksums.txt" >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
+          cat $GITHUB_ENV
+      - name: upload binaries
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          draft: true
+          files: "${{ env.FILES }}"
+
+  release-macos:
+    # runs sequentially to avoid creating duplicated release
+    needs: ["release"]
+    strategy:
+      matrix:
+        runner: [macos-13, macos-14]
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    steps:
+      - uses: actions/checkout@v3
+      - uses: cachix/install-nix-action@fc6e360bedc9ee72d75e701397f0bb30dce77568 # v31.5.2
+        with:
+          nix_path: nixpkgs=channel:nixos-22.11
+          extra_nix_config: |
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+      - uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+        with:
+          p12-file-base64: ${{ secrets.MAC_CODE_SIGN_CERT }}
+          p12-password: ${{ secrets.MAC_CODE_SIGN_CERT_PASS }}
+      - uses: cachix/cachix-action@6a9a34cdd93d0ae4b4b59fd678660efb08109f2f # v12
+        with:
+          name: cronos
+          signingKey: "${{ secrets.CACHIX_SIGNING_KEY }}"
+      - name: build binaries
+        env:
+          MAC_CODE_API_KEY: ${{ secrets.MAC_CODE_API_KEY }}
+          MAC_CODE_API_KEY_ID: ${{ secrets.MAC_CODE_API_KEY_ID }}
+          MAC_CODE_API_ISSUER_ID: ${{ secrets.MAC_CODE_API_ISSUER_ID }}
+          MAC_CODE_API_DEVELOPER_ID: ${{ secrets.MAC_CODE_API_DEVELOPER_ID }}
+        run: |
+          # install sha256sum
+          nix-env -i coreutils -f '<nixpkgs>'
+
+          # build binaries
+          ./scripts/release.sh
+
+          # codesign
+          for tarball in *.tar.gz;
+          do
+            ./scripts/codesign_macos.sh $tarball
+            mv signed.tar.gz $tarball
+          done
+
+          # update checksum and upload
+          CHKFILE="checksums-darwin-$(uname -p).txt"
+          sha256sum *.tar.gz > "$CHKFILE"
+          echo 'FILES<<EOF' >> $GITHUB_ENV
+          ls -1 *.tar.gz >> $GITHUB_ENV
+          echo "$CHKFILE" >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
+          cat $GITHUB_ENV
+      - name: upload binaries
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          draft: true
+          files: "${{ env.FILES }}"
