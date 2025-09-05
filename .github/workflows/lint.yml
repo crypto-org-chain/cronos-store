@@ -1,13 +1,13 @@
 name: Run Lint
 # Lint runs golangci-lint over the entire cronos repository This workflow is
-# run on every pull request and push to main The `golangci` will pass without
+# run on every pull request and push to master The `golangci` will pass without
 # running if no *.{go, mod, sum} files have been changed.
 on:
   merge_group:
   pull_request:
   push:
     branches:
-      - main
+      - master
       - release/**
 
 concurrency:
