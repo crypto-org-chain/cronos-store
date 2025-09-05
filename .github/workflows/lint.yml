@@ -35,7 +35,7 @@ jobs:
         run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.1.6
       - name: install rocksDB dependencies
         run: |
-          brew install snappy zlib bzip2 gflags lz4 zstd cmake
+          brew install snappy zlib bzip2 gflags
       - name: build and install rocksdb
         run: |
           git clone https://github.com/facebook/rocksdb.git
