@@ -1,0 +1,68 @@
+name: Run Lint
+# Lint runs golangci-lint over the entire cronos repository This workflow is
+# run on every pull request and push to master The `golangci` will pass without
+# running if no *.{go, mod, sum} files have been changed.
+on:
+  merge_group:
+  pull_request:
+  push:
+    branches:
+      - master
+      - release/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golangci:
+    name: Run golangci-lint
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.7'
+      - id: changed-files
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46.0.5
+        with:
+          files: |
+            **/*.go
+            *.mod
+            *.sum
+      - name: install golangci-lint
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.1.6
+      - name: install rocksDB dependencies
+        run: |
+          brew install snappy zlib bzip2 gflags
+      - name: build and install rocksdb
+        run: |
+          git clone https://github.com/facebook/rocksdb.git
+          cd rocksdb
+          git checkout v9.11.2
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON -DCMAKE_CXX_FLAGS="-faligned-allocation"
+          sudo make -j4
+          sudo make install
+      - name: run golangci-lint
+        run: |
+          golangci-lint version
+          BUILD_TAGS=rocksdb,grocksdb_clean_link,objstore
+          cd versiondb
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./versiondb --timeout 30m --build-tags $BUILD_TAGS
+          cd ../memiavl
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./memiavl --timeout 30m --build-tags objstore
+          cd ../store
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./store --timeout 30m --build-tags objstore
+        # Check only if there are differences in the source code
+        if: steps.changed-files.outputs.any_changed == 'true'
+      - name: check working directory is clean
+        id: changes
+        run: |
+          set +e
+          (git diff --no-ext-diff --exit-code)
+          echo "changed=$?" >> $GITHUB_OUTPUT
+      - if: steps.changes.outputs.changed == 1
+        run: echo "Working directory is dirty" && exit 1
