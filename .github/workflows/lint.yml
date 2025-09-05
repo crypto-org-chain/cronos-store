@@ -17,7 +17,7 @@ concurrency:
 jobs:
   golangci:
     name: Run golangci-lint
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/setup-go@v5
@@ -33,6 +33,10 @@ jobs:
       - name: install golangci-lint
         if: steps.changed-files.outputs.any_changed == 'true'
         run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.1.6
+      - name: install rocksDB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install -y build-essential libsnappy-dev zlib1g-dev libbz2-dev libgflags-dev liblz4-dev libzstd-dev cmake
       - name: build and install rocksdb
         run: |
           git clone https://github.com/facebook/rocksdb.git

@@ -31,6 +31,10 @@ jobs:
             **/*.go
             *.mod
             *.sum
+      - name: install rocksDB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install -y build-essential libsnappy-dev zlib1g-dev libbz2-dev libgflags-dev liblz4-dev libzstd-dev cmake
       - name: build and install rocksdb
         run: |
           git clone https://github.com/facebook/rocksdb.git
