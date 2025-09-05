@@ -39,6 +39,9 @@ jobs:
           else
             brew install snappy zlib bzip2 gflags
           fi
+      - name: debug
+        run: |
+          find /usr/local -xdev -name "*ztd*"
       - name: build and install rocksdb
         run: |
           git clone https://github.com/facebook/rocksdb.git
@@ -51,7 +54,9 @@ jobs:
             sudo make install
           else
             export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
-            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON -DCMAKE_CXX_FLAGS="-faligned-allocation" -DCMAKE_PREFIX_PATH=/opt/homebrew
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
+              -DCMAKE_CXX_FLAGS="-faligned-allocation" -DCMAKE_PREFIX_PATH=/opt/homebrew \
+              -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix zstd)/lib"
             sudo make -j4
             sudo make install
           fi
