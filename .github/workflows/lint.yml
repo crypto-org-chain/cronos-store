@@ -20,6 +20,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
+      - uses: actions/checkout@v3
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.7'
@@ -49,12 +50,9 @@ jobs:
         run: |
           golangci-lint version
           BUILD_TAGS=rocksdb,grocksdb_clean_link,objstore
-          cd versiondb
-          golangci-lint run --fix --output.text.path stdout --path-prefix=./versiondb --timeout 30m --build-tags $BUILD_TAGS
-          cd ../memiavl
-          golangci-lint run --fix --output.text.path stdout --path-prefix=./memiavl --timeout 30m --build-tags objstore
-          cd ../store
-          golangci-lint run --fix --output.text.path stdout --path-prefix=./store --timeout 30m --build-tags objstore
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./versiondb --timeout 30m --build-tags $BUILD_TAGS ./versiondb/...
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./memiavl --timeout 30m --build-tags objstore ./memiavl/...
+          golangci-lint run --fix --output.text.path stdout --path-prefix=./store --timeout 30m --build-tags objstore ./store/...
         # Check only if there are differences in the source code
         if: steps.changed-files.outputs.any_changed == 'true'
       - name: check working directory is clean

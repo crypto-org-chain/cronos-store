@@ -50,7 +50,8 @@ jobs:
             sudo make -j4
             sudo make install
           else
-            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON -DCMAKE_CXX_FLAGS="-faligned-allocation"
+            export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON -DCMAKE_CXX_FLAGS="-faligned-allocation" -DCMAKE_PREFIX_PATH=/opt/homebrew
             sudo make -j4
             sudo make install
           fi
