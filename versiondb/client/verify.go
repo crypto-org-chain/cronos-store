@@ -56,6 +56,10 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			chainId, err := cmd.Flags().GetString(flagChainId)
+			if err != nil {
+				return err
+			}
 
 			if len(saveSnapshot) > 0 {
 				// detect the write permission early on.
@@ -80,10 +84,10 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				{Name: capabilitytypes.MemStoreKey, CommitId: storetypes.CommitID{}},
 			}
 
-			mtree := memiavl.NewEmptyMultiTree(0, 0)
+			mtree := memiavl.NewEmptyMultiTree(0, 0, chainId)
 			if len(loadSnapshot) > 0 {
 				var err error
-				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0)
+				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId)
 				if err != nil {
 					return err
 				}
