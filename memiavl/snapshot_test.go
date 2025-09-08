@@ -163,6 +163,7 @@ func TestDBSnapshotRestore(t *testing.T) {
 }
 
 func testSnapshotRoundTrip(t *testing.T, db *DB) {
+	t.Helper()
 	exporter, err := NewMultiTreeExporter(db.dir, uint32(db.Version()), true)
 	require.NoError(t, err)
 
