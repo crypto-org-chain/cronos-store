@@ -18,7 +18,7 @@ func (rs *Store) Snapshot(height uint64, protoWriter protoio.Writer) (returnErr 
 	}
 	version := uint32(height)
 
-	exporter, err := memiavl.NewMultiTreeExporter(rs.dir, version, rs.supportExportNonSnapshotVersion)
+	exporter, err := memiavl.NewMultiTreeExporter(rs.dir, version, rs.supportExportNonSnapshotVersion, rs.chainId)
 	if err != nil {
 		return err
 	}

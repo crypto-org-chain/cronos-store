@@ -54,18 +54,20 @@ type MultiTree struct {
 
 	// the initial metadata loaded from disk snapshot
 	metadata MultiTreeMetadata
+	chainId  string
 }
 
-func NewEmptyMultiTree(initialVersion uint32, cacheSize int) *MultiTree {
+func NewEmptyMultiTree(initialVersion uint32, cacheSize int, chainId string) *MultiTree {
 	return &MultiTree{
 		initialVersion: initialVersion,
 		treesByName:    make(map[string]int),
 		zeroCopy:       true,
 		cacheSize:      cacheSize,
+		chainId:        chainId,
 	}
 }
 
-func LoadMultiTree(dir string, zeroCopy bool, cacheSize int) (*MultiTree, error) {
+func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*MultiTree, error) {
 	metadata, err := readMetadata(dir)
 	if err != nil {
 		return nil, err
@@ -108,6 +110,7 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int) (*MultiTree, error)
 		metadata:       *metadata,
 		zeroCopy:       zeroCopy,
 		cacheSize:      cacheSize,
+		chainId:        chainId,
 	}
 	// initial version is nesserary for wal index conversion,
 	// overflow checked in `readMetadata`.
