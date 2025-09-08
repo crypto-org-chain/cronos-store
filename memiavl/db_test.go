@@ -278,7 +278,7 @@ func TestLoadVersion(t *testing.T) {
 		tmp, err := Load(dir, Options{
 			TargetVersion: uint32(v),
 			ReadOnly:      true,
-		})
+		}, chainId)
 		require.NoError(t, err)
 		require.Equal(t, RefHashes[v-1], tmp.TreeByName("test").RootHash())
 		require.Equal(t, expItems, collectIter(tmp.TreeByName("test").Iterator(nil, nil, true)))
@@ -286,7 +286,7 @@ func TestLoadVersion(t *testing.T) {
 }
 
 func TestZeroCopy(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{InitialStores: []string{"test", "test2"}, CreateIfMissing: true, ZeroCopy: true})
+	db, err := Load(t.TempDir(), Options{InitialStores: []string{"test", "test2"}, CreateIfMissing: true, ZeroCopy: true}, chainId)
 	require.NoError(t, err)
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
 		{Name: "test", Changeset: ChangeSets[0]},
@@ -350,7 +350,7 @@ func TestWalIndexConversion(t *testing.T) {
 
 func TestEmptyValue(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Load(dir, Options{InitialStores: []string{"test"}, CreateIfMissing: true, ZeroCopy: true})
+	db, err := Load(dir, Options{InitialStores: []string{"test"}, CreateIfMissing: true, ZeroCopy: true}, chainId)
 	require.NoError(t, err)
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
@@ -375,7 +375,7 @@ func TestEmptyValue(t *testing.T) {
 
 	require.NoError(t, db.Close())
 
-	db, err = Load(dir, Options{ZeroCopy: true})
+	db, err = Load(dir, Options{ZeroCopy: true}, chainId)
 	require.NoError(t, err)
 	require.Equal(t, version, db.Version())
 }
@@ -383,45 +383,45 @@ func TestEmptyValue(t *testing.T) {
 func TestInvalidOptions(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Load(dir, Options{ReadOnly: true})
+	_, err := Load(dir, Options{ReadOnly: true}, chainId)
 	require.Error(t, err)
 
-	_, err = Load(dir, Options{ReadOnly: true, CreateIfMissing: true})
+	_, err = Load(dir, Options{ReadOnly: true, CreateIfMissing: true}, chainId)
 	require.Error(t, err)
 
-	db, err := Load(dir, Options{CreateIfMissing: true})
+	db, err := Load(dir, Options{CreateIfMissing: true}, chainId)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	_, err = Load(dir, Options{LoadForOverwriting: true, ReadOnly: true})
+	_, err = Load(dir, Options{LoadForOverwriting: true, ReadOnly: true}, chainId)
 	require.Error(t, err)
 
-	_, err = Load(dir, Options{ReadOnly: true})
+	_, err = Load(dir, Options{ReadOnly: true}, chainId)
 	require.NoError(t, err)
 }
 
 func TestExclusiveLock(t *testing.T) {
 	dir := t.TempDir()
 
-	db, err := Load(dir, Options{CreateIfMissing: true})
+	db, err := Load(dir, Options{CreateIfMissing: true}, chainId)
 	require.NoError(t, err)
 
-	_, err = Load(dir, Options{})
+	_, err = Load(dir, Options{}, chainId)
 	require.Error(t, err)
 
-	_, err = Load(dir, Options{ReadOnly: true})
+	_, err = Load(dir, Options{ReadOnly: true}, chainId)
 	require.NoError(t, err)
 
 	require.NoError(t, db.Close())
 
-	_, err = Load(dir, Options{})
+	_, err = Load(dir, Options{}, chainId)
 	require.NoError(t, err)
 }
 
 func TestFastCommit(t *testing.T) {
 	dir := t.TempDir()
 
-	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test"}, SnapshotInterval: 3, AsyncCommitBuffer: 10})
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test"}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, chainId)
 	require.NoError(t, err)
 
 	cs := ChangeSet{
@@ -443,7 +443,7 @@ func TestFastCommit(t *testing.T) {
 }
 
 func TestRepeatedApplyChangeSet(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{"test1", "test2"}, SnapshotInterval: 3, AsyncCommitBuffer: 10})
+	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{"test1", "test2"}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, chainId)
 	require.NoError(t, err)
 
 	err = db.ApplyChangeSets([]*NamedChangeSet{
