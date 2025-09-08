@@ -1,11 +1,5 @@
 cli:
   - client/**/*
-nix:
-  - nix/**
-  - default.nix
-  - docker.nix
-  - flake.nix
-
 adr:
   - docs/architecture/**/*
 build:
