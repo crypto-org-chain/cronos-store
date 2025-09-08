@@ -3,15 +3,15 @@ package store
 import (
 	"path/filepath"
 
-	"cosmossdk.io/log"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/crypto-org-chain/cronos-store/store/rootmulti"
 	"github.com/spf13/cast"
+
+	"cosmossdk.io/log"
 
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-
-	"github.com/crypto-org-chain/cronos-store/memiavl"
-	"github.com/crypto-org-chain/cronos-store/store/rootmulti"
 )
 
 const (
@@ -59,7 +59,7 @@ func SetupMemIAVL(
 	return baseAppOptions
 }
 
-func setMemIAVL(homePath string, logger log.Logger, opts memiavl.Options, sdk46Compact bool, supportExportNonSnapshotVersion bool, chainId string) func(*baseapp.BaseApp) {
+func setMemIAVL(homePath string, logger log.Logger, opts memiavl.Options, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) func(*baseapp.BaseApp) {
 	return func(bapp *baseapp.BaseApp) {
 		// trigger state-sync snapshot creation by memiavl
 		opts.TriggerStateSyncExport = func(height int64) {

@@ -15,10 +15,10 @@ const (
 	// SnapshotFileMagic is little endian encoded b"IAVL"
 	SnapshotFileMagic = 1280721225
 
-	// the initial snapshot format
+	// SnapshotFormat the initial snapshot format
 	SnapshotFormat = 0
 
-	// magic: uint32, format: uint32, version: uint32
+	// SizeMetadata magic: uint32, format: uint32, version: uint32
 	SizeMetadata = 12
 
 	FileNameNodes    = "nodes"
@@ -26,7 +26,7 @@ const (
 	FileNameKVs      = "kvs"
 	FileNameMetadata = "metadata"
 
-	// check for cancel every 1000 leaves
+	// CancelCheckInterval check for cancel every 1000 leaves
 	CancelCheckInterval = 1000
 )
 

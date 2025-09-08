@@ -4,16 +4,17 @@ import (
 	"fmt"
 	"io"
 
-	"cosmossdk.io/errors"
-	"cosmossdk.io/log"
-	"cosmossdk.io/store/tracekv"
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
 	ics23 "github.com/cosmos/ics23/go"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 
+	"cosmossdk.io/errors"
+	"cosmossdk.io/log"
 	"cosmossdk.io/store/cachekv"
 	pruningtypes "cosmossdk.io/store/pruning/types"
+	"cosmossdk.io/store/tracekv"
 	"cosmossdk.io/store/types"
+
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
@@ -58,13 +59,13 @@ func (st *Store) SetPruning(_ pruningtypes.PruningOptions) {
 	panic("cannot set pruning options on an initialized IAVL store")
 }
 
-// SetPruning panics as pruning options should be provided at initialization
+// GetPruning panics as pruning options should be provided at initialization
 // since IAVl accepts pruning options directly.
 func (st *Store) GetPruning() pruningtypes.PruningOptions {
 	panic("cannot get pruning options on an initialized IAVL store")
 }
 
-// Implements Store.
+// GetStoreType Implements Store.
 func (st *Store) GetStoreType() types.StoreType {
 	return types.StoreTypeIAVL
 }
@@ -78,7 +79,7 @@ func (st *Store) CacheWrapWithTrace(w io.Writer, tc types.TraceContext) types.Ca
 	return cachekv.NewStore(tracekv.NewStore(st, w, tc))
 }
 
-// Implements types.KVStore.
+// Set Implements types.KVStore.
 //
 // we assume Set is only called in `Commit`, so the written state is only visible after commit.
 func (st *Store) Set(key, value []byte) {
@@ -87,17 +88,17 @@ func (st *Store) Set(key, value []byte) {
 	})
 }
 
-// Implements types.KVStore.
+// Get Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
 	return st.tree.Get(key)
 }
 
-// Implements types.KVStore.
+// Has Implements types.KVStore.
 func (st *Store) Has(key []byte) bool {
 	return st.tree.Has(key)
 }
 
-// Implements types.KVStore.
+// Delete Implements types.KVStore.
 //
 // we assume Delete is only called in `Commit`, so the written state is only visible after commit.
 func (st *Store) Delete(key []byte) {
