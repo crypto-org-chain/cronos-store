@@ -1,0 +1,13 @@
+cli:
+  - client/**/*
+adr:
+  - docs/architecture/**/*
+build:
+  - Makefile
+  - Dockerfile
+  - docker-compose.yml
+  - scripts/*
+ci:
+  - .github/**
+  - buf.work.yaml
+  - .golangci.yml
