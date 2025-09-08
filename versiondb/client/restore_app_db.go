@@ -33,7 +33,7 @@ const (
 	latestVersionKey = "s/latest"
 	commitInfoKeyFmt = "s/%d" // s/<version>
 
-	// We creates the temporary sst files in the target database to make sure the file renaming is cheap in ingestion
+	// StoreSSTFileName We creates the temporary sst files in the target database to make sure the file renaming is cheap in ingestion
 	// part.
 	StoreSSTFileName = "tmp-%s-%d.sst"
 
