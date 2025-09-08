@@ -1,6 +1,6 @@
 package config
 
-import "github.com/crypto-org-chain/cronos/memiavl"
+import "github.com/crypto-org-chain/cronos-store/memiavl"
 
 const DefaultCacheSize = 1000
 

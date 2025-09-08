@@ -21,8 +21,8 @@ import (
 	storetypes "cosmossdk.io/store/types"
 	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 
-	"github.com/crypto-org-chain/cronos/memiavl"
-	"github.com/crypto-org-chain/cronos/versiondb/extsort"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/crypto-org-chain/cronos-store/versiondb/extsort"
 )
 
 const (

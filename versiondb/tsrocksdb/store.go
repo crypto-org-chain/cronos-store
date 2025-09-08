@@ -8,7 +8,7 @@ import (
 
 	"cosmossdk.io/store/types"
 	"github.com/cosmos/iavl"
-	"github.com/crypto-org-chain/cronos/versiondb"
+	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/linxGnu/grocksdb"
 )
 

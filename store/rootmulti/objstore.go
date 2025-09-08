@@ -8,7 +8,7 @@ import (
 
 	"cosmossdk.io/store/transient"
 	"cosmossdk.io/store/types"
-	"github.com/crypto-org-chain/cronos/memiavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 )
 
 // Implements interface MultiStore

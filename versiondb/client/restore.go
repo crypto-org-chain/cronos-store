@@ -15,8 +15,8 @@ import (
 	"cosmossdk.io/store/snapshots/types"
 	"github.com/cosmos/cosmos-sdk/server"
 
-	"github.com/crypto-org-chain/cronos/versiondb"
-	"github.com/crypto-org-chain/cronos/versiondb/tsrocksdb"
+	"github.com/crypto-org-chain/cronos-store/versiondb"
+	"github.com/crypto-org-chain/cronos-store/versiondb/tsrocksdb"
 )
 
 // RestoreVersionDBCmd returns a command to restore a versiondb from local snapshot
