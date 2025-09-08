@@ -13,11 +13,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const chainId = "test_chain"
+
 func TestRewriteSnapshot(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
 		InitialStores:   []string{"test"},
-	})
+	}, chainId)
 	require.NoError(t, err)
 
 	for i, changes := range ChangeSets {
@@ -52,7 +54,7 @@ func TestRemoveSnapshotDir(t *testing.T) {
 		CreateIfMissing:    true,
 		InitialStores:      []string{"test"},
 		SnapshotKeepRecent: 0,
-	})
+	}, chainId)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -64,13 +66,13 @@ func TestRemoveSnapshotDir(t *testing.T) {
 
 	_, err = Load(dbDir, Options{
 		ReadOnly: true,
-	})
+	}, chainId)
 	require.NoError(t, err)
 
 	_, err = os.Stat(tmpDir)
 	require.False(t, os.IsNotExist(err))
 
-	db, err = Load(dbDir, Options{})
+	db, err = Load(dbDir, Options{}, chainId)
 	require.NoError(t, err)
 
 	_, err = os.Stat(tmpDir)
@@ -84,7 +86,7 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 		CreateIfMissing:    true,
 		InitialStores:      []string{"test"},
 		SnapshotKeepRecent: 0, // only a single snapshot is kept
-	})
+	}, chainId)
 	require.NoError(t, err)
 
 	for i, changes := range ChangeSets {
@@ -120,7 +122,7 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test", "delete"}})
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test", "delete"}}, chainId)
 	require.NoError(t, err)
 
 	for _, changes := range ChangeSets {
@@ -152,7 +154,7 @@ func TestWAL(t *testing.T) {
 
 	require.NoError(t, db.Close())
 
-	db, err = Load(dir, Options{})
+	db, err = Load(dir, Options{}, chainId)
 	require.NoError(t, err)
 
 	require.Equal(t, "newtest", db.lastCommitInfo.StoreInfos[0].Name)
@@ -183,7 +185,7 @@ func TestInitialVersion(t *testing.T) {
 	value1 := "world1"
 	for _, initialVersion := range []int64{0, 1, 100} {
 		dir := t.TempDir()
-		db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{name}})
+		db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{name}}, chainId)
 		require.NoError(t, err)
 		db.SetInitialVersion(initialVersion)
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(name, key, value)))
@@ -207,7 +209,7 @@ func TestInitialVersion(t *testing.T) {
 		require.NoError(t, db.Close())
 
 		// reload the db, check the contents are the same
-		db, err = Load(dir, Options{})
+		db, err = Load(dir, Options{}, chainId)
 		require.NoError(t, err)
 		require.Equal(t, uint32(initialVersion), db.initialVersion)
 		require.Equal(t, v, db.Version())
@@ -247,7 +249,7 @@ func TestLoadVersion(t *testing.T) {
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
 		InitialStores:   []string{"test"},
-	})
+	}, chainId)
 	require.NoError(t, err)
 
 	for i, changes := range ChangeSets {
