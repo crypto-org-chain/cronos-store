@@ -94,7 +94,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 			for _, store := range stores {
 				// https://github.com/golang/go/wiki/CommonMistakes#using-goroutines-on-loop-iterator-variables
-				store := store
+
 				tree := mtree.TreeByName(store)
 				if tree == nil {
 					tree = memiavl.New(0)
