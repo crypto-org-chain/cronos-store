@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/bits"
@@ -256,7 +257,7 @@ func IterateChangeSets(
 		lastCompleteOffset += offset
 	}
 
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		// it's not easy to distinguish normal EOF or unexpected EOF,
 		// there could be potential corrupted end of file and the err is a normal io.EOF here,
 		// user should verify the change set files in advance, using the verify command.

@@ -3,8 +3,9 @@ package tsrocksdb
 import (
 	"bytes"
 
-	"cosmossdk.io/store/types"
 	"github.com/linxGnu/grocksdb"
+
+	"cosmossdk.io/store/types"
 )
 
 type rocksDBIterator struct {
