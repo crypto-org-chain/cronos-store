@@ -1,2 +1,2 @@
 - [#1](https://github.com/crypto-org-chain/cronos-store/pull/1) feature: add store, memiavl, versiondb.
-- [#1](https://github.com/crypto-org-chain/cronos-store/pull/3) feat(memiavl): MultiTree add chainId.
+- [#3](https://github.com/crypto-org-chain/cronos-store/pull/3) feat(memiavl): MultiTree add chainId.
