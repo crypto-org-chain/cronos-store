@@ -33,6 +33,7 @@ func SetupMemIAVL(
 	sdk46Compact bool,
 	supportExportNonSnapshotVersion bool,
 	cacheSize int,
+	chainId string,
 	baseAppOptions []func(*baseapp.BaseApp),
 ) []func(*baseapp.BaseApp) {
 	if cast.ToBool(appOpts.Get(FlagMemIAVL)) {
@@ -52,19 +53,19 @@ func SetupMemIAVL(
 
 		// cms must be overridden before the other options, because they may use the cms,
 		// make sure the cms aren't be overridden by the other options later on.
-		baseAppOptions = append([]func(*baseapp.BaseApp){setMemIAVL(homePath, logger, opts, sdk46Compact, supportExportNonSnapshotVersion)}, baseAppOptions...)
+		baseAppOptions = append([]func(*baseapp.BaseApp){setMemIAVL(homePath, logger, opts, sdk46Compact, supportExportNonSnapshotVersion, chainId)}, baseAppOptions...)
 	}
 
 	return baseAppOptions
 }
 
-func setMemIAVL(homePath string, logger log.Logger, opts memiavl.Options, sdk46Compact, supportExportNonSnapshotVersion bool) func(*baseapp.BaseApp) {
+func setMemIAVL(homePath string, logger log.Logger, opts memiavl.Options, sdk46Compact, supportExportNonSnapshotVersion bool, chaiId string) func(*baseapp.BaseApp) {
 	return func(bapp *baseapp.BaseApp) {
 		// trigger state-sync snapshot creation by memiavl
 		opts.TriggerStateSyncExport = func(height int64) {
 			go bapp.SnapshotManager().SnapshotIfApplicable(height)
 		}
-		cms := rootmulti.NewStore(filepath.Join(homePath, "data", "memiavl.db"), logger, sdk46Compact, supportExportNonSnapshotVersion)
+		cms := rootmulti.NewStore(filepath.Join(homePath, "data", "memiavl.db"), logger, sdk46Compact, supportExportNonSnapshotVersion, chaiId)
 		cms.SetMemIAVLOptions(opts)
 		bapp.SetCMS(cms)
 	}

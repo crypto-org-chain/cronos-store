@@ -136,7 +136,7 @@ func TestDBSnapshotRestore(t *testing.T) {
 		CreateIfMissing:   true,
 		InitialStores:     []string{"test", "test2"},
 		AsyncCommitBuffer: -1,
-	})
+	}, testChainId)
 	require.NoError(t, err)
 
 	for _, changes := range ChangeSets {
@@ -165,7 +165,7 @@ func TestDBSnapshotRestore(t *testing.T) {
 
 func testSnapshotRoundTrip(t *testing.T, db *DB) {
 	t.Helper()
-	exporter, err := NewMultiTreeExporter(db.dir, uint32(db.Version()), true)
+	exporter, err := NewMultiTreeExporter(db.dir, uint32(db.Version()), true, testChainId)
 	require.NoError(t, err)
 
 	restoreDir := t.TempDir()
@@ -185,7 +185,7 @@ func testSnapshotRoundTrip(t *testing.T, db *DB) {
 	require.NoError(t, importer.Close())
 	require.NoError(t, exporter.Close())
 
-	db2, err := Load(restoreDir, Options{})
+	db2, err := Load(restoreDir, Options{}, testChainId)
 	require.NoError(t, err)
 	require.Equal(t, db.LastCommitInfo(), db2.LastCommitInfo())
 
