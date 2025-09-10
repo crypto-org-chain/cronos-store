@@ -9,9 +9,9 @@ import (
 	"cosmossdk.io/store/types"
 )
 
-const testChainId = "test_chain"
+const TestAppChainID = "test_chain"
 
 func TestLastCommitID(t *testing.T) {
-	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, testChainId)
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	require.Equal(t, types.CommitID{}, store.LastCommitID())
 }
