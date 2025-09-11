@@ -340,10 +340,12 @@ func getFirstVersion(db dbm.DB, iavlVersion int) (int64, error) {
 }
 
 // DumpVersionDBChangeSetCmd only dumps write entries; delete entries cannot be retrieved because RocksDB does not support this.
+// Note: Do not use for restore
+// it is only used for checking data write errors, such as https://github.com/crypto-org-chain/cronos/issues/1683
 func DumpVersionDBChangeSetCmd(defaultStores []string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dump-versiondb [dir] [outDir]",
-		Short: "dump versiondb changeset at version [dir] [outDir]",
+		Short: "dump versiondb changeset at version [dir] [outDir], don't use for restore",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := args[0]
@@ -373,6 +375,7 @@ func DumpVersionDBChangeSetCmd(defaultStores []string) *cobra.Command {
 					}
 					defer it.Close()
 
+					fmt.Printf("begin dumping versiondb changeset %s at version %d\n", storeKey, version)
 					kvsFile := filepath.Join(outDir, fmt.Sprintf("%s-%d", storeKey, version))
 					fpKvs, err := createFile(kvsFile)
 					if err != nil {
@@ -405,6 +408,7 @@ func DumpVersionDBChangeSetCmd(defaultStores []string) *cobra.Command {
 					if err != nil {
 						return err
 					}
+					fmt.Printf("finish dumping versiondb changeset %s at version %d\n", storeKey, version)
 				}
 			}
 			return nil
