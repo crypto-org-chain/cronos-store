@@ -373,7 +373,6 @@ func DumpVersionDBChangeSetCmd(defaultStores []string) *cobra.Command {
 					if err != nil {
 						return err
 					}
-					defer it.Close()
 
 					fmt.Printf("begin dumping versiondb changeset %s at version %d\n", storeKey, version)
 					kvsFile := filepath.Join(outDir, fmt.Sprintf("%s-%d", storeKey, version))
@@ -394,6 +393,9 @@ func DumpVersionDBChangeSetCmd(defaultStores []string) *cobra.Command {
 						copy(value, it.Value())
 						pair := &iavl.KVPair{Key: key, Value: value}
 						pairs = append(pairs, pair)
+					}
+					if err := it.Close(); err != nil {
+						return err
 					}
 					changeset := &iavl.ChangeSet{Pairs: pairs}
 					err = WriteChangeSet(kvsWriter, version, changeset)
