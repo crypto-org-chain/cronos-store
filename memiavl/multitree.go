@@ -43,6 +43,7 @@ type MultiTree struct {
 
 	zeroCopy  bool
 	cacheSize int
+	chainId   string
 
 	trees          []NamedTree    // always ordered by tree name
 	treesByName    map[string]int // index of the trees by name
@@ -52,16 +53,17 @@ type MultiTree struct {
 	metadata MultiTreeMetadata
 }
 
-func NewEmptyMultiTree(initialVersion uint32, cacheSize int) *MultiTree {
+func NewEmptyMultiTree(initialVersion uint32, cacheSize int, chainId string) *MultiTree {
 	return &MultiTree{
 		initialVersion: initialVersion,
 		treesByName:    make(map[string]int),
 		zeroCopy:       true,
 		cacheSize:      cacheSize,
+		chainId:        chainId,
 	}
 }
 
-func LoadMultiTree(dir string, zeroCopy bool, cacheSize int) (*MultiTree, error) {
+func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*MultiTree, error) {
 	metadata, err := readMetadata(dir)
 	if err != nil {
 		return nil, err
@@ -104,11 +106,16 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int) (*MultiTree, error)
 		metadata:       *metadata,
 		zeroCopy:       zeroCopy,
 		cacheSize:      cacheSize,
+		chainId:        chainId,
 	}
 	// initial version is nesserary for wal index conversion,
 	// overflow checked in `readMetadata`.
 	mtree.setInitialVersion(uint32(metadata.InitialVersion))
 	return mtree, nil
+}
+
+func (t *MultiTree) ChainId() string {
+	return t.chainId
 }
 
 // TreeByName returns the tree by name, returns nil if not found

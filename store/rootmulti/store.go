@@ -33,9 +33,10 @@ var (
 )
 
 type Store struct {
-	dir    string
-	db     *memiavl.DB
-	logger log.Logger
+	dir     string
+	db      *memiavl.DB
+	logger  log.Logger
+	chainId string
 
 	// to keep it comptaible with cosmos-sdk 0.46, merge the memstores into commit info
 	lastCommitInfo *types.CommitInfo
@@ -53,7 +54,7 @@ type Store struct {
 	supportExportNonSnapshotVersion bool
 }
 
-func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool) *Store {
+func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) *Store {
 	return &Store{
 		dir:                             dir,
 		logger:                          logger,
@@ -64,6 +65,7 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 		keysByName:   make(map[string]types.StoreKey),
 		stores:       make(map[types.StoreKey]types.CommitStore),
 		listeners:    make(map[types.StoreKey]*types.MemoryListener),
+		chainId:      chainId,
 	}
 }
 
@@ -207,7 +209,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	opts := rs.opts
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
-	db, err := memiavl.Load(rs.dir, opts)
+	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +347,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
-	db, err := memiavl.Load(rs.dir, opts)
+	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return errors.Wrapf(err, "fail to load memiavl at %s", rs.dir)
 	}
@@ -483,7 +485,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	opts.LoadForOverwriting = true
 
 	var err error
-	rs.db, err = memiavl.Load(rs.dir, opts)
+	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
 
 	return err
 }
@@ -550,7 +552,7 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	db := rs.db
 	if version != rs.lastCommitInfo.Version {
 		var err error
-		db, err = memiavl.Load(rs.dir, memiavl.Options{TargetVersion: uint32(version), ReadOnly: true})
+		db, err = memiavl.Load(rs.dir, memiavl.Options{TargetVersion: uint32(version), ReadOnly: true}, rs.chainId)
 		if err != nil {
 			return nil, err
 		}

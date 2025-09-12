@@ -55,6 +55,11 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				return err
 			}
 
+			chainId, err := cmd.Flags().GetString(flagChainId)
+			if err != nil {
+				return err
+			}
+
 			if len(saveSnapshot) > 0 {
 				// detect the write permission early on.
 				if err := os.MkdirAll(saveSnapshot, os.ModePerm); err != nil {
@@ -75,10 +80,10 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			)
 			storeInfos := []storetypes.StoreInfo{}
 
-			mtree := memiavl.NewEmptyMultiTree(0, 0)
+			mtree := memiavl.NewEmptyMultiTree(0, 0, chainId)
 			if len(loadSnapshot) > 0 {
 				var err error
-				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0)
+				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId)
 				if err != nil {
 					return err
 				}
@@ -173,6 +178,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 	cmd.Flags().Int(flagConcurrency, runtime.NumCPU(), "Number concurrent goroutines to parallelize the work")
 	cmd.Flags().Bool(flagCheck, false, "Check the replayed hash with the one stored in change set directory")
 	cmd.Flags().Bool(flagSave, false, "Save the verify result to change set directory, otherwise output to stdout")
+	cmd.Flags().String(flagChainId, "", "specify the chain id")
 
 	return cmd
 }
