@@ -1,11 +1,12 @@
 package client
 
 import (
-	"cosmossdk.io/store/types"
 	"fmt"
 
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/spf13/cobra"
+
+	"cosmossdk.io/store/types"
 )
 
 const (
@@ -13,7 +14,7 @@ const (
 	flagChainId = "chain-id"
 )
 
-// GetCmd returns the root command for MemIAVL CLI utilities.
+// DumpRootCmd returns the root command for MemIAVL CLI utilities.
 func DumpRootCmd(storeNames []string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "memiavl",
@@ -27,7 +28,7 @@ func DumpRootCmd(storeNames []string) *cobra.Command {
 	return cmd
 }
 
-// getDumpRootCmd returns the command to dump MemIAVL root hashes.
+// dumpRootCmd returns the command to dump MemIAVL root hashes.
 func dumpRootCmd(storeNames []string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dump-memiavl-root",
