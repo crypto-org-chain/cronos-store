@@ -14,7 +14,17 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-const MetadataFileName = "__metadata"
+const (
+	MetadataFileName = "__metadata"
+
+	LegacyCapabilityMemStoreKey = "mem_capability"
+
+	ChainMainMainNetChainId = "crypto-org-chain-mainnet-1"
+	ChainMainTestNetChainId = "testnet-croeseid-4"
+
+	ChainMainMainNetV6UpgradeHeight = 24836000
+	ChainMainTestNetV6UpgradeHeight = 22232800
+)
 
 type NamedTree struct {
 	*Tree
@@ -51,6 +61,16 @@ type MultiTree struct {
 
 	// the initial metadata loaded from disk snapshot
 	metadata MultiTreeMetadata
+}
+
+type legacyUpgrade struct {
+	ChainID       string
+	UpgradeHeight int64
+}
+
+var legacyUpgrades = []legacyUpgrade{
+	{ChainMainMainNetChainId, ChainMainMainNetV6UpgradeHeight},
+	{ChainMainTestNetChainId, ChainMainTestNetV6UpgradeHeight},
 }
 
 func NewEmptyMultiTree(initialVersion uint32, cacheSize int, chainId string) *MultiTree {
@@ -308,6 +328,22 @@ func (t *MultiTree) buildCommitInfo(version int64) *CommitInfo {
 		})
 	}
 
+	// https://github.com/cosmos/cosmos-sdk/issues/14916
+	// Notice that this code is hacky and intended only for the chain-main upgrade to v6.
+	// If you find a commitId mismatch at the version immediately before the v6 upgrade height,
+	// you may need to add this code.
+	var addLegacyCapability bool
+	for _, u := range legacyUpgrades {
+		if t.chainId == u.ChainID && version == u.UpgradeHeight-1 {
+			addLegacyCapability = true
+			break
+		}
+	}
+	if addLegacyCapability {
+		var specialInfo StoreInfo
+		specialInfo.Name = LegacyCapabilityMemStoreKey
+		infos = append(infos, specialInfo)
+	}
 	return &CommitInfo{
 		Version:    version,
 		StoreInfos: infos,
