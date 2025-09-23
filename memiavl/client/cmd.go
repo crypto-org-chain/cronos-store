@@ -45,6 +45,7 @@ func dumpRootCmd(storeNames []string) *cobra.Command {
 				InitialStores:   storeNames,
 				CreateIfMissing: false,
 				TargetVersion:   version,
+				ReadOnly:        true,
 			}
 
 			db, err := memiavl.Load(dir, opts, flagChainId)
