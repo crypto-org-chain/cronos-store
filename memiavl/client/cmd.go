@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/spf13/cobra"
@@ -54,6 +55,7 @@ func dumpRootCmd(storeNames []string) *cobra.Command {
 			}
 			defer db.Close()
 
+			sort.Strings(storeNames)
 			// Dump per-module tree roots
 			for _, storeName := range storeNames {
 				tree := db.TreeByName(storeName)
