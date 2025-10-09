@@ -13,10 +13,8 @@ import (
 )
 
 func TestMultiTreeWriteSnapshotWithContextCancellation(t *testing.T) {
-	// Create a multitree with multiple stores
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	// Add multiple stores
 	stores := []string{"store1", "store2", "store3", "store4", "store5"}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
@@ -24,12 +22,10 @@ func TestMultiTreeWriteSnapshotWithContextCancellation(t *testing.T) {
 	}
 	require.NoError(t, mtree.ApplyUpgrades(upgrades))
 
-	// Populate each store with some data to make snapshot writing take time
 	for _, storeName := range stores {
 		tree := mtree.TreeByName(storeName)
 		require.NotNil(t, tree)
 
-		// Add enough data to make snapshot writing take measurable time
 		for i := 0; i < 1000; i++ {
 			tree.set([]byte(string(rune('a'+i%26))+string(rune('a'+(i/26)%26))), []byte("value"))
 		}
@@ -38,22 +34,17 @@ func TestMultiTreeWriteSnapshotWithContextCancellation(t *testing.T) {
 	_, err := mtree.SaveVersion(true)
 	require.NoError(t, err)
 
-	// Create a context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create worker pool
 	pool := pond.New(2, 10)
 	defer pool.StopAndWait()
 
 	snapshotDir := t.TempDir()
 
-	// Cancel the context immediately to test cancellation propagation
 	cancel()
 
-	// Attempt to write snapshot with cancelled context
 	err = mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
 
-	// The error should indicate context cancellation
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
@@ -305,7 +296,7 @@ func TestMultiTreeWriteSnapshotParallelWrites(t *testing.T) {
 }
 
 // TestMultiTreeWorkerPoolQueuedTasksShouldNotStart tests that when context is
-// cancelled, tasks that are queued but haven't started executing should NOT run.
+// canceled, tasks that are queued but haven't started executing should NOT run.
 // This test DEMONSTRATES THE BUG at line 381 where context.Background() is used
 // instead of the passed ctx, causing all queued tasks to execute even after cancellation.
 func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
@@ -352,7 +343,7 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 
 	// Since we're using empty trees, tree.WriteSnapshotWithContext doesn't actually
 	// check ctx (no data to write means no ctx.Done() check in writeLeaf).
-	// So all tasks will complete successfully despite ctx being cancelled.
+	// So all tasks will complete successfully despite ctx being canceled.
 
 	err = mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
 
@@ -360,16 +351,16 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 	// - All tasks get queued
 	// - Worker executes them one by one
 	// - Empty trees don't trigger context checks
-	// - Result: err == nil (SUCCESS despite cancelled context)
+	// - Result: err == nil (SUCCESS despite canceled context)
 	//
 	// With the FIX (using ctx at line 381):
-	// - Worker pool's group context would be cancelled
+	// - Worker pool's group context would be canceled
 	// - Queued tasks wouldn't start
 	// - Result: err == context.Canceled
 
 	if err == nil {
 		// This proves the bug exists!
-		t.Logf("BUG REPRODUCED: All %d tasks completed despite cancelled context!", numStores)
+		t.Logf("BUG REPRODUCED: All %d tasks completed despite canceled context!", numStores)
 		t.Logf("Tasks executed: %d", tasksExecuted.Load())
 		t.Logf("This happens because line 381 uses context.Background() instead of ctx")
 

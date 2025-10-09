@@ -1,3 +1,4 @@
 - [#1](https://github.com/crypto-org-chain/cronos-store/pull/1) feature: add store, memiavl, versiondb.
 - [#3](https://github.com/crypto-org-chain/cronos-store/pull/3) feat(memiavl): MultiTree add chainId.
 - [#4](https://github.com/crypto-org-chain/cronos-store/pull/4) feat(versiondb/client): add dump versiondb changeset cmd.
+- [#7](https://github.com/crypto-org-chain/cronos-store/pull/7) fix: memiavl WriteSnapshotWithContext cancel using wrong ctx.
