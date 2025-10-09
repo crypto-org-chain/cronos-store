@@ -214,6 +214,7 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 	if statErr == nil {
 		// Directory exists, but may be incomplete - this is fine
 		// The important thing is we stopped and returned an error
+		t.Logf("this is acceptable")
 	}
 }
 
