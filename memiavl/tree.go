@@ -216,7 +216,11 @@ func (t *Tree) GetByIndex(index int64) ([]byte, []byte) {
 func (t *Tree) Get(key []byte) []byte {
 	if t.cache != nil {
 		if node := t.cache.Get(key); node != nil {
-			return node.(*cacheNode).value
+			value := node.(*cacheNode).value
+			if !t.zeroCopy {
+				value = bytes.Clone(value)
+			}
+			return value
 		}
 	}
 
@@ -226,7 +230,13 @@ func (t *Tree) Get(key []byte) []byte {
 	}
 
 	if t.cache != nil {
-		t.cache.Add(&cacheNode{key, value})
+		cacheKey := key
+		cacheValue := value
+		if !t.zeroCopy {
+			cacheKey = bytes.Clone(key)
+			cacheValue = bytes.Clone(cacheValue)
+		}
+		t.cache.Add(&cacheNode{cacheKey, cacheValue})
 	}
 	return value
 }
