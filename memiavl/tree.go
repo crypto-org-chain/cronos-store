@@ -11,13 +11,6 @@ import (
 
 var emptyHash = sha256.New().Sum(nil)
 
-func NewCache(cacheSize int) cache.Cache {
-	if cacheSize == 0 {
-		return nil
-	}
-	return cache.New(cacheSize)
-}
-
 // Tree verify change sets by replay them to rebuild iavl tree and verify the root hashes
 type Tree struct {
 	version, cowVersion uint32
@@ -50,7 +43,6 @@ func NewEmptyTree(version uint64, cacheSize int) *Tree {
 		version: uint32(version),
 		// no need to copy if the tree is not backed by snapshot
 		zeroCopy: true,
-		cache:    NewCache(cacheSize),
 	}
 }
 
@@ -74,7 +66,6 @@ func NewFromSnapshot(snapshot *Snapshot, zeroCopy bool, cacheSize int) *Tree {
 		version:  snapshot.Version(),
 		snapshot: snapshot,
 		zeroCopy: zeroCopy,
-		cache:    NewCache(cacheSize),
 	}
 
 	if !snapshot.IsEmpty() {
@@ -122,8 +113,6 @@ func (t *Tree) Copy(cacheSize int) *Tree {
 		t.cowVersion = t.version
 	}
 	newTree := *t
-	// cache is not copied along because it's not thread-safe to access
-	newTree.cache = NewCache(cacheSize)
 	return &newTree
 }
 
