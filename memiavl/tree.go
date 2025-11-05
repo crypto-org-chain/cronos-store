@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"hash/crc32"
 	"math"
 	"sync"
 
@@ -113,15 +114,7 @@ func (c *sharedCache) Len() int {
 }
 
 func hashKey(key []byte) uint32 {
-	if len(key) == 0 {
-		return 0
-	}
-	var h uint32 = 2166136261
-	for _, b := range key {
-		h ^= uint32(b)
-		h *= 16777619
-	}
-	return h
+	return crc32.ChecksumIEEE(key)
 }
 
 // Tree verify change sets by replay them to rebuild iavl tree and verify the root hashes
