@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/cosmos/iavl/cache"
 )
@@ -15,7 +16,112 @@ func NewCache(cacheSize int) cache.Cache {
 	if cacheSize == 0 {
 		return nil
 	}
-	return cache.New(cacheSize)
+	return newSharedCache(cacheSize)
+}
+
+const maxSharedCacheShards = 16
+
+type sharedCache struct {
+	shards     [maxSharedCacheShards]cacheShard
+	shardCount uint32
+}
+
+type cacheShard struct {
+	mu    sync.RWMutex
+	cache cache.Cache
+}
+
+func newSharedCache(size int) cache.Cache {
+	shardCount := maxSharedCacheShards
+	sc := &sharedCache{shardCount: uint32(shardCount)}
+	base := size / shardCount
+	rem := size % shardCount
+	for i := 0; i < shardCount; i++ {
+		capacity := base
+		if capacity == 0 {
+			capacity = 1
+		}
+		if i < rem {
+			capacity++
+		}
+		sc.shards[i].cache = cache.New(capacity)
+	}
+	return sc
+}
+
+func (c *sharedCache) shardForKey(key []byte) *cacheShard {
+	if c.shardCount <= 1 {
+		return &c.shards[0]
+	}
+	index := hashKey(key) % c.shardCount
+	return &c.shards[index]
+}
+
+func (c *sharedCache) Add(node cache.Node) cache.Node {
+	key := node.GetKey()
+	shard := c.shardForKey(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if shard.cache == nil {
+		return nil
+	}
+	return shard.cache.Add(node)
+}
+
+func (c *sharedCache) Get(key []byte) cache.Node {
+	shard := c.shardForKey(key)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if shard.cache == nil {
+		return nil
+	}
+	return shard.cache.Get(key)
+}
+
+func (c *sharedCache) Has(key []byte) bool {
+	shard := c.shardForKey(key)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if shard.cache == nil {
+		return false
+	}
+	return shard.cache.Has(key)
+}
+
+func (c *sharedCache) Remove(key []byte) cache.Node {
+	shard := c.shardForKey(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if shard.cache == nil {
+		return nil
+	}
+	return shard.cache.Remove(key)
+}
+
+func (c *sharedCache) Len() int {
+	total := 0
+	count := int(c.shardCount)
+	for i := 0; i < count; i++ {
+		shard := &c.shards[i]
+		shard.mu.RLock()
+		if shard.cache != nil {
+			total += shard.cache.Len()
+		}
+		shard.mu.RUnlock()
+	}
+	return total
+}
+
+func hashKey(key []byte) uint32 {
+	if len(key) == 0 {
+		return 0
+	}
+	var h uint32 = 2166136261
+	for _, b := range key {
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	return h
 }
 
 // Tree verify change sets by replay them to rebuild iavl tree and verify the root hashes
@@ -25,7 +131,7 @@ type Tree struct {
 	root     Node
 	snapshot *Snapshot
 
-	// simple lru cache provided by iavl library
+	// shared cache wrapper providing thread-safe access to cached nodes
 	cache cache.Cache
 
 	// when true, the get and iterator methods could return a slice pointing to mmaped blob files.
@@ -122,7 +228,7 @@ func (t *Tree) Copy(cacheSize int) *Tree {
 		t.cowVersion = t.version
 	}
 	newTree := *t
-	// cache is not copied along because it's not thread-safe to access
+	// recreate cache for the copy to keep eviction state independent per tree
 	newTree.cache = NewCache(cacheSize)
 	return &newTree
 }
