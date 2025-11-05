@@ -23,8 +23,7 @@ func NewCache(cacheSize int) cache.Cache {
 const maxSharedCacheShards = 16
 
 type sharedCache struct {
-	shards     [maxSharedCacheShards]cacheShard
-	shardCount uint32
+	shards [maxSharedCacheShards]cacheShard
 }
 
 type cacheShard struct {
@@ -33,11 +32,10 @@ type cacheShard struct {
 }
 
 func newSharedCache(size int) cache.Cache {
-	shardCount := maxSharedCacheShards
-	sc := &sharedCache{shardCount: uint32(shardCount)}
-	base := size / shardCount
-	rem := size % shardCount
-	for i := 0; i < shardCount; i++ {
+	base := size / maxSharedCacheShards
+	rem := size % maxSharedCacheShards
+	sc := &sharedCache{}
+	for i := 0; i < maxSharedCacheShards; i++ {
 		capacity := base
 		if capacity == 0 {
 			capacity = 1
@@ -51,11 +49,7 @@ func newSharedCache(size int) cache.Cache {
 }
 
 func (c *sharedCache) shardForKey(key []byte) *cacheShard {
-	if c.shardCount <= 1 {
-		return &c.shards[0]
-	}
-	index := hashKey(key) % c.shardCount
-	return &c.shards[index]
+	return &c.shards[hashKey(key)&(maxSharedCacheShards-1)]
 }
 
 func (c *sharedCache) Add(node cache.Node) cache.Node {
@@ -101,8 +95,7 @@ func (c *sharedCache) Remove(key []byte) cache.Node {
 
 func (c *sharedCache) Len() int {
 	total := 0
-	count := int(c.shardCount)
-	for i := 0; i < count; i++ {
+	for i := 0; i < maxSharedCacheShards; i++ {
 		shard := &c.shards[i]
 		shard.mu.RLock()
 		if shard.cache != nil {
