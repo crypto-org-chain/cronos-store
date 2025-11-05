@@ -53,6 +53,9 @@ func (c *sharedCache) shardForKey(key []byte) *cacheShard {
 }
 
 func (c *sharedCache) Add(node cache.Node) cache.Node {
+	if node == nil {
+		return nil
+	}
 	key := node.GetKey()
 	shard := c.shardForKey(key)
 	shard.mu.Lock()
@@ -65,8 +68,8 @@ func (c *sharedCache) Add(node cache.Node) cache.Node {
 
 func (c *sharedCache) Get(key []byte) cache.Node {
 	shard := c.shardForKey(key)
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 	if shard.cache == nil {
 		return nil
 	}
