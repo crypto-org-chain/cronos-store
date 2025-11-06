@@ -3,6 +3,7 @@ package memiavl
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"sort"
 	"testing"
@@ -184,6 +185,79 @@ func BenchmarkRandomSet(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkTreeGet(b *testing.B) {
+	benchmarkTreeGet(b, false)
+}
+
+func BenchmarkTreeGetParallel(b *testing.B) {
+	benchmarkTreeGet(b, true)
+}
+
+func benchmarkTreeGet(b *testing.B, parallel bool) {
+	const keyCount = 1 << 15
+	value := []byte("value")
+	cacheSizes := []int{0, 1024, maxSharedCacheShards * 1024}
+	for _, cacheSize := range cacheSizes {
+		b.Run(fmt.Sprintf("cache=%d", cacheSize), func(b *testing.B) {
+			tree := New(cacheSize)
+			keys := make([][]byte, keyCount)
+			for i := 0; i < keyCount; i++ {
+				key := make([]byte, 8)
+				binary.BigEndian.PutUint64(key, uint64(i))
+				keys[i] = key
+				tree.set(key, value)
+			}
+
+			mask := keyCount - 1
+			b.ResetTimer()
+			if parallel {
+				b.RunParallel(func(pb *testing.PB) {
+					idx := 0
+					for pb.Next() {
+						key := keys[idx&mask]
+						if tree.Get(key) == nil {
+							panic("unexpected cache miss")
+						}
+						idx++
+					}
+				})
+				return
+			}
+
+			for i := 0; i < b.N; i++ {
+				key := keys[i&mask]
+				if tree.Get(key) == nil {
+					panic("unexpected cache miss")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkTreeSet(b *testing.B) {
+	const keyCount = 1 << 14
+	value := []byte("value")
+	cacheSizes := []int{0, 1024, maxSharedCacheShards * 1024}
+	for _, cacheSize := range cacheSizes {
+		b.Run(fmt.Sprintf("cache=%d", cacheSize), func(b *testing.B) {
+			tree := New(cacheSize)
+			keys := make([][]byte, keyCount)
+			for i := 0; i < keyCount; i++ {
+				key := make([]byte, 8)
+				binary.BigEndian.PutUint64(key, uint64(i))
+				keys[i] = key
+			}
+
+			mask := keyCount - 1
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				idx := i & mask
+				tree.set(keys[idx], value)
+			}
+		})
+	}
 }
 
 type itemT struct {
