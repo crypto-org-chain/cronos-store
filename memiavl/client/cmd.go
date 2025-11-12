@@ -42,6 +42,11 @@ func dumpRootCmd(storeNames []string) *cobra.Command {
 				return err
 			}
 
+			chainID, err := cmd.Flags().GetString(flagChainId)
+			if err != nil {
+				return err
+			}
+
 			opts := memiavl.Options{
 				InitialStores:   storeNames,
 				CreateIfMissing: false,
@@ -49,7 +54,7 @@ func dumpRootCmd(storeNames []string) *cobra.Command {
 				ReadOnly:        true,
 			}
 
-			db, err := memiavl.Load(dir, opts, flagChainId)
+			db, err := memiavl.Load(dir, opts, chainID)
 			if err != nil {
 				return fmt.Errorf("failed to load MemIAVL DB: %w", err)
 			}
