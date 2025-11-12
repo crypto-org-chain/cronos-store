@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/cosmos/iavl/cache"
 )
@@ -15,7 +16,42 @@ func NewCache(cacheSize int) cache.Cache {
 	if cacheSize == 0 {
 		return nil
 	}
-	return cache.New(cacheSize)
+	return &threadSafeCache{cache: cache.New(cacheSize)}
+}
+
+type threadSafeCache struct {
+	mu    sync.Mutex
+	cache cache.Cache
+}
+
+func (c *threadSafeCache) Add(node cache.Node) cache.Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cache.Add(node)
+}
+
+func (c *threadSafeCache) Get(key []byte) cache.Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cache.Get(key)
+}
+
+func (c *threadSafeCache) Has(key []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cache.Has(key)
+}
+
+func (c *threadSafeCache) Remove(key []byte) cache.Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cache.Remove(key)
+}
+
+func (c *threadSafeCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cache.Len()
 }
 
 // Tree verify change sets by replay them to rebuild iavl tree and verify the root hashes
@@ -25,7 +61,7 @@ type Tree struct {
 	root     Node
 	snapshot *Snapshot
 
-	// simple lru cache provided by iavl library
+	// thread-safe cache wrapper around iavl lru cache
 	cache cache.Cache
 
 	// when true, the get and iterator methods could return a slice pointing to mmaped blob files.

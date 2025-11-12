@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 
 	db "github.com/cosmos/cosmos-db"
@@ -309,4 +310,28 @@ func TestGetByIndex(t *testing.T) {
 		require.Equal(t, pair.Key, k)
 		require.Equal(t, pair.Value, v)
 	}
+}
+
+func TestNewCacheConcurrentAccess(t *testing.T) {
+	cache := NewCache(128)
+	require.NotNil(t, cache)
+	const workers = 32
+	const opsPerWorker = 512
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workerID := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < opsPerWorker; j++ {
+				key := []byte(fmt.Sprintf("worker-%d-%d", workerID, j))
+				cache.Add(&cacheNode{key: key, value: []byte{byte(j)}})
+				cache.Get(key)
+				cache.Has(key)
+				cache.Remove(key)
+			}
+		}()
+	}
+	wg.Wait()
+	require.LessOrEqual(t, cache.Len(), 128)
 }
