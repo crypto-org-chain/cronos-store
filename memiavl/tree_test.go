@@ -340,7 +340,6 @@ func TestGetCacheReturnsCopyDisableZeroCopy(t *testing.T) {
 
 	require.Equal(t, byte('x'), first[0])
 	require.Equal(t, byte('y'), second[1])
-
 }
 
 func TestApplyChangeSetClonesInputDisableZeroCopy(t *testing.T) {
