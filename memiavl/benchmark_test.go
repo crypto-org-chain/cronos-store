@@ -196,6 +196,7 @@ func BenchmarkTreeGetParallel(b *testing.B) {
 }
 
 func benchmarkTreeGet(b *testing.B, parallel bool) {
+	b.Helper()
 	const keyCount = 1 << 15
 	value := []byte("value")
 	cacheSizes := []int{0, 1024, maxSharedCacheShards * 1024}
