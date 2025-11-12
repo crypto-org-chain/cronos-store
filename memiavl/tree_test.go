@@ -8,6 +8,7 @@ import (
 
 	db "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/iavl"
+	iavlcache "github.com/cosmos/iavl/cache"
 	"github.com/stretchr/testify/require"
 
 	"cosmossdk.io/log"
@@ -309,4 +310,28 @@ func TestGetByIndex(t *testing.T) {
 		require.Equal(t, pair.Key, k)
 		require.Equal(t, pair.Value, v)
 	}
+}
+
+func TestNewCacheRespectsSize(t *testing.T) {
+	sizes := []int{1, 5, 32}
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
+			cache := NewCache(size)
+			require.NotNil(t, cache)
+			for i := 0; i < size*4; i++ {
+				key := []byte(fmt.Sprintf("cache-key-%d", i))
+				cache.Add(&cacheNode{key: key, value: []byte{byte(i)}})
+			}
+			require.LessOrEqual(t, cache.Len(), size)
+		})
+	}
+}
+
+func TestSharedCacheAddNilPanics(t *testing.T) {
+	cache := NewCache(4)
+	require.NotNil(t, cache)
+	var node iavlcache.Node
+	require.Panics(t, func() {
+		cache.Add(node)
+	})
 }
