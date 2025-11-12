@@ -143,6 +143,10 @@ func (t *Tree) set(key, value []byte) {
 		// the value could be nil when replaying changes from write-ahead-log because of protobuf decoding
 		value = []byte{}
 	}
+	if !t.zeroCopy {
+		key = bytes.Clone(key)
+		value = bytes.Clone(value)
+	}
 	t.root, _ = setRecursive(t.root, key, value, t.version+1, t.cowVersion)
 	if t.cache != nil {
 		t.cache.Add(&cacheNode{key, value})

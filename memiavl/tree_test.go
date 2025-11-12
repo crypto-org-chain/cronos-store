@@ -342,3 +342,27 @@ func TestGetCacheReturnsCopyDisableZeroCopy(t *testing.T) {
 	require.Equal(t, byte('y'), second[1])
 
 }
+
+func TestApplyChangeSetClonesInputDisableZeroCopy(t *testing.T) {
+	tree := New(8)
+	tree.SetZeroCopy(false)
+
+	key := []byte("key1")
+	lookupKey := append([]byte{}, key...)
+	value := []byte("val1")
+	expectedValue := append([]byte{}, value...)
+
+	changeSet := ChangeSet{
+		Pairs: []*KVPair{
+			{Key: key, Value: value},
+		},
+	}
+
+	tree.ApplyChangeSet(changeSet)
+
+	key[0] = 'x'
+	value[0] = 'y'
+
+	got := tree.Get(lookupKey)
+	require.Equal(t, expectedValue, got)
+}
