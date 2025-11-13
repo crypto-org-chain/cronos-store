@@ -3,6 +3,7 @@ package memiavl
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"sort"
 	"testing"
@@ -48,26 +49,6 @@ func BenchmarkRandomGet(b *testing.B) {
 	})
 	b.Run("memiavl-disk", func(b *testing.B) {
 		diskTree := NewFromSnapshot(snapshot, true, 0)
-		require.Equal(b, targetValue, diskTree.Get(targetKey))
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = diskTree.Get(targetKey)
-		}
-	})
-	b.Run("memiavl-disk-cache-hit", func(b *testing.B) {
-		diskTree := NewFromSnapshot(snapshot, true, 1)
-		require.Equal(b, targetValue, diskTree.Get(targetKey))
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = diskTree.Get(targetKey)
-		}
-	})
-	b.Run("memiavl-disk-cache-miss", func(b *testing.B) {
-		diskTree := NewFromSnapshot(snapshot, true, 0)
-		// enforce an empty cache to emulate cache miss
-		diskTree.cache = iavlcache.New(0)
 		require.Equal(b, targetValue, diskTree.Get(targetKey))
 
 		b.ResetTimer()
@@ -184,6 +165,80 @@ func BenchmarkRandomSet(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkTreeGet(b *testing.B) {
+	benchmarkTreeGet(b, false)
+}
+
+func BenchmarkTreeGetParallel(b *testing.B) {
+	benchmarkTreeGet(b, true)
+}
+
+func benchmarkTreeGet(b *testing.B, parallel bool) {
+	b.Helper()
+	const keyCount = 1 << 15
+	value := []byte("value")
+	cacheSizes := []int{0, 1024, 16 * 1024}
+	for _, cacheSize := range cacheSizes {
+		b.Run(fmt.Sprintf("cache=%d", cacheSize), func(b *testing.B) {
+			tree := New(cacheSize)
+			keys := make([][]byte, keyCount)
+			for i := 0; i < keyCount; i++ {
+				key := make([]byte, 8)
+				binary.BigEndian.PutUint64(key, uint64(i))
+				keys[i] = key
+				tree.set(key, value)
+			}
+
+			mask := keyCount - 1
+			b.ResetTimer()
+			if parallel {
+				b.RunParallel(func(pb *testing.PB) {
+					idx := 0
+					for pb.Next() {
+						key := keys[idx&mask]
+						if tree.Get(key) == nil {
+							panic("unexpected cache miss")
+						}
+						idx++
+					}
+				})
+				return
+			}
+
+			for i := 0; i < b.N; i++ {
+				key := keys[i&mask]
+				if tree.Get(key) == nil {
+					panic("unexpected cache miss")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkTreeSet(b *testing.B) {
+	const keyCount = 1 << 14
+	value := []byte("value")
+	cacheSizes := []int{0, 1024, 16 * 1024}
+	for _, cacheSize := range cacheSizes {
+		b.Run(fmt.Sprintf("cache=%d", cacheSize), func(b *testing.B) {
+			tree := New(cacheSize)
+			keys := make([][]byte, keyCount)
+			for i := 0; i < keyCount; i++ {
+				key := make([]byte, 8)
+				binary.BigEndian.PutUint64(key, uint64(i))
+				keys[i] = key
+			}
+
+			mask := keyCount - 1
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				idx := i & mask
+				tree.set(keys[idx], value)
+			}
+		})
+	}
 }
 
 type itemT struct {
