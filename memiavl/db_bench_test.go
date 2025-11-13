@@ -14,6 +14,7 @@ func BenchmarkApplyChangeSet1000(b *testing.B) {
 }
 
 func benchmarkApplyChangeSet(b *testing.B, storeCount int) {
+	b.Helper()
 	db := newBenchmarkDB(storeCount)
 	storeNames := make([]string, storeCount)
 	changeSets := make([]ChangeSet, storeCount)
