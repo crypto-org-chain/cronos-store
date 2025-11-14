@@ -17,6 +17,7 @@ import (
 	"github.com/alitto/pond"
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/iavl"
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/crypto-org-chain/cronos-store/versiondb/tsrocksdb"
 	"github.com/golang/snappy"
 	"github.com/spf13/cast"
@@ -57,10 +58,6 @@ func DumpChangeSetCmd(opts Options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			concurrency, err := cmd.Flags().GetInt(flagConcurrency)
-			if err != nil {
-				return err
-			}
 			chunkSize, err := cmd.Flags().GetInt(flagChunkSize)
 			if err != nil {
 				return err
@@ -78,6 +75,10 @@ func DumpChangeSetCmd(opts Options) *cobra.Command {
 				return err
 			}
 			iavlVersion, err := cmd.Flags().GetInt(flagIAVLVersion)
+			if err != nil {
+				return err
+			}
+			concurrency, err := cmd.Flags().GetInt(flagConcurrency)
 			if err != nil {
 				return err
 			}
@@ -174,6 +175,135 @@ func DumpChangeSetCmd(opts Options) *cobra.Command {
 	return cmd
 }
 
+func DumpMemiavlChangeSetCmd(opts Options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "dump-memiavl outDir",
+		Short: "Extract changesets from memiavl versions and save to plain file format",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := server.GetServerContextFromCmd(cmd)
+			if err := ctx.Viper.BindPFlags(cmd.Flags()); err != nil {
+				return err
+			}
+
+			outDir := args[0]
+			if err := os.MkdirAll(outDir, os.ModePerm); err != nil {
+				return err
+			}
+
+			startVersion, err := cmd.Flags().GetInt64(flagStartVersion)
+			if err != nil {
+				return err
+			}
+			endVersion, err := cmd.Flags().GetInt64(flagEndVersion)
+			if err != nil {
+				return err
+			}
+			chunkSize, err := cmd.Flags().GetInt(flagChunkSize)
+			if err != nil {
+				return err
+			}
+			zlibLevel, err := cmd.Flags().GetInt(flagZlibLevel)
+			if err != nil {
+				return err
+			}
+			stores, err := GetStoresOrDefault(cmd, opts.DefaultStores)
+			if err != nil {
+				return err
+			}
+			if len(stores) == 0 {
+				return fmt.Errorf("no stores ")
+			}
+			chainID, err := cmd.Flags().GetString(flagChainId)
+			if err != nil {
+				return err
+			}
+
+			memiavlDir := filepath.Join(ctx.Viper.GetString(flags.FlagHome), "data", "memiavl.db")
+			db, err := memiavl.Load(memiavlDir, memiavl.Options{ReadOnly: true, Logger: memiavl.NewNopLogger()}, chainID)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			firstVersion, err := db.FirstVersion()
+			if err != nil {
+				return err
+			}
+			if firstVersion == 0 {
+				fmt.Println("memiavl wal is empty, nothing to dump")
+				return nil
+			}
+			if startVersion == 0 || startVersion < firstVersion {
+				startVersion = firstVersion
+			}
+
+			if endVersion == 0 {
+				endVersion = db.Version() + 1
+			}
+			if endVersion <= startVersion {
+				return fmt.Errorf("invalid version range: %d >= %d", startVersion, endVersion)
+			}
+
+			storeFirstVersions, err := db.FirstStoreVersions(stores)
+			if err != nil {
+				return err
+			}
+
+			for _, store := range stores {
+				tree := db.TreeByName(store)
+				if tree == nil {
+					fmt.Println("skip unknown store", store)
+					continue
+				}
+
+				storeStart := startVersion
+				if v, ok := storeFirstVersions[store]; ok && v > storeStart {
+					storeStart = v
+				}
+				if storeStart >= endVersion {
+					fmt.Printf("skip store %s due to empty range\n", store)
+					continue
+				}
+
+				fmt.Println("begin store", store, "from", storeStart, "to", endVersion, time.Now().Format(time.RFC3339))
+
+				var chunks []chunk
+				for i := storeStart; i < endVersion; i += int64(chunkSize) {
+					end := i + int64(chunkSize)
+					if end > endVersion {
+						end = endVersion
+					}
+
+					taskFile := filepath.Join(outDir, fmt.Sprintf("tmp-%s-%d.snappy", store, i))
+					if err := dumpRangeBlocksMemiavl(taskFile, tree, Range{Start: i, End: end}); err != nil {
+						return err
+					}
+
+					chunks = append(chunks, chunk{
+						store: store, beginVersion: i, taskFiles: []string{taskFile},
+					})
+				}
+
+				for _, chunk := range chunks {
+					if err := chunk.collect(outDir, zlibLevel); err != nil {
+						return err
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+	cmd.Flags().Int64(flagStartVersion, 0, "The start version")
+	cmd.Flags().Int64(flagEndVersion, 0, "The end version, exclusive, default to latestVersion+1")
+	cmd.Flags().Int(flagChunkSize, DefaultChunkSize, "size of the block chunk")
+	cmd.Flags().Int(flagZlibLevel, 6, "level of zlib compression, 0: plain data, 1: fast, 9: best, default: 6, if not 0 the output file name will have .zz extension")
+	cmd.Flags().String(flagStores, "", "list of store names, default to the current store list in application")
+	cmd.Flags().String(flagChainId, "", "specify the chain id")
+	return cmd
+}
+
 // Range represents a range `[start, end)`
 type Range struct {
 	Start, End int64
@@ -215,6 +345,27 @@ func dumpRangeBlocks(outputFile string, tree *iavl.ImmutableTree, blockRange Ran
 	return writer.Flush()
 }
 
+func dumpRangeBlocksMemiavl(outputFile string, tree *memiavl.Tree, blockRange Range) (returnErr error) {
+	fp, err := createFile(outputFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := fp.Close(); returnErr == nil {
+			returnErr = err
+		}
+	}()
+
+	writer := snappy.NewBufferedWriter(fp)
+	if err := tree.TraverseStateChanges(blockRange.Start, blockRange.End-1, func(version int64, changeSet *memiavl.ChangeSet) error {
+		return WriteChangeSet(writer, version, convertMemiavlChangeSet(changeSet))
+	}); err != nil {
+		return err
+	}
+
+	return writer.Flush()
+}
+
 type chunk struct {
 	store        string
 	beginVersion int64
@@ -234,8 +385,10 @@ func (c *chunk) collect(outDir string, zlibLevel int) (returnErr error) {
 		output += ZlibFileSuffix
 	}
 
-	if err := c.taskGroup.Wait(); err != nil {
-		return err
+	if c.taskGroup != nil {
+		if err := c.taskGroup.Wait(); err != nil {
+			return err
+		}
 	}
 
 	fp, err := createFile(output)
@@ -294,6 +447,18 @@ func copyTmpFile(writer io.Writer, tmpFile string) error {
 
 func createFile(name string) (*os.File, error) {
 	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+}
+
+func convertMemiavlChangeSet(cs *memiavl.ChangeSet) *iavl.ChangeSet {
+	pairs := make([]*iavl.KVPair, len(cs.Pairs))
+	for i, pair := range cs.Pairs {
+		pairs[i] = &iavl.KVPair{
+			Delete: pair.Delete,
+			Key:    pair.Key,
+			Value:  pair.Value,
+		}
+	}
+	return &iavl.ChangeSet{Pairs: pairs}
 }
 
 func getFirstVersion(db dbm.DB, iavlVersion int) (int64, error) {
