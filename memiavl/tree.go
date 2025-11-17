@@ -322,7 +322,7 @@ func (db *DB) attachTraverseStateChanges() {
 			continue
 		}
 		storeName := t.Name
-		t.Tree.setTraverseStateChanges(func(startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
+		t.setTraverseStateChanges(func(startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
 			return db.traverseStateChanges(storeName, startVersion, endVersion, fn)
 		})
 	}
