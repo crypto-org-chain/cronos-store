@@ -14,7 +14,7 @@ require (
 	github.com/cosmos/ics23/go v0.10.0
 	github.com/ledgerwatch/erigon-lib v0.0.0-20230210071639-db0e7ed11263
 	github.com/spf13/cobra v1.8.0
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.9.0
 	github.com/tidwall/btree v1.7.0
 	github.com/tidwall/gjson v1.10.2
 	github.com/tidwall/wal v1.1.7
@@ -24,7 +24,7 @@ require (
 
 require (
 	cosmossdk.io/errors v1.0.0 // indirect
-	cosmossdk.io/math v1.3.0 // indirect
+	cosmossdk.io/math v1.4.0 // indirect
 	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.2 // indirect
