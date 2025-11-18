@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/alitto/pond"
 	dbm "github.com/cosmos/cosmos-db"
@@ -101,7 +100,7 @@ func DumpChangeSetCmd(opts Options) *cobra.Command {
 
 			// we handle multiple stores sequentially, because different stores don't share much in db, handle concurrently reduces cache efficiency.
 			for _, store := range stores {
-				fmt.Println("begin store", store, time.Now().Format(time.RFC3339))
+				fmt.Println("begin store", store)
 
 				// find the first version in the db, reading raw db because no public api for it.
 				prefix := []byte(fmt.Sprintf(tsrocksdb.StorePrefixTpl, store))
@@ -266,7 +265,7 @@ func DumpMemiavlChangeSetCmd(opts Options) *cobra.Command {
 					continue
 				}
 
-				fmt.Println("begin store", store, "from", storeStart, "to", endVersion, time.Now().Format(time.RFC3339))
+				fmt.Printf("begin store %s from %d to %d\n", store, storeStart, endVersion)
 
 				var chunks []chunk
 				for i := storeStart; i < endVersion; i += int64(chunkSize) {
