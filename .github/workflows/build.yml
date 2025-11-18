@@ -47,7 +47,7 @@ jobs:
         run: |
           git clone https://github.com/facebook/rocksdb.git
           cd rocksdb
-          git checkout v9.11.2
+          git checkout v10.4.2
           mkdir build && cd build
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON
