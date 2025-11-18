@@ -294,6 +294,72 @@ func TestLoadVersion(t *testing.T) {
 	}
 }
 
+func TestTreeTraverseStateChanges(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{"test", "other"},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	applyAndCommit := func(changeSets []*NamedChangeSet) {
+		require.NoError(t, db.ApplyChangeSets(changeSets))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+
+	applyAndCommit([]*NamedChangeSet{
+		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	})
+	applyAndCommit([]*NamedChangeSet{
+		{Name: "other", Changeset: ChangeSet{Pairs: mockKVPairs("baz", "qux")}},
+	})
+	applyAndCommit([]*NamedChangeSet{
+		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "baz")}},
+	})
+
+	firstVersion, err := db.FirstVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, firstVersion)
+	starts, err := db.FirstStoreVersions([]string{"test", "other"})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, starts["test"])
+	require.EqualValues(t, 2, starts["other"])
+
+	tree := db.TreeByName("test")
+	require.NotNil(t, tree)
+
+	var versions []int64
+	var changeSets []ChangeSet
+	require.NoError(t, tree.TraverseStateChanges(0, 10, func(version int64, cs *ChangeSet) error {
+		versions = append(versions, version)
+		copied := ChangeSet{}
+		for _, pair := range cs.Pairs {
+			cp := &KVPair{Delete: pair.Delete}
+			if len(pair.Key) > 0 {
+				cp.Key = append([]byte(nil), pair.Key...)
+			}
+			if len(pair.Value) > 0 {
+				cp.Value = append([]byte(nil), pair.Value...)
+			}
+			copied.Pairs = append(copied.Pairs, cp)
+		}
+		changeSets = append(changeSets, copied)
+		return nil
+	}))
+
+	require.Equal(t, []int64{1, 2, 3}, versions)
+	require.Len(t, changeSets, 3)
+	require.Len(t, changeSets[0].Pairs, 1)
+	require.Equal(t, []byte("foo"), changeSets[0].Pairs[0].Key)
+	require.Equal(t, []byte("bar"), changeSets[0].Pairs[0].Value)
+	require.Len(t, changeSets[1].Pairs, 0)
+	require.Len(t, changeSets[2].Pairs, 1)
+	require.Equal(t, []byte("foo"), changeSets[2].Pairs[0].Key)
+	require.Equal(t, []byte("baz"), changeSets[2].Pairs[0].Value)
+}
+
 func TestZeroCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{InitialStores: []string{"test", "test2"}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)
