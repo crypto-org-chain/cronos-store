@@ -394,31 +394,16 @@ func (db *DB) applyChangeSet(name string, changeSet ChangeSet) error {
 func (db *DB) setPendingChangeSets(changeSets []*NamedChangeSet) {
 	db.pendingLog.Changesets = changeSets
 	if len(changeSets) == 0 {
-		if db.pendingChangesets != nil {
-			clear(db.pendingChangesets)
-		}
+		db.clearPendingChangesetMap()
 		return
 	}
 
-	m := db.pendingChangesets
-	if m == nil {
-		m = make(map[string]*NamedChangeSet, len(changeSets))
-	} else {
-		clear(m)
-	}
-	for _, cs := range changeSets {
-		if cs != nil {
-			m[cs.Name] = cs
-		}
-	}
-	db.pendingChangesets = m
+	db.rebuildPendingChangesetMap(changeSets)
 }
 
 func (db *DB) ensurePendingChangesetMap() {
 	if len(db.pendingLog.Changesets) == 0 {
-		if db.pendingChangesets != nil {
-			clear(db.pendingChangesets)
-		}
+		db.clearPendingChangesetMap()
 		return
 	}
 
@@ -426,13 +411,23 @@ func (db *DB) ensurePendingChangesetMap() {
 		return
 	}
 
+	db.rebuildPendingChangesetMap(db.pendingLog.Changesets)
+}
+
+func (db *DB) clearPendingChangesetMap() {
+	if db.pendingChangesets != nil {
+		clear(db.pendingChangesets)
+	}
+}
+
+func (db *DB) rebuildPendingChangesetMap(changeSets []*NamedChangeSet) {
 	m := db.pendingChangesets
 	if m == nil {
-		m = make(map[string]*NamedChangeSet, len(db.pendingLog.Changesets))
+		m = make(map[string]*NamedChangeSet, len(changeSets))
 	} else {
 		clear(m)
 	}
-	for _, cs := range db.pendingLog.Changesets {
+	for _, cs := range changeSets {
 		if cs != nil {
 			m[cs.Name] = cs
 		}
