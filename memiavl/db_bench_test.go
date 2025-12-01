@@ -13,6 +13,14 @@ func BenchmarkApplyChangeSet1000(b *testing.B) {
 	benchmarkApplyChangeSet(b, 1000)
 }
 
+func BenchmarkApplyChangeSets100(b *testing.B) {
+	benchmarkApplyChangeSets(b, 100)
+}
+
+func BenchmarkApplyChangeSets1000(b *testing.B) {
+	benchmarkApplyChangeSets(b, 1000)
+}
+
 func benchmarkApplyChangeSet(b *testing.B, storeCount int) {
 	b.Helper()
 	db := newBenchmarkDB(storeCount)
@@ -32,13 +40,42 @@ func benchmarkApplyChangeSet(b *testing.B, storeCount int) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		db.pendingLog = WALEntry{}
-		if db.pendingChangesets != nil {
-			clear(db.pendingChangesets)
+		if db.cachedPendingChangesets != nil {
+			clear(db.cachedPendingChangesets)
 		}
 		for i, name := range storeNames {
 			if err := db.applyChangeSet(name, changeSets[i]); err != nil {
 				b.Fatal(err)
 			}
+		}
+	}
+}
+
+func benchmarkApplyChangeSets(b *testing.B, storeCount int) {
+	b.Helper()
+	db := newBenchmarkDB(storeCount)
+	changeSets := make([]*NamedChangeSet, storeCount)
+	for i := 0; i < storeCount; i++ {
+		name := fmt.Sprintf("store-%d", i)
+		changeSets[i] = &NamedChangeSet{
+			Name: name,
+			Changeset: ChangeSet{
+				Pairs: []*KVPair{{
+					Key:   []byte(fmt.Sprintf("key-%d", i)),
+					Value: []byte("value"),
+				}},
+			},
+		}
+	}
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		db.pendingLog = WALEntry{}
+		if db.cachedPendingChangesets != nil {
+			clear(db.cachedPendingChangesets)
+		}
+		if err := db.ApplyChangeSets(changeSets); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

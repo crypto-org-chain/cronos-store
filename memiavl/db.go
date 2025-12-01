@@ -68,8 +68,8 @@ type DB struct {
 	walQuit     chan error
 
 	// pending changes, will be written into WAL in next Commit call
-	pendingLog        WALEntry
-	pendingChangesets map[string]*NamedChangeSet
+	pendingLog              WALEntry
+	cachedPendingChangesets map[string]*NamedChangeSet
 
 	// The assumptions to concurrency:
 	// - The methods on DB are protected by a mutex
@@ -382,7 +382,7 @@ func (db *DB) applyChangeSet(name string, changeSet ChangeSet) error {
 	}
 
 	db.ensurePendingChangesetMap()
-	if existing, ok := db.pendingChangesets[name]; ok {
+	if existing, ok := db.cachedPendingChangesets[name]; ok {
 		existing.Changeset.Pairs = append(existing.Changeset.Pairs, changeSet.Pairs...)
 	} else {
 		db.insertPendingChangeSet(&NamedChangeSet{Name: name, Changeset: changeSet})
@@ -407,7 +407,7 @@ func (db *DB) ensurePendingChangesetMap() {
 		return
 	}
 
-	if db.pendingChangesets != nil {
+	if db.cachedPendingChangesets != nil {
 		return
 	}
 
@@ -415,13 +415,13 @@ func (db *DB) ensurePendingChangesetMap() {
 }
 
 func (db *DB) clearPendingChangesetMap() {
-	if db.pendingChangesets != nil {
-		clear(db.pendingChangesets)
+	if db.cachedPendingChangesets != nil {
+		clear(db.cachedPendingChangesets)
 	}
 }
 
 func (db *DB) rebuildPendingChangesetMap(changeSets []*NamedChangeSet) {
-	m := db.pendingChangesets
+	m := db.cachedPendingChangesets
 	if m == nil {
 		m = make(map[string]*NamedChangeSet, len(changeSets))
 	} else {
@@ -432,14 +432,14 @@ func (db *DB) rebuildPendingChangesetMap(changeSets []*NamedChangeSet) {
 			m[cs.Name] = cs
 		}
 	}
-	db.pendingChangesets = m
+	db.cachedPendingChangesets = m
 }
 
 func (db *DB) insertPendingChangeSet(cs *NamedChangeSet) {
-	if db.pendingChangesets == nil {
-		db.pendingChangesets = make(map[string]*NamedChangeSet)
+	if db.cachedPendingChangesets == nil {
+		db.cachedPendingChangesets = make(map[string]*NamedChangeSet)
 	}
-	db.pendingChangesets[cs.Name] = cs
+	db.cachedPendingChangesets[cs.Name] = cs
 
 	oldLen := len(db.pendingLog.Changesets)
 	if oldLen == 0 || db.pendingLog.Changesets[oldLen-1].Name < cs.Name {
@@ -636,8 +636,8 @@ func (db *DB) Commit() (int64, error) {
 	}
 
 	db.pendingLog = WALEntry{}
-	if db.pendingChangesets != nil {
-		clear(db.pendingChangesets)
+	if db.cachedPendingChangesets != nil {
+		clear(db.cachedPendingChangesets)
 	}
 
 	if err := db.checkAsyncTasks(); err != nil {
