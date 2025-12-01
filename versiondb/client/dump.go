@@ -211,7 +211,7 @@ func DumpMemiavlChangeSetCmd(opts Options) *cobra.Command {
 				return err
 			}
 			if len(stores) == 0 {
-				return fmt.Errorf("no stores ")
+				return fmt.Errorf("no stores")
 			}
 			chainID, err := cmd.Flags().GetString(flagChainId)
 			if err != nil {
