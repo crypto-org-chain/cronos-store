@@ -360,6 +360,39 @@ func TestTreeTraverseStateChanges(t *testing.T) {
 	require.Equal(t, []byte("baz"), changeSets[2].Pairs[0].Value)
 }
 
+func TestTraverseStateChangesWithoutWAL(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{"test"},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Close())
+
+	walDir := filepath.Join(dir, "wal")
+	require.NoError(t, os.RemoveAll(walDir))
+	require.NoError(t, os.MkdirAll(walDir, os.ModePerm))
+
+	readonly, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, readonly.Close()) }()
+
+	tree := readonly.TreeByName("test")
+	require.NotNil(t, tree)
+
+	err = tree.TraverseStateChanges(1, 1, func(version int64, cs *ChangeSet) error {
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestZeroCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{InitialStores: []string{"test", "test2"}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)

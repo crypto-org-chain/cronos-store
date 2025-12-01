@@ -329,11 +329,11 @@ func (db *DB) attachTraverseStateChanges() {
 }
 
 func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
-	walLog, initialVersion, lastVersion, err := db.walStateForRead()
+	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
 	if err != nil {
 		return err
 	}
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion); err != nil {
+	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return err
 	}
 	if endVersion < startVersion {

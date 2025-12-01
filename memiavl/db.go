@@ -872,7 +872,7 @@ func (db *DB) WorkingCommitInfo() *CommitInfo {
 
 // FirstVersion returns the earliest version that still has WAL entries on disk.
 func (db *DB) FirstVersion() (int64, error) {
-	walLog, initialVersion, _, err := db.walStateForRead()
+	walLog, initialVersion, _, _, err := db.walStateForRead()
 	if err != nil {
 		return 0, err
 	}
@@ -894,12 +894,12 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		return result, nil
 	}
 
-	walLog, initialVersion, lastVersion, err := db.walStateForRead()
+	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion); err != nil {
+	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return nil, err
 	}
 
@@ -950,18 +950,18 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (*wal.Log, uint32, int64, error) {
+func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
 	if db.wal == nil {
-		return nil, 0, 0, fmt.Errorf("wal is not initialized")
+		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, nil
+	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.MultiTree.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion int64) error {
-	if targetVersion <= 0 {
+func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
 
