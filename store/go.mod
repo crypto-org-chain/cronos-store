@@ -15,7 +15,7 @@ require (
 	github.com/cosmos/ics23/go v0.10.0
 	github.com/crypto-org-chain/cronos-store/memiavl v0.0.4
 	github.com/spf13/cast v1.6.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
@@ -98,7 +98,7 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/ledgerwatch/erigon-lib v0.0.0-20230210071639-db0e7ed11263 // indirect
-	github.com/linxGnu/grocksdb v1.10.2 // indirect
+	github.com/linxGnu/grocksdb v1.10.3 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
