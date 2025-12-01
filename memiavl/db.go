@@ -957,7 +957,7 @@ func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
 	if db.wal == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.MultiTree.SnapshotVersion(), nil
+	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
 func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
