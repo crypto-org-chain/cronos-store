@@ -250,6 +250,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
 	}
+	db.attachTraverseStateChanges()
 
 	if !db.readOnly && db.Version() == 0 && len(opts.InitialStores) > 0 {
 		// do the initial upgrade with the `opts.InitialStores`
@@ -326,6 +327,7 @@ func (db *DB) ApplyUpgrades(upgrades []*TreeNameUpgrade) error {
 	}
 
 	db.pendingLog.Upgrades = append(db.pendingLog.Upgrades, upgrades...)
+	db.attachTraverseStateChanges()
 	return nil
 }
 
@@ -661,12 +663,14 @@ func (db *DB) Copy() *DB {
 func (db *DB) copy(cacheSize int) *DB {
 	mtree := db.MultiTree.Copy(cacheSize)
 
-	return &DB{
+	cloned := &DB{
 		MultiTree:          *mtree,
 		logger:             db.logger,
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 	}
+	cloned.attachTraverseStateChanges()
+	return cloned
 }
 
 // RewriteSnapshot writes the current version of memiavl into a snapshot, and update the `current` symlink.
@@ -717,7 +721,11 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 
 	db.MultiTree = *mtree
 	// catch-up the pending changes
-	return db.applyWALEntry(db.pendingLog)
+	if err := db.applyWALEntry(db.pendingLog); err != nil {
+		return err
+	}
+	db.attachTraverseStateChanges()
+	return nil
 }
 
 // rewriteIfApplicable execute the snapshot rewrite strategy according to current height
@@ -860,6 +868,114 @@ func (db *DB) WorkingCommitInfo() *CommitInfo {
 	defer db.mtx.Unlock()
 
 	return db.MultiTree.WorkingCommitInfo()
+}
+
+// FirstVersion returns the earliest version that still has WAL entries on disk.
+func (db *DB) FirstVersion() (int64, error) {
+	walLog, initialVersion, _, _, err := db.walStateForRead()
+	if err != nil {
+		return 0, err
+	}
+
+	firstIndex, err := walLog.FirstIndex()
+	if err != nil {
+		return 0, err
+	}
+	if firstIndex == 0 {
+		return 0, nil
+	}
+	return walVersion(firstIndex, initialVersion), nil
+}
+
+// FirstStoreVersions returns the first version each store appears in the WAL.
+func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
+	result := make(map[string]int64, len(stores))
+	if len(stores) == 0 {
+		return result, nil
+	}
+
+	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
+		return nil, err
+	}
+
+	firstIndex, err := walLog.FirstIndex()
+	if err != nil {
+		return nil, err
+	}
+	lastIndex, err := walLog.LastIndex()
+	if err != nil {
+		return nil, err
+	}
+	if firstIndex == 0 || lastIndex == 0 {
+		return result, nil
+	}
+
+	targets := make(map[string]struct{}, len(stores))
+	for _, store := range stores {
+		if _, ok := targets[store]; !ok {
+			targets[store] = struct{}{}
+		}
+	}
+
+	for idx := firstIndex; idx <= lastIndex; idx++ {
+		if len(result) == len(targets) {
+			break
+		}
+
+		data, err := walLog.Read(idx)
+		if err != nil {
+			return nil, err
+		}
+		var entry WALEntry
+		if err := entry.Unmarshal(data); err != nil {
+			return nil, err
+		}
+		version := walVersion(idx, initialVersion)
+		for _, changeset := range entry.Changesets {
+			if _, ok := targets[changeset.Name]; !ok {
+				continue
+			}
+			if _, recorded := result[changeset.Name]; recorded {
+				continue
+			}
+			result[changeset.Name] = version
+		}
+	}
+
+	return result, nil
+}
+
+func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	if db.wal == nil {
+		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
+	}
+	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+}
+
+func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+	if targetVersion <= 0 || targetVersion <= snapshotVersion {
+		return nil
+	}
+
+	targetIndex := walIndex(targetVersion, initialVersion)
+	for {
+		lastIndex, err := walLog.LastIndex()
+		if err != nil {
+			return err
+		}
+		if lastIndex >= targetIndex {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // UpdateCommitInfo wraps MultiTree.UpdateCommitInfo to add a lock.
