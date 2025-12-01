@@ -358,6 +358,9 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if endVersion <= 0 || endVersion > lastAvailable {
 		endVersion = lastAvailable
 	}
+	// If the requested interval sits entirely before the retained WAL window,
+	// clamping start to firstAvailable jumps past endVersion. In that case there
+	// is nothing left to traverse.
 	if endVersion < startVersion {
 		return nil
 	}
