@@ -43,7 +43,8 @@ jobs:
           cd rocksdb
           git checkout v10.5.1
           mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON -DCMAKE_CXX_FLAGS="-faligned-allocation"
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
+            -DCMAKE_CXX_FLAGS="-faligned-allocation -Wno-error=unused-but-set-variable"
           sudo make -j4
           sudo make install
       - name: run golangci-lint
