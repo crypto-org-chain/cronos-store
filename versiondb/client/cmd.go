@@ -21,6 +21,7 @@ func ChangeSetGroupCmd(opts Options) *cobra.Command {
 	cmd.AddCommand(
 		ListDefaultStoresCmd(opts.DefaultStores),
 		DumpChangeSetCmd(opts),
+		DumpMemiavlChangeSetCmd(opts),
 		PrintChangeSetCmd(),
 		VerifyChangeSetCmd(opts.DefaultStores),
 		BuildVersionDBSSTCmd(opts.DefaultStores),
