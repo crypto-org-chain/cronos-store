@@ -310,3 +310,58 @@ func TestGetByIndex(t *testing.T) {
 		require.Equal(t, pair.Value, v)
 	}
 }
+
+func TestGetCacheReturnsCopyDisableZeroCopy(t *testing.T) {
+	tree := New(8)
+	tree.SetZeroCopy(false)
+
+	key := []byte("key1")
+	val := []byte("val1")
+	changeSet := ChangeSet{
+		Pairs: []*KVPair{
+			{Key: key, Value: val},
+		},
+	}
+
+	tree.ApplyChangeSet(changeSet)
+	_, _, err := tree.SaveVersion(true)
+	require.NoError(t, err)
+
+	first := tree.Get(key)
+	require.Equal(t, val, first)
+
+	first[0] = 'x'
+	second := tree.Get(key)
+	require.Equal(t, val, second)
+
+	second[1] = 'y'
+	third := tree.Get(key)
+	require.Equal(t, val, third)
+
+	require.Equal(t, byte('x'), first[0])
+	require.Equal(t, byte('y'), second[1])
+}
+
+func TestApplyChangeSetClonesInputDisableZeroCopy(t *testing.T) {
+	tree := New(8)
+	tree.SetZeroCopy(false)
+
+	key := []byte("key1")
+	lookupKey := append([]byte{}, key...)
+	value := []byte("val1")
+	expectedValue := append([]byte{}, value...)
+
+	changeSet := ChangeSet{
+		Pairs: []*KVPair{
+			{Key: key, Value: value},
+		},
+	}
+
+	tree.ApplyChangeSet(changeSet)
+
+	key[0] = 'x'
+	value[0] = 'y'
+
+	got := tree.Get(lookupKey)
+	require.Equal(t, expectedValue, got)
+}

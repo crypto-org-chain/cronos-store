@@ -147,6 +147,10 @@ func (t *Tree) set(key, value []byte) {
 		// the value could be nil when replaying changes from write-ahead-log because of protobuf decoding
 		value = []byte{}
 	}
+	if !t.zeroCopy {
+		key = bytes.Clone(key)
+		value = bytes.Clone(value)
+	}
 	t.root, _ = setRecursive(t.root, key, value, t.version+1, t.cowVersion)
 	if t.cache != nil {
 		t.cache.Add(&cacheNode{key, value})
@@ -220,7 +224,11 @@ func (t *Tree) GetByIndex(index int64) ([]byte, []byte) {
 func (t *Tree) Get(key []byte) []byte {
 	if t.cache != nil {
 		if node := t.cache.Get(key); node != nil {
-			return node.(*cacheNode).value
+			value := node.(*cacheNode).value
+			if !t.zeroCopy {
+				value = bytes.Clone(value)
+			}
+			return value
 		}
 	}
 
@@ -230,7 +238,13 @@ func (t *Tree) Get(key []byte) []byte {
 	}
 
 	if t.cache != nil {
-		t.cache.Add(&cacheNode{key, value})
+		cacheKey := key
+		cacheValue := value
+		if !t.zeroCopy {
+			cacheKey = bytes.Clone(key)
+			cacheValue = bytes.Clone(cacheValue)
+		}
+		t.cache.Add(&cacheNode{cacheKey, cacheValue})
 	}
 	return value
 }
