@@ -4,4 +4,6 @@
 - [#7](https://github.com/crypto-org-chain/cronos-store/pull/7) fix: memiavl WriteSnapshotWithContext cancel using wrong ctx.
 - [#6](https://github.com/crypto-org-chain/cronos-store/pull/6) feat(memiavl/client): add CLI command to dump the memiavl root.
 - [#11](https://github.com/crypto-org-chain/cronos-store/pull/11) fix(memiavl): clone key/values in tree.Get/tree.set when zerocopy is disabled.
+- [#24] (https://github.com/crypto-org-chain/cronos-store/pull/24) feat(memiavl): add CLI command to dump memiavl changeset.
+- [#10](https://github.com/crypto-org-chain/cronos-store/pull/10) feat: use rocksdb v10.5.1.
 - [#23](https://github.com/crypto-org-chain/cronos-store/pull/23) perf(memiavl): optimize DB.ApplyChangeSet with pending map cache.
