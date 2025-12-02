@@ -68,7 +68,8 @@ type DB struct {
 	walQuit     chan error
 
 	// pending changes, will be written into WAL in next Commit call
-	pendingLog WALEntry
+	pendingLog              WALEntry
+	cachedPendingChangesets map[string]*NamedChangeSet
 
 	// The assumptions to concurrency:
 	// - The methods on DB are protected by a mutex
@@ -346,7 +347,7 @@ func (db *DB) ApplyChangeSets(changeSets []*NamedChangeSet) error {
 	}
 
 	if len(db.pendingLog.Changesets) == 0 {
-		db.pendingLog.Changesets = changeSets
+		db.setPendingChangeSets(changeSets)
 		return db.MultiTree.ApplyChangeSets(changeSets)
 	}
 
@@ -382,26 +383,80 @@ func (db *DB) applyChangeSet(name string, changeSet ChangeSet) error {
 		return errReadOnly
 	}
 
-	var updated bool
-	for _, cs := range db.pendingLog.Changesets {
-		if cs.Name == name {
-			cs.Changeset.Pairs = append(cs.Changeset.Pairs, changeSet.Pairs...)
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
-		db.pendingLog.Changesets = append(db.pendingLog.Changesets, &NamedChangeSet{
-			Name:      name,
-			Changeset: changeSet,
-		})
-		sort.SliceStable(db.pendingLog.Changesets, func(i, j int) bool {
-			return db.pendingLog.Changesets[i].Name < db.pendingLog.Changesets[j].Name
-		})
+	db.ensurePendingChangesetMap()
+	if existing, ok := db.cachedPendingChangesets[name]; ok {
+		existing.Changeset.Pairs = append(existing.Changeset.Pairs, changeSet.Pairs...)
+	} else {
+		db.insertPendingChangeSet(&NamedChangeSet{Name: name, Changeset: changeSet})
 	}
 
 	return db.MultiTree.ApplyChangeSet(name, changeSet)
+}
+
+func (db *DB) setPendingChangeSets(changeSets []*NamedChangeSet) {
+	db.pendingLog.Changesets = changeSets
+	if len(changeSets) == 0 {
+		db.clearPendingChangesetMap()
+		return
+	}
+
+	db.rebuildPendingChangesetMap(changeSets)
+}
+
+func (db *DB) ensurePendingChangesetMap() {
+	if len(db.pendingLog.Changesets) == 0 {
+		db.clearPendingChangesetMap()
+		return
+	}
+
+	if db.cachedPendingChangesets != nil {
+		return
+	}
+
+	db.rebuildPendingChangesetMap(db.pendingLog.Changesets)
+}
+
+func (db *DB) clearPendingChangesetMap() {
+	if db.cachedPendingChangesets != nil {
+		clear(db.cachedPendingChangesets)
+	}
+}
+
+func (db *DB) rebuildPendingChangesetMap(changeSets []*NamedChangeSet) {
+	m := db.cachedPendingChangesets
+	if m == nil {
+		m = make(map[string]*NamedChangeSet, len(changeSets))
+	} else {
+		clear(m)
+	}
+	for _, cs := range changeSets {
+		if cs != nil {
+			m[cs.Name] = cs
+		}
+	}
+	db.cachedPendingChangesets = m
+}
+
+func (db *DB) insertPendingChangeSet(cs *NamedChangeSet) {
+	if db.cachedPendingChangesets == nil {
+		db.cachedPendingChangesets = make(map[string]*NamedChangeSet)
+	}
+	db.cachedPendingChangesets[cs.Name] = cs
+
+	oldLen := len(db.pendingLog.Changesets)
+	if oldLen == 0 || db.pendingLog.Changesets[oldLen-1].Name < cs.Name {
+		db.pendingLog.Changesets = append(db.pendingLog.Changesets, cs)
+		return
+	}
+
+	idx := sort.Search(oldLen, func(i int) bool {
+		return db.pendingLog.Changesets[i].Name >= cs.Name
+	})
+	db.pendingLog.Changesets = append(db.pendingLog.Changesets, nil)
+	if idx < oldLen {
+		copy(db.pendingLog.Changesets[idx+1:], db.pendingLog.Changesets[idx:oldLen])
+	}
+	db.pendingLog.Changesets[idx] = cs
 }
 
 // checkAsyncTasks checks the status of background tasks non-blocking-ly and process the result
@@ -583,6 +638,9 @@ func (db *DB) Commit() (int64, error) {
 	}
 
 	db.pendingLog = WALEntry{}
+	if db.cachedPendingChangesets != nil {
+		clear(db.cachedPendingChangesets)
+	}
 
 	if err := db.checkAsyncTasks(); err != nil {
 		return 0, err
