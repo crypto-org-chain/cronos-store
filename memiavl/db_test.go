@@ -509,6 +509,38 @@ func TestRepeatedApplyChangeSet(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestInsertPendingChangeSetKeepsOldEntryAfterCacheMiss(t *testing.T) {
+	db := &DB{}
+	original := &NamedChangeSet{
+		Name: "bank",
+		Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("k1"), Value: []byte("v1")}},
+		},
+	}
+	db.insertPendingChangeSet(original)
+
+	// simulate the cached map being dropped while the pending log is still populated
+	db.cachedPendingChangesets = nil
+
+	newer := &NamedChangeSet{
+		Name: "bank",
+		Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("k2"), Value: []byte("v2")}},
+		},
+	}
+	db.insertPendingChangeSet(newer)
+
+	require.Equal(t, newer, db.pendingLog.Changesets[0])
+	require.Equal(t, original, db.pendingLog.Changesets[1])
+
+	// rebuilding the cache must pick the oldest entry so that subsequent merges
+	// keep appending to the original change set instead of creating new copies.
+	db.cachedPendingChangesets = nil
+	db.rebuildPendingChangesetMap(db.pendingLog.Changesets)
+
+	require.Same(t, original, db.cachedPendingChangesets["bank"])
+}
+
 func TestIdempotentWrite(t *testing.T) {
 	for _, asyncCommit := range []bool{false, true} {
 		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
