@@ -137,7 +137,11 @@ type Tree struct {
 
 	// when true, the get and iterator methods could return a slice pointing to mmaped blob files.
 	zeroCopy bool
+
+	traverseStateChanges traverseStateChangesFn
 }
+
+type traverseStateChangesFn func(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error
 
 type cacheNode struct {
 	key, value []byte
@@ -250,6 +254,10 @@ func (t *Tree) set(key, value []byte) {
 		// the value could be nil when replaying changes from write-ahead-log because of protobuf decoding
 		value = []byte{}
 	}
+	if !t.zeroCopy {
+		key = bytes.Clone(key)
+		value = bytes.Clone(value)
+	}
 	t.root, _ = setRecursive(t.root, key, value, t.version+1, t.cowVersion)
 	if t.cache != nil {
 		t.cache.Add(&cacheNode{key, value})
@@ -323,7 +331,11 @@ func (t *Tree) GetByIndex(index int64) ([]byte, []byte) {
 func (t *Tree) Get(key []byte) []byte {
 	if t.cache != nil {
 		if node := t.cache.Get(key); node != nil {
-			return node.(*cacheNode).value
+			value := node.(*cacheNode).value
+			if !t.zeroCopy {
+				value = bytes.Clone(value)
+			}
+			return value
 		}
 	}
 
@@ -333,7 +345,13 @@ func (t *Tree) Get(key []byte) []byte {
 	}
 
 	if t.cache != nil {
-		t.cache.Add(&cacheNode{key, value})
+		cacheKey := key
+		cacheValue := value
+		if !t.zeroCopy {
+			cacheKey = bytes.Clone(key)
+			cacheValue = bytes.Clone(cacheValue)
+		}
+		t.cache.Add(&cacheNode{cacheKey, cacheValue})
 	}
 	return value
 }
@@ -344,6 +362,14 @@ func (t *Tree) Has(key []byte) bool {
 
 func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 	return NewIterator(start, end, ascending, t.root, t.zeroCopy)
+}
+
+// TraverseStateChanges iterates the change sets between the given versions (inclusive).
+func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
+	if t.traverseStateChanges == nil {
+		return fmt.Errorf("TraverseStateChanges not supported")
+	}
+	return t.traverseStateChanges(startVersion, endVersion, fn)
 }
 
 // ScanPostOrder scans the tree in post-order, and call the callback function on each node.
@@ -402,5 +428,88 @@ func (t *Tree) Close() error {
 		t.snapshot = nil
 	}
 	t.root = nil
+	t.traverseStateChanges = nil
 	return err
+}
+
+func (t *Tree) setTraverseStateChanges(fn traverseStateChangesFn) {
+	t.traverseStateChanges = fn
+}
+
+func (db *DB) attachTraverseStateChanges() {
+	for i := range db.trees {
+		t := db.trees[i]
+		if t.Tree == nil {
+			continue
+		}
+		storeName := t.Name
+		t.setTraverseStateChanges(func(startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
+			return db.traverseStateChanges(storeName, startVersion, endVersion, fn)
+		})
+	}
+}
+
+func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
+	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
+	if err != nil {
+		return err
+	}
+	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
+		return err
+	}
+	if endVersion < startVersion {
+		return nil
+	}
+	firstIndex, err := walLog.FirstIndex()
+	if err != nil {
+		return err
+	}
+	lastIndex, err := walLog.LastIndex()
+	if err != nil {
+		return err
+	}
+	if firstIndex == 0 || lastIndex == 0 {
+		return nil
+	}
+	firstAvailable := walVersion(firstIndex, initialVersion)
+	if startVersion < firstAvailable {
+		startVersion = firstAvailable
+	}
+	lastAvailable := walVersion(lastIndex, initialVersion)
+	if endVersion <= 0 || endVersion > lastAvailable {
+		endVersion = lastAvailable
+	}
+	// If the requested interval sits entirely before the retained WAL window,
+	// clamping start to firstAvailable jumps past endVersion. In that case there
+	// is nothing left to traverse.
+	if endVersion < startVersion {
+		return nil
+	}
+	startIndex := walIndex(startVersion, initialVersion)
+	endIndex := walIndex(endVersion, initialVersion)
+	for idx := startIndex; idx <= endIndex; idx++ {
+		data, err := walLog.Read(idx)
+		if err != nil {
+			return err
+		}
+		var entry WALEntry
+		if err := entry.Unmarshal(data); err != nil {
+			return err
+		}
+		version := walVersion(idx, initialVersion)
+		var changeSet *ChangeSet
+		for j := range entry.Changesets {
+			if entry.Changesets[j].Name == store {
+				changeSet = &entry.Changesets[j].Changeset
+				break
+			}
+		}
+		if changeSet == nil {
+			changeSet = &ChangeSet{}
+		}
+		if err := fn(version, changeSet); err != nil {
+			return err
+		}
+	}
+	return nil
 }
