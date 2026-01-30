@@ -23,10 +23,11 @@ func NewIterator(start, end []byte, ascending bool, root Node, zeroCopy bool) *I
 		ascending: ascending,
 		valid:     true,
 		zeroCopy:  zeroCopy,
+		stack:     make([]Node, 0, 32), // Pre-allocate for typical tree height
 	}
 
 	if root != nil {
-		iter.stack = []Node{root}
+		iter.stack = append(iter.stack, root)
 	}
 
 	// cache the first key-value

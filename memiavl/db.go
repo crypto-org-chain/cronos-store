@@ -78,7 +78,7 @@ type DB struct {
 	// - The DB for the state machine will handle writes through the Commit call,
 	//   this method is the sole entry point for tree modifications, and there's no concurrency internally
 	//   (the background snapshot rewrite is handled separately), so we don't need locks in the Tree.
-	mtx sync.Mutex
+	mtx sync.RWMutex
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
 
@@ -888,24 +888,24 @@ func (db *DB) Close() error {
 
 // TreeByName wraps MultiTree.TreeByName to add a lock.
 func (db *DB) TreeByName(name string) *Tree {
-	db.mtx.Lock()
-	defer db.mtx.Unlock()
+	db.mtx.RLock()
+	defer db.mtx.RUnlock()
 
 	return db.MultiTree.TreeByName(name)
 }
 
 // Version wraps MultiTree.Version to add a lock.
 func (db *DB) Version() int64 {
-	db.mtx.Lock()
-	defer db.mtx.Unlock()
+	db.mtx.RLock()
+	defer db.mtx.RUnlock()
 
 	return db.MultiTree.Version()
 }
 
 // LastCommitInfo returns the last commit info.
 func (db *DB) LastCommitInfo() *CommitInfo {
-	db.mtx.Lock()
-	defer db.mtx.Unlock()
+	db.mtx.RLock()
+	defer db.mtx.RUnlock()
 
 	return db.MultiTree.LastCommitInfo()
 }
@@ -922,8 +922,8 @@ func (db *DB) SaveVersion(updateCommitInfo bool) (int64, error) {
 }
 
 func (db *DB) WorkingCommitInfo() *CommitInfo {
-	db.mtx.Lock()
-	defer db.mtx.Unlock()
+	db.mtx.RLock()
+	defer db.mtx.RUnlock()
 
 	return db.MultiTree.WorkingCommitInfo()
 }
@@ -1009,8 +1009,8 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 }
 
 func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
-	db.mtx.Lock()
-	defer db.mtx.Unlock()
+	db.mtx.RLock()
+	defer db.mtx.RUnlock()
 
 	if db.wal == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
