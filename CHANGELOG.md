@@ -8,3 +8,4 @@
 - [#10](https://github.com/crypto-org-chain/cronos-store/pull/10) feat: use rocksdb v10.5.1.
 - [#23](https://github.com/crypto-org-chain/cronos-store/pull/23) perf(memiavl): optimize DB.ApplyChangeSet with pending map cache.
 - [#22](https://github.com/crypto-org-chain/cronos-store/pull/22) feat: use thread safe cache.
+- [#38](https://github.com/crypto-org-chain/cronos-store/pull/38) feat: upgrade to cosmos v0.53.4
