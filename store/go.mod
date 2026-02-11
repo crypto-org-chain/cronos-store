@@ -8,7 +8,7 @@ require (
 	cosmossdk.io/store v1.1.2
 	github.com/cometbft/cometbft v0.38.20
 	github.com/cosmos/cosmos-db v1.1.3
-	github.com/cosmos/cosmos-sdk v0.50.4
+	github.com/cosmos/cosmos-sdk v0.53.4
 	github.com/cosmos/gogoproto v1.7.2
 	github.com/cosmos/ics23/go v0.11.0
 	github.com/crypto-org-chain/cronos-store/memiavl v0.0.4
