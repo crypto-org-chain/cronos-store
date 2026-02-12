@@ -1,3 +1,4 @@
+- [#40](https://github.com/crypto-org-chain/cronos-store/pull/40) fix: update cosmos-sdk with pre-estimate bug fixed
 - [#34](https://github.com/crypto-org-chain/cronos-store/pull/34) feat: use rocksdb v10.6.2.
 - [#38](https://github.com/crypto-org-chain/cronos-store/pull/38) feat: upgrade to cosmos v0.53.4
 - [#22](https://github.com/crypto-org-chain/cronos-store/pull/22) feat: use thread safe cache.
