@@ -47,19 +47,19 @@ jobs:
         run: |
           git clone https://github.com/facebook/rocksdb.git
           cd rocksdb
-          git checkout v10.5.1
+          git checkout v10.6.2
           mkdir build && cd build
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
               -DCMAKE_CXX_FLAGS="-Wno-error=unused-but-set-variable"
-            sudo make -j4
+            sudo make -j$(nproc)
             sudo make install
           else
             export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
             cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
               -DCMAKE_CXX_FLAGS="-faligned-allocation -Wno-error=unused-but-set-variable" -DCMAKE_PREFIX_PATH=/opt/homebrew \
               -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix zstd)/lib"
-            sudo make -j4
+            sudo make -j$(sysctl -n hw.ncpu)
             sudo make install
           fi
       - name: test & coverage report creation

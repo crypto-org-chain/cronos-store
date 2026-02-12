@@ -16,7 +16,7 @@ require (
 	github.com/cosmos/iavl v1.2.2
 	github.com/crypto-org-chain/cronos-store/memiavl v0.0.3
 	github.com/golang/snappy v0.0.4
-	github.com/linxGnu/grocksdb v1.10.3
+	github.com/linxGnu/grocksdb v1.10.4
 	github.com/spf13/cast v1.10.0
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1
