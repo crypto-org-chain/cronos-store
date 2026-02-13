@@ -1,6 +1,7 @@
+- [#41](https://github.com/crypto-org-chain/cronos-store/pull/41) fix: update cosmos-sdk with signature incarnation cache removed for SigVerificationDecorator
 - [#40](https://github.com/crypto-org-chain/cronos-store/pull/40) fix: update cosmos-sdk with pre-estimate bug fixed
 - [#34](https://github.com/crypto-org-chain/cronos-store/pull/34) feat: use rocksdb v10.6.2.
-- [#38](https://github.com/crypto-org-chain/cronos-store/pull/38) feat: upgrade to cosmos v0.53.4
+- [#38](https://github.com/crypto-org-chain/cronos-store/pull/38) feat: upgrade to cosmos-sdk v0.53.4
 - [#22](https://github.com/crypto-org-chain/cronos-store/pull/22) feat: use thread safe cache.
 - [#23](https://github.com/crypto-org-chain/cronos-store/pull/23) perf(memiavl): optimize DB.ApplyChangeSet with pending map cache.
 - [#10](https://github.com/crypto-org-chain/cronos-store/pull/10) feat: use rocksdb v10.5.1.
