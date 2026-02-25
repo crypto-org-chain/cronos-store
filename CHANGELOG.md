@@ -1,3 +1,4 @@
+- [#45](https://github.com/crypto-org-chain/cronos-store/pull/45) feat: use rocksdb v10.9.1.
 - [#41](https://github.com/crypto-org-chain/cronos-store/pull/41) fix: update cosmos-sdk with signature incarnation cache removed for SigVerificationDecorator
 - [#40](https://github.com/crypto-org-chain/cronos-store/pull/40) fix: update cosmos-sdk with pre-estimate bug fixed
 - [#34](https://github.com/crypto-org-chain/cronos-store/pull/34) feat: use rocksdb v10.6.2.
