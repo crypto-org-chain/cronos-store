@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ type historicalDBCache struct {
 	mu      sync.Mutex
 	maxSize int
 	entries []*historicalDBEntry // ordered: index 0 is most-recently used
+	closed  bool
 }
 
 func newHistoricalDBCache(maxSize int) *historicalDBCache {
@@ -57,6 +59,10 @@ func newHistoricalDBCache(maxSize int) *historicalDBCache {
 // not already cached. The caller MUST call release() when done.
 func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, error)) (*historicalDBEntry, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
 	// Fast path: already cached.
 	for i, e := range c.entries {
 		if e.version == version {
@@ -76,14 +82,27 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		return nil, err
 	}
 
+	// Safety net: close db if we return without inserting it into the cache
+	// (e.g. because another goroutine raced us, or the cache was closed).
+	dbInserted := false
+	defer func() {
+		if !dbInserted {
+			_ = db.Close()
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Guard against the cache being closed while we were doing I/O.
+	if c.closed {
+		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
 
 	// Another goroutine may have loaded the same version while we were doing I/O.
 	for i, e := range c.entries {
 		if e.version == version {
-			// Use the existing entry; close the one we just opened.
-			_ = db.Close()
+			// Use the existing entry; our db will be closed by the defer.
 			e.refs++
 			copy(c.entries[1:i+1], c.entries[0:i])
 			c.entries[0] = e
@@ -105,6 +124,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 	entry := &historicalDBEntry{version: version, db: db, refs: 1}
 	// Prepend (most-recently used).
 	c.entries = append([]*historicalDBEntry{entry}, c.entries...)
+	dbInserted = true
 	return entry, nil
 }
 
@@ -113,25 +133,50 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 func (c *historicalDBCache) release(e *historicalDBEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if e.refs <= 0 {
+		panic(fmt.Sprintf("historicalDBCache: release called on entry with refs=%d", e.refs))
+	}
 	e.refs--
 	if e.refs == 0 && e.evicted {
 		_ = e.db.Close()
 	}
 }
 
-// close closes all cached entries. It is called when the owning Store closes.
+// close drains the cache. Entries with active borrows (refs > 0) are marked
+// evicted so that the last release() will close them.
 func (c *historicalDBCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var firstErr error
+	c.closed = true
+	var errs []error
 	for _, e := range c.entries {
-		if err := e.db.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		e.evicted = true
+		if e.refs == 0 {
+			if err := e.db.Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
-		e.evicted = true // prevent double-close in release()
+		// If refs > 0 the entry will be closed by the last release().
 	}
 	c.entries = nil
-	return firstErr
+	return stderrors.Join(errs...)
+}
+
+// versionedCacheMultiStore is a types.CacheMultiStore that owns a read-only
+// *memiavl.DB opened for a specific historical version. The SDK's BaseApp
+// never calls Close() on query-context stores, so runtime.SetFinalizer is
+// used as a safety net to ensure the DB is eventually closed by the GC.
+type versionedCacheMultiStore struct {
+	cachemulti.Store
+	db *memiavl.DB
+}
+
+func newVersionedCacheMultiStore(cms cachemulti.Store, db *memiavl.DB) *versionedCacheMultiStore {
+	v := &versionedCacheMultiStore{Store: cms, db: db}
+	runtime.SetFinalizer(v, func(v *versionedCacheMultiStore) {
+		_ = v.db.Close()
+	})
+	return v
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -319,12 +364,18 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	if version == 0 || (rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version) {
 		return rs.CacheMultiStore(), nil
 	}
+	// H2: guard int64 → uint32 cast.
+	if version < 0 || version > math.MaxUint32 {
+		return nil, fmt.Errorf("version out of range: %d", version)
+	}
 	opts := rs.opts
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
-	entry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
-		return memiavl.Load(rs.dir, opts, rs.chainId)
-	})
+	// Load a fresh DB per call: the SDK's BaseApp never calls Close() on the
+	// returned CacheMultiStore, so we cannot use the borrow/release cache here.
+	// versionedCacheMultiStore owns db and uses runtime.SetFinalizer as a
+	// safety net so the DB is closed when the GC collects the store.
+	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return nil, err
 	}
@@ -339,17 +390,12 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	}
 
 	// add all the iavl stores at the target version.
-	for _, tree := range entry.db.Trees() {
+	for _, tree := range db.Trees() {
 		stores[rs.keysByName[tree.Name]] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
-	// Use the cachemulti.Store's Closer to release the borrow when Close() is called.
-	closer := cachemulti.CloserFunc(func() error {
-		rs.historicalDBCache.release(entry)
-		return nil
-	})
-	cms := cachemulti.NewStore(stores, nil, nil, closer)
-	return cms, nil
+	cms := cachemulti.NewStore(stores, nil, nil, nil)
+	return newVersionedCacheMultiStore(cms, db), nil
 }
 
 // GetStore Implements interface MultiStore
@@ -665,6 +711,10 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	version := req.Height
 	if version == 0 {
 		version = rs.db.Version()
+	}
+	// H2: guard int64 → uint32 cast.
+	if version < 0 || version > math.MaxUint32 {
+		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 
 	// If the request's height is the latest height we've committed, then utilize
