@@ -189,7 +189,11 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 				t.Errorf("borrow version %d: %v", v, err)
 				return
 			}
-			require.NotNil(t, entry.db)
+			if entry.db == nil {
+				t.Errorf("borrow version %d: got nil db", v)
+				cache.release(entry)
+				return
+			}
 			cache.release(entry)
 		}(i)
 	}
