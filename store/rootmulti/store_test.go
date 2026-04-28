@@ -23,11 +23,20 @@ func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 	key := types.NewKVStoreKey("test")
 	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
 	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
 
+	// Commit version 1 with a key/value.
 	kvStore := rs.GetKVStore(key)
 	kvStore.Set([]byte("k"), []byte("v"))
 	commitID := rs.Commit()
 	require.Equal(t, int64(1), commitID.Version)
+
+	// Commit version 2 so that CacheMultiStoreWithVersion(1) must load a
+	// separate read-only memiavl DB rather than returning the live CacheMultiStore.
+	kvStore = rs.GetKVStore(key)
+	kvStore.Set([]byte("k2"), []byte("v2"))
+	commitID = rs.Commit()
+	require.Equal(t, int64(2), commitID.Version)
 
 	cms, err := rs.CacheMultiStoreWithVersion(1)
 	require.NoError(t, err)
