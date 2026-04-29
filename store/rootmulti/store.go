@@ -228,7 +228,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		stores[rs.keysByName[tree.Name]] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
-	return cachemulti.NewStore(stores, nil, nil, nil), nil
+	return cachemulti.NewStore(stores, nil, nil, db), nil
 }
 
 // GetStore Implements interface MultiStore
