@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23.7'
+          go-version: '1.25'
       - id: changed-files
         uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46.0.5
         with:
@@ -34,34 +34,31 @@ jobs:
             *.sum
       - name: install rocksDB dependencies
         run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential libsnappy-dev zlib1g-dev libbz2-dev libgflags-dev liblz4-dev libzstd-dev cmake
-          else
-            brew install snappy zlib bzip2 gflags
-          fi
-      - name: debug
-        run: |
-          find /usr/local -xdev -name "*ztd*"
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsnappy-dev zlib1g-dev libbz2-dev libgflags-dev liblz4-dev libzstd-dev cmake
+      - name: cache rocksdb
+        id: cache-rocksdb
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/rocksdb-install
+          key: rocksdb-v10.9.1-${{ runner.os }}-${{ runner.arch }}
       - name: build and install rocksdb
+        if: steps.cache-rocksdb.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/facebook/rocksdb.git
           cd rocksdb
           git checkout v10.9.1
           mkdir build && cd build
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
-              -DCMAKE_CXX_FLAGS="-Wno-error=unused-but-set-variable"
-            sudo make -j$(nproc)
-            sudo make install
-          else
-            export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
-            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
-              -DCMAKE_CXX_FLAGS="-faligned-allocation -Wno-error=unused-but-set-variable" -DCMAKE_PREFIX_PATH=/opt/homebrew \
-              -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix zstd)/lib"
-            sudo make -j$(sysctl -n hw.ncpu)
-            sudo make install
-          fi
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DROCKSDB_BUILD_SHARED=OFF \
+            -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
+            -DCMAKE_CXX_FLAGS="-Wno-error=unused-but-set-variable" \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/rocksdb-install
+          make -j$(nproc)
+          make install
+      - name: configure CGO for rocksdb
+        run: |
+          echo "CGO_CFLAGS=-I${{ github.workspace }}/rocksdb-install/include" >> $GITHUB_ENV
+          echo "CGO_LDFLAGS=-L${{ github.workspace }}/rocksdb-install/lib" >> $GITHUB_ENV
       - name: test & coverage report creation
         run: |
           make test
