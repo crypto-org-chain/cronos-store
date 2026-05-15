@@ -5,7 +5,7 @@ import (
 
 	abci "github.com/cometbft/cometbft/abci/types"
 
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 var _ types.ABCIListener = &StreamingService{}

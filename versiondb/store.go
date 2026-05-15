@@ -2,12 +2,9 @@ package versiondb
 
 import (
 	"io"
-	"time"
 
-	"cosmossdk.io/store/cachekv"
-	"cosmossdk.io/store/types"
-
-	"github.com/cosmos/cosmos-sdk/telemetry"
+	"github.com/cosmos/cosmos-sdk/store/v2/cachekv"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 const StoreTypeVersionDB = 100
@@ -38,7 +35,6 @@ func (st *Store) CacheWrap() types.CacheWrap {
 
 // Get Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
-	defer telemetry.MeasureSince(time.Now(), "store", "versiondb", "get")
 	value, err := st.store.GetAtVersion(st.name, key, st.version)
 	if err != nil {
 		panic(err)
@@ -48,7 +44,6 @@ func (st *Store) Get(key []byte) []byte {
 
 // Has Implements types.KVStore.
 func (st *Store) Has(key []byte) (exists bool) {
-	defer telemetry.MeasureSince(time.Now(), "store", "versiondb", "has")
 	has, err := st.store.HasAtVersion(st.name, key, st.version)
 	if err != nil {
 		panic(err)
@@ -84,6 +79,6 @@ func (st *Store) Delete(key []byte) {
 	panic("write operation is not supported")
 }
 
-func (st *Store) CacheWrapWithTrace(w io.Writer, tc types.TraceContext) types.CacheWrap {
-	panic("not implemented")
+func (st *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap {
+	return cachekv.NewStore(st)
 }
