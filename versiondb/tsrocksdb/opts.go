@@ -8,6 +8,7 @@ import (
 )
 
 const VersionDBCFName = "versiondb"
+const defaultCFName = "default"
 
 // NewVersionDBOpts returns the options used for the versiondb column family.
 // FIXME: we don't enable dict compression for SSTFileWriter, because otherwise the file writer won't report correct file size.
@@ -55,7 +56,7 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 	opts.SetCreateIfMissing(true)
 	opts.SetCreateIfMissingColumnFamilies(true)
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(
-		opts, dir, []string{"default", VersionDBCFName},
+		opts, dir, []string{defaultCFName, VersionDBCFName},
 		[]*grocksdb.Options{opts, NewVersionDBOpts(false)},
 	)
 	if err != nil {
@@ -68,7 +69,7 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 func OpenVersionDBForReadOnly(dir string, errorIfWalFileExists bool) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, error) {
 	opts := grocksdb.NewDefaultOptions()
 	db, cfHandles, err := grocksdb.OpenDbForReadOnlyColumnFamilies(
-		opts, dir, []string{"default", VersionDBCFName},
+		opts, dir, []string{defaultCFName, VersionDBCFName},
 		[]*grocksdb.Options{opts, NewVersionDBOpts(false)},
 		errorIfWalFileExists,
 	)
@@ -88,7 +89,7 @@ func OpenVersionDBAndTrimHistory(dir string, version int64) (*grocksdb.DB, *groc
 	opts.SetCreateIfMissing(true)
 	opts.SetCreateIfMissingColumnFamilies(true)
 	db, cfHandles, err := grocksdb.OpenDbAndTrimHistory(
-		opts, dir, []string{"default", VersionDBCFName},
+		opts, dir, []string{defaultCFName, VersionDBCFName},
 		[]*grocksdb.Options{opts, NewVersionDBOpts(false)},
 		ts[:],
 	)
