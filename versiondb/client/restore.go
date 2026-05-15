@@ -102,7 +102,7 @@ loop:
 			storeKey = item.Store.Name
 		case *types.SnapshotItem_IAVL:
 			if item.IAVL.Height != 0 {
-				continue // ← skip non-leaf nodes; their nil values would clobber leaves
+				continue
 			}
 			if storeKey == "" {
 				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
