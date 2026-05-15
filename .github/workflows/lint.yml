@@ -33,7 +33,7 @@ jobs:
             *.sum
       - name: install golangci-lint
         if: steps.changed-files.outputs.any_changed == 'true'
-        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
+        run: curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
       - name: install rocksDB dependencies
         run: |
           brew install snappy zlib bzip2 gflags
