@@ -1,5 +1,6 @@
 # Changelog
 
+- feat: upgrade to cosmos-sdk v0.54.3 (fork branch backport/26023-staking-queue-optimization).
 - [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
 - [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
 - [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators. 
