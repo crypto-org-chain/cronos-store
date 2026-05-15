@@ -364,7 +364,7 @@ func cloneAppend(bz, tail []byte) (res []byte) {
 	res = make([]byte, len(bz)+len(tail))
 	copy(res, bz)
 	copy(res[len(bz):], tail)
-	return
+	return res
 }
 
 // Returns a slice of the same length (big endian)
@@ -380,7 +380,7 @@ func cpIncr(bz []byte) (ret []byte) {
 	for i := len(bz) - 1; i >= 0; i-- {
 		if ret[i] < byte(0xFF) {
 			ret[i]++
-			return
+			return ret
 		}
 		ret[i] = byte(0x00)
 		if i == 0 {
