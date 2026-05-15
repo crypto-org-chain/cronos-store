@@ -7,8 +7,10 @@ import (
 	"github.com/linxGnu/grocksdb"
 )
 
-const VersionDBCFName = "versiondb"
-const defaultCFName = "default"
+const (
+	VersionDBCFName = "versiondb"
+	defaultCFName   = "default"
+)
 
 // NewVersionDBOpts returns the options used for the versiondb column family.
 // FIXME: we don't enable dict compression for SSTFileWriter, because otherwise the file writer won't report correct file size.
