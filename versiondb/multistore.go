@@ -64,7 +64,7 @@ func (s *MultiStore) cacheMultiStore(version *int64) types.CacheMultiStore {
 			stores[k] = NewKVStore(s.versionDB, k.Name(), version)
 		}
 	}
-	return cachemulti.NewStore(nil, stores, nil, s.traceWriter, s.getTracingContext())
+	return cachemulti.NewStore(stores, s.traceWriter, s.getTracingContext())
 }
 
 // CacheMultiStore implements `MultiStore` interface
