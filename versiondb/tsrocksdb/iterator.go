@@ -16,11 +16,16 @@ type rocksDBIterator struct {
 
 	// see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 	skipVersionZero bool
+
+	// readOpts must outlive the iterator because DBIter holds a pointer into the
+	// rocksdb_readoptions_t struct (timestamp_ub_). Destroying ReadOptions while
+	// the iterator is alive causes a dangling pointer and use-after-free.
+	readOpts *grocksdb.ReadOptions
 }
 
 var _ versiondb.Iterator = (*rocksDBIterator)(nil)
 
-func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, isReverse, skipVersionZero bool) *rocksDBIterator {
+func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, isReverse, skipVersionZero bool, readOpts *grocksdb.ReadOptions) *rocksDBIterator {
 	if isReverse {
 		if end == nil {
 			source.SeekToLast()
@@ -51,6 +56,7 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, is
 		isReverse:       isReverse,
 		isInvalid:       false,
 		skipVersionZero: skipVersionZero,
+		readOpts:        readOpts,
 	}
 
 	it.trySkipZeroVersion()
@@ -154,6 +160,9 @@ func (itr *rocksDBIterator) Error() error {
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
 	itr.source.Close()
+	if itr.readOpts != nil {
+		itr.readOpts.Destroy()
+	}
 	return nil
 }
 

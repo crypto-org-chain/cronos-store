@@ -168,9 +168,8 @@ func (s Store) iteratorAtVersion(storeKey string, start, end []byte, version *in
 	start, end = iterateWithPrefix(prefix, start, end)
 
 	readOpts := newTSReadOptions(version)
-	defer readOpts.Destroy()
 	itr := s.db.NewIteratorCF(readOpts, s.cfHandle)
-	return newRocksDBIterator(itr, prefix, start, end, reverse, s.skipVersionZero), nil
+	return newRocksDBIterator(itr, prefix, start, end, reverse, s.skipVersionZero, readOpts), nil
 }
 
 // FeedChangeSet is used to migrate legacy change sets into versiondb
