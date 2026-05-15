@@ -127,7 +127,7 @@ func (itr *rocksDBIterator) Value() []byte {
 }
 
 // Next implements Iterator.
-func (itr rocksDBIterator) Next() {
+func (itr *rocksDBIterator) Next() {
 	itr.assertIsValid()
 	if itr.isReverse {
 		itr.source.Prev()
@@ -138,13 +138,13 @@ func (itr rocksDBIterator) Next() {
 	itr.trySkipZeroVersion()
 }
 
-func (itr rocksDBIterator) timestamp() uint64 {
+func (itr *rocksDBIterator) timestamp() uint64 {
 	ts := itr.source.Timestamp()
 	defer ts.Free()
 	return binary.LittleEndian.Uint64(ts.Data())
 }
 
-func (itr rocksDBIterator) trySkipZeroVersion() {
+func (itr *rocksDBIterator) trySkipZeroVersion() {
 	if itr.skipVersionZero {
 		for itr.Valid() && itr.timestamp() == 0 {
 			itr.Next()
@@ -159,9 +159,13 @@ func (itr *rocksDBIterator) Error() error {
 
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
-	itr.source.Close()
+	if itr.source != nil {
+		itr.source.Close()
+		itr.source = nil
+	}
 	if itr.readOpts != nil {
 		itr.readOpts.Destroy()
+		itr.readOpts = nil
 	}
 	return nil
 }

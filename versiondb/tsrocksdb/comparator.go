@@ -19,7 +19,8 @@ func CreateTSComparator() *grocksdb.Comparator {
 //
 // NOTICE: the behavior must be identical to rocksdb builtin comparator "leveldb.BytewiseComparator.u64ts".
 // nil slice means "unset timestamp" (nullptr in C++): unset < any-set, matching the builtin behavior.
-// rocksdb v10.9.1 calls this with bz2=nil when iter_start_ts is not set.
+// RocksDB calls CompareTimestamp(current_ts, timestamp_lb_) where timestamp_lb_ comes from iter_start_ts;
+// when iter_start_ts is not set, timestamp_lb_ is nullptr → bz2 is nil here.
 func compareTS(bz1, bz2 []byte) int {
 	if bz1 == nil && bz2 == nil {
 		return 0

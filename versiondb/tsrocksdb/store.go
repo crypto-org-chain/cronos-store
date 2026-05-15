@@ -96,7 +96,7 @@ func (s Store) PutAtVersion(version int64, changeSet []*types.StoreKVPair) error
 
 func (s Store) GetAtVersionSlice(storeKey string, key []byte, version *int64) (*grocksdb.Slice, error) {
 	readOpts := newTSReadOptions(version)
-	defer readOpts.Destroy()
+	defer readOpts.Destroy() // safe: GetCFWithTS completes synchronously before this function returns
 	value, ts, err := s.db.GetCFWithTS(
 		readOpts,
 		s.cfHandle,
