@@ -1,6 +1,6 @@
 module github.com/crypto-org-chain/cronos-store/versiondb
 
-go 1.23.5
+go 1.25.9
 
 require (
 	cosmossdk.io/errors v1.1.0
