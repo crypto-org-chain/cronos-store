@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 
 	cosmossdkio "cosmossdk.io/errors"
-	"github.com/cosmos/cosmos-sdk/store/v2/snapshots"
-	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 
 	"github.com/cosmos/cosmos-sdk/server"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 )
 
 // RestoreVersionDBCmd returns a command to restore a versiondb from local snapshot
