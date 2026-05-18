@@ -77,7 +77,6 @@ func TestReadSnapshotEntriesSkipsInternalNodes(t *testing.T) {
 	}, got)
 }
 
-
 // errReader is a protoio.Reader that returns a fixed error after n successful reads.
 type errReader struct {
 	inner protoio.Reader
@@ -104,7 +103,6 @@ func makeSnapshotReader(items []*types.SnapshotItem) protoio.Reader {
 	_ = w.Close()
 	return protoio.NewDelimitedReader(&buf, 1<<20)
 }
-
 
 func TestReadSnapshotEntriesReturnsError(t *testing.T) {
 	// Fails after the store item is read, mid-stream.
