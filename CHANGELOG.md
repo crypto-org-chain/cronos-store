@@ -1,5 +1,6 @@
 # Changelog
 
+- [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
 - [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
 - [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators. 
 - [#45](https://github.com/crypto-org-chain/cronos-store/pull/45) feat: use rocksdb v10.9.1.
