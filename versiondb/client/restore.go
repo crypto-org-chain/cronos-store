@@ -64,16 +64,17 @@ func RestoreVersionDBCmd() *cobra.Command {
 			}
 
 			ch := make(chan versiondb.ImportEntry, 128)
+			errCh := make(chan error, 1)
 
 			go func() {
 				defer close(ch)
-
-				if err := readSnapshotEntries(streamReader, ch); err != nil {
-					ctx.Logger.Error("failed to read snapshot entries", "err", err)
-				}
+				errCh <- readSnapshotEntries(streamReader, ch)
 			}()
 
-			return versionDB.Import(int64(height), ch)
+			if err := versionDB.Import(int64(height), ch); err != nil {
+				return err
+			}
+			return <-errCh
 		},
 	}
 	return cmd
