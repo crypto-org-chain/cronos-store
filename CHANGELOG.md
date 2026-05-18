@@ -1,5 +1,6 @@
 # Changelog
 
+- [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
 - [#53](https://github.com/crypto-org-chain/cronos-store/pull/53) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
 - [#24](https://github.com/crypto-org-chain/cronos-store/pull/24) feat(memiavl): add CLI command to dump memiavl changeset.
 - [#23](https://github.com/crypto-org-chain/cronos-store/pull/23) perf(memiavl): optimize DB.ApplyChangeSet with pending map cache.
