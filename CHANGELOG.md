@@ -1,5 +1,6 @@
 # Changelog
 
+- [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
 - [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
 - [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
 - [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators. 
