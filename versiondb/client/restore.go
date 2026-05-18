@@ -107,10 +107,6 @@ loop:
 			if storeKey == "" {
 				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
 			}
-			if item.IAVL.Height > math.MaxInt8 {
-				return fmt.Errorf("node height %v cannot exceed %v",
-					item.IAVL.Height, math.MaxInt8)
-			}
 			ch <- versiondb.ImportEntry{
 				StoreKey: storeKey,
 				Key:      item.IAVL.Key,
