@@ -100,6 +100,7 @@ loop:
 		case *types.SnapshotItem_Store:
 			storeKey = item.Store.Name
 		case *types.SnapshotItem_IAVL:
+			// versiondb does not contain any consensus related state, so intermediate nodes can be skipped.
 			if item.IAVL.Height != 0 {
 				continue
 			}
