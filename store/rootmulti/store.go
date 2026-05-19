@@ -709,7 +709,7 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	// Otherwise, we query for the commit info from disk.
 	db := rs.db
 	var borrowedEntry *historicalDBEntry
-	if version != rs.lastCommitInfo.Version {
+	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
 		opts := rs.opts
 		opts.TargetVersion = uint32(version)
 		opts.ReadOnly = true
