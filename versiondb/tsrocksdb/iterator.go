@@ -147,19 +147,29 @@ func (itr *rocksDBIterator) timestamp() uint64 {
 func (itr *rocksDBIterator) trySkipZeroVersion() {
 	if itr.skipVersionZero {
 		for itr.Valid() && itr.timestamp() == 0 {
-			itr.Next()
+			if itr.isReverse {
+				itr.source.Prev()
+			} else {
+				itr.source.Next()
+			}
 		}
 	}
 }
 
 // Error implements Iterator.
 func (itr *rocksDBIterator) Error() error {
+	if itr.source == nil {
+		return nil
+	}
 	return itr.source.Err()
 }
 
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
+	itr.isInvalid = true
+	var err error
 	if itr.source != nil {
+		err = itr.source.Err()
 		itr.source.Close()
 		itr.source = nil
 	}
@@ -167,7 +177,7 @@ func (itr *rocksDBIterator) Close() error {
 		itr.readOpts.Destroy()
 		itr.readOpts = nil
 	}
-	return nil
+	return err
 }
 
 func (itr *rocksDBIterator) assertIsValid() {
