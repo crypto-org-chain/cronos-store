@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"path/filepath"
 	"strconv"
 
@@ -101,12 +100,13 @@ loop:
 		case *types.SnapshotItem_Store:
 			storeKey = item.Store.Name
 		case *types.SnapshotItem_IAVL:
+			// IAVL contains internal nodes for Merkle proof generation. However, versiondb
+			// does not require proof regeneration, so these internal nodes can be skipped.
+			if item.IAVL.Height != 0 {
+				continue
+			}
 			if storeKey == "" {
 				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
-			}
-			if item.IAVL.Height > math.MaxInt8 {
-				return fmt.Errorf("node height %v cannot exceed %v",
-					item.IAVL.Height, math.MaxInt8)
 			}
 			ch <- versiondb.ImportEntry{
 				StoreKey: storeKey,
