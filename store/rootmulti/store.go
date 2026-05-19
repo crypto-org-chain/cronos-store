@@ -358,10 +358,13 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	opts := rs.opts
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
-	// Load a fresh DB per call. The SDK's BaseApp closes the returned
-	// CacheMultiStore via the closer passed to cachemulti.NewStore, which
-	// closes the DB. We cannot use the historicalDBCache borrow/release path
-	// here because the same query context can outlive a single call.
+	// Load a fresh DB per call and hand its lifetime to the returned
+	// CacheMultiStore via cachemulti.NewStore's closer arg. The SDK's
+	// createQueryContext calls Close() on the returned store, which invokes
+	// the closer and shuts the DB down (see PR #54). historicalDBCache is
+	// not used here because the returned store's lifetime is owned by the
+	// caller, not scoped to a single function — the cache's borrow/release
+	// model only fits Query()'s short-lived use.
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return nil, err
