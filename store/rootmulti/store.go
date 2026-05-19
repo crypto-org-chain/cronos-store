@@ -1,11 +1,13 @@
 package rootmulti
 
 import (
+	stderrors "errors"
 	"fmt"
 	"io"
 	"math"
 	"sort"
 	"strings"
+	"sync"
 
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
@@ -24,6 +26,143 @@ import (
 
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
+
+const defaultHistoricalDBCacheSize = 4
+
+// historicalDBEntry is a single cached read-only *memiavl.DB instance.
+type historicalDBEntry struct {
+	version int64
+	db      *memiavl.DB
+	refs    int  // number of active borrows
+	evicted bool // removed from cache index but still held by a borrow
+}
+
+// historicalDBCache is a small bounded LRU cache of read-only *memiavl.DB
+// instances keyed by version. It uses reference counting so a DB is only
+// closed once all borrows have been released.
+type historicalDBCache struct {
+	mu      sync.Mutex
+	maxSize int
+	entries []*historicalDBEntry // ordered: index 0 is most-recently used
+	closed  bool
+}
+
+func newHistoricalDBCache(maxSize int) *historicalDBCache {
+	if maxSize <= 0 {
+		maxSize = defaultHistoricalDBCacheSize
+	}
+	return &historicalDBCache{maxSize: maxSize}
+}
+
+// borrow returns the cached entry for version, loading it via load() if it is
+// not already cached. The caller MUST call release() when done.
+func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, error)) (*historicalDBEntry, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
+	// Fast path: already cached.
+	for i, e := range c.entries {
+		if e.version == version {
+			e.refs++
+			// Move to front (MRU).
+			copy(c.entries[1:i+1], c.entries[0:i])
+			c.entries[0] = e
+			c.mu.Unlock()
+			return e, nil
+		}
+	}
+	c.mu.Unlock()
+
+	// Slow path: open the DB outside the lock to avoid holding it during I/O.
+	db, err := load()
+	if err != nil {
+		return nil, err
+	}
+
+	// Safety net: close db if we return without inserting it into the cache
+	// (e.g. because another goroutine raced us, or the cache was closed).
+	dbInserted := false
+	defer func() {
+		if !dbInserted {
+			_ = db.Close()
+		}
+	}()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Guard against the cache being closed while we were doing I/O.
+	if c.closed {
+		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
+
+	// Another goroutine may have loaded the same version while we were doing I/O.
+	for i, e := range c.entries {
+		if e.version == version {
+			// Use the existing entry; our db will be closed by the defer.
+			e.refs++
+			copy(c.entries[1:i+1], c.entries[0:i])
+			c.entries[0] = e
+			return e, nil
+		}
+	}
+
+	// Evict the oldest entry if we are at capacity.
+	if len(c.entries) >= c.maxSize {
+		oldest := c.entries[len(c.entries)-1]
+		c.entries = c.entries[:len(c.entries)-1]
+		oldest.evicted = true
+		if oldest.refs == 0 {
+			_ = oldest.db.Close()
+		}
+		// If refs > 0 the entry will be closed in release().
+	}
+
+	entry := &historicalDBEntry{version: version, db: db, refs: 1}
+	// Prepend (most-recently used).
+	c.entries = append([]*historicalDBEntry{entry}, c.entries...)
+	dbInserted = true
+	return entry, nil
+}
+
+// release decrements the ref count. If the entry was evicted and refs reaches
+// zero, the underlying DB is closed.
+func (c *historicalDBCache) release(e *historicalDBEntry) {
+	if e == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e.refs <= 0 {
+		panic(fmt.Sprintf("historicalDBCache: release called on entry with refs=%d", e.refs))
+	}
+	e.refs--
+	if e.refs == 0 && e.evicted {
+		_ = e.db.Close()
+	}
+}
+
+// close drains the cache. Entries with active borrows (refs > 0) are marked
+// evicted so that the last release() will close them.
+func (c *historicalDBCache) close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	var errs []error
+	for _, e := range c.entries {
+		e.evicted = true
+		if e.refs == 0 {
+			if err := e.db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		// If refs > 0 the entry will be closed by the last release().
+	}
+	c.entries = nil
+	return stderrors.Join(errs...)
+}
 
 const CommitInfoFileName = "commit_infos"
 
@@ -52,6 +191,8 @@ type Store struct {
 	sdk46Compact bool
 	// it's more efficient to export snapshot versions, we can filter out the non-snapshot versions
 	supportExportNonSnapshotVersion bool
+
+	historicalDBCache *historicalDBCache
 }
 
 func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) *Store {
@@ -66,6 +207,8 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 		stores:       make(map[types.StoreKey]types.CommitStore),
 		listeners:    make(map[types.StoreKey]*types.MemoryListener),
 		chainId:      chainId,
+
+		historicalDBCache: newHistoricalDBCache(defaultHistoricalDBCacheSize),
 	}
 }
 
@@ -139,7 +282,7 @@ func (rs *Store) Commit() types.CommitID {
 }
 
 func (rs *Store) Close() error {
-	return rs.db.Close()
+	return stderrors.Join(rs.db.Close(), rs.historicalDBCache.close())
 }
 
 // LastCommitID Implements interface Committer
@@ -206,9 +349,20 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	if version == 0 || (rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version) {
 		return rs.CacheMultiStore(), nil
 	}
+	// guard int64 → uint32 cast.
+	if version < 0 || version > math.MaxUint32 {
+		return nil, fmt.Errorf("version out of range: %d", version)
+	}
 	opts := rs.opts
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
+	// Load a fresh DB per call and hand its lifetime to the returned
+	// CacheMultiStore via cachemulti.NewStore's closer arg. The SDK's
+	// createQueryContext calls Close() on the returned store, which invokes
+	// the closer and shuts the DB down (see PR #54). historicalDBCache is
+	// not used here because the returned store's lifetime is owned by the
+	// caller, not scoped to a single function — the cache's borrow/release
+	// model only fits Query()'s short-lived use.
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return nil, err
@@ -545,18 +699,29 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	if version == 0 {
 		version = rs.db.Version()
 	}
+	// guard int64 → uint32 cast.
+	if version < 0 || version > math.MaxUint32 {
+		return nil, fmt.Errorf("version out of range: %d", version)
+	}
 
 	// If the request's height is the latest height we've committed, then utilize
 	// the store's lastCommitInfo as this commit info may not be flushed to disk.
 	// Otherwise, we query for the commit info from disk.
 	db := rs.db
-	if version != rs.lastCommitInfo.Version {
+	var borrowedEntry *historicalDBEntry
+	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
+		opts := rs.opts
+		opts.TargetVersion = uint32(version)
+		opts.ReadOnly = true
 		var err error
-		db, err = memiavl.Load(rs.dir, memiavl.Options{TargetVersion: uint32(version), ReadOnly: true}, rs.chainId)
+		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
+			return memiavl.Load(rs.dir, opts, rs.chainId)
+		})
 		if err != nil {
 			return nil, err
 		}
-		defer db.Close()
+		defer rs.historicalDBCache.release(borrowedEntry)
+		db = borrowedEntry.db
 	}
 
 	path := req.Path
