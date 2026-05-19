@@ -1,6 +1,7 @@
 # Changelog
 
 - feat: upgrade to cosmos-sdk v0.54.3 (fork branch backport/26023-staking-queue-optimization).
+- [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
 - [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
 - [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
 - [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.

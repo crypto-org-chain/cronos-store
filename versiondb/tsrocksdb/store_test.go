@@ -183,7 +183,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 
 	it, err := store.IteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
-	require.Equal(t, expected, versiondb.ConsumeIterator(it))
+	require.Equal(t, expected, versiondb.ConsumeIterator(t, it))
 
 	rit, err := store.ReverseIteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
@@ -191,7 +191,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 	for i, p := range expected {
 		reversed[len(expected)-1-i] = p
 	}
-	require.Equal(t, reversed, versiondb.ConsumeIterator(rit))
+	require.Equal(t, reversed, versiondb.ConsumeIterator(t, rit))
 }
 
 func TestSkipVersionZero(t *testing.T) {
@@ -234,7 +234,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key2Wrong, Value: []byte{2}},
 			{Key: key3, Value: []byte{3}},
 		},
-		versiondb.ConsumeIterator(it),
+		versiondb.ConsumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(true)
@@ -253,7 +253,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key1, Value: []byte{1}},
 			{Key: key3, Value: []byte{3}},
 		},
-		versiondb.ConsumeIterator(it),
+		versiondb.ConsumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(false)

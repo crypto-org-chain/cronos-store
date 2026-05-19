@@ -179,11 +179,11 @@ func testIterator(t *testing.T, store VersionStore) {
 			v := int64(i)
 			it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
-			require.Equal(t, exp, ConsumeIterator(it))
+			require.Equal(t, exp, ConsumeIterator(t, it))
 
 			it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
-			actual := ConsumeIterator(it)
+			actual := ConsumeIterator(t, it)
 			require.Equal(t, len(exp), len(actual))
 			require.Equal(t, reversed(exp), actual)
 		})
@@ -191,37 +191,37 @@ func testIterator(t *testing.T, store VersionStore) {
 
 	it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, expItems[len(expItems)-1], ConsumeIterator(it))
+	require.Equal(t, expItems[len(expItems)-1], ConsumeIterator(t, it))
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, reversed(expItems[len(expItems)-1]), ConsumeIterator(it))
+	require.Equal(t, reversed(expItems[len(expItems)-1]), ConsumeIterator(t, it))
 
 	// with start parameter
 	v := int64(2)
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("\xff"), nil, &v)
 	require.NoError(t, err)
-	require.Empty(t, ConsumeIterator(it))
+	require.Empty(t, ConsumeIterator(t, it))
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("\x00"), &v)
 	require.NoError(t, err)
-	require.Empty(t, ConsumeIterator(it))
+	require.Empty(t, ConsumeIterator(t, it))
 
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("modify-in-block2"), nil, &v)
 	require.NoError(t, err)
-	require.Equal(t, expItems[2][len(expItems[2])-2:], ConsumeIterator(it))
+	require.Equal(t, expItems[2][len(expItems[2])-2:], ConsumeIterator(t, it))
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("mp"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
-		ConsumeIterator(it),
+		ConsumeIterator(t, it),
 	)
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("modify-in-block3"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
-		ConsumeIterator(it),
+		ConsumeIterator(t, it),
 	)
 
 	// delete the last key, cover some edge cases
@@ -237,14 +237,14 @@ func testIterator(t *testing.T, store VersionStore) {
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v-1][:len(expItems[v-1])-1],
-		ConsumeIterator(it),
+		ConsumeIterator(t, it),
 	)
 	v--
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v],
-		ConsumeIterator(it),
+		ConsumeIterator(t, it),
 	)
 }
 
@@ -267,12 +267,13 @@ func testHeightInFuture(t *testing.T, store VersionStore) {
 	require.NoError(t, err)
 }
 
-func ConsumeIterator(it dbm.Iterator) []KVPair {
+func ConsumeIterator(t *testing.T, it dbm.Iterator) []KVPair {
+	t.Helper()
 	var result []KVPair
 	for ; it.Valid(); it.Next() {
 		result = append(result, KVPair{it.Key(), it.Value()})
 	}
-	it.Close()
+	require.NoError(t, it.Close())
 	return result
 }
 
