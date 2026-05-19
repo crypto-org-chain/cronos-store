@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/stretchr/testify/require"
 
-	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"cosmossdk.io/log"
 	"cosmossdk.io/store/types"
 )
@@ -236,4 +236,3 @@ func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 
 	require.NoError(t, closer.Close())
 }
-
