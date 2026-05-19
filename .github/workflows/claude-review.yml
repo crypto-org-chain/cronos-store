@@ -1,8 +1,8 @@
 name: Claude PR Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -11,18 +11,60 @@ permissions:
   id-token: write
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   review:
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '@claude')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Permission check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const username = context.payload.comment.user.login;
+
+            const { data: { permission } } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username,
+            });
+
+            const allowed = ['admin', 'maintain', 'write'];
+            if (!allowed.includes(permission)) {
+              core.setFailed(`User ${username} does not have write access.`);
+              return;
+            }
+
+      # issue_comment runs with github.ref on the default branch; resolve the PR head explicitly
+      - name: Resolve PR head for checkout
+        id: pr
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const prUrl = context.payload.issue.pull_request?.url;
+            if (!prUrl) {
+              core.setFailed('Expected issue.pull_request.url');
+              return;
+            }
+            const { data: pull } = await github.request('GET ' + prUrl);
+            const repository = pull.head.repo.full_name;
+            const ref = pull.head.ref;
+            const sha = pull.head.sha;
+            const fs = require('fs');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `repository=${repository}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `ref=${ref}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+
       - name: Checkout PR head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.issue.number }}/head
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: false
 
@@ -42,13 +84,13 @@ jobs:
             {
               "model": "us.anthropic.claude-sonnet-4-6",
               "attribution": {
-                "commit": "${{ github.event.pull_request.head.sha }}",
-                "pr": "${{ github.event.pull_request.number }}"
+                "commit": "${{ steps.pr.outputs.sha }}",
+                "pr": "${{ github.event.issue.number }}"
               }
             }
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR NUMBER: ${{ github.event.issue.number }}
 
             Never suggest GitHub Action SHA changes from memory — verify with `gh api repos/{owner}/{repo}/commits/{tag} --jq '.sha'` first.
 
