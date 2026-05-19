@@ -260,7 +260,7 @@ func (rs *Store) SetTracer(w io.Writer) types.MultiStore {
 
 // SetTracingContext Implements interface MultiStore
 func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
-	return nil
+	return rs
 }
 
 // LatestVersion Implements interface MultiStore
