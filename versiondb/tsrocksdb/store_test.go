@@ -184,7 +184,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 
 	it, err := store.IteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
-	require.Equal(t, expected, consumeIterator(it))
+	require.Equal(t, expected, consumeIterator(t, it))
 
 	rit, err := store.ReverseIteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 	for i, p := range expected {
 		reversed[len(expected)-1-i] = p
 	}
-	require.Equal(t, reversed, consumeIterator(rit))
+	require.Equal(t, reversed, consumeIterator(t, rit))
 }
 
 func TestSkipVersionZero(t *testing.T) {
@@ -235,7 +235,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key2Wrong, Value: []byte{2}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		consumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(true)
@@ -254,7 +254,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key1, Value: []byte{1}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		consumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(false)
@@ -271,11 +271,11 @@ type kvPair struct {
 	Value []byte
 }
 
-func consumeIterator(it dbm.Iterator) []kvPair {
+func consumeIterator(t *testing.T, it dbm.Iterator) []kvPair {
 	var result []kvPair
 	for ; it.Valid(); it.Next() {
 		result = append(result, kvPair{it.Key(), it.Value()})
 	}
-	it.Close()
+	require.NoError(t, it.Close())
 	return result
 }

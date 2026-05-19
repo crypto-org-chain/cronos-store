@@ -21,6 +21,10 @@ type rocksDBIterator struct {
 	// rocksdb_readoptions_t struct (timestamp_ub_). Destroying ReadOptions while
 	// the iterator is alive causes a dangling pointer and use-after-free.
 	readOpts *grocksdb.ReadOptions
+
+	// err is captured from source.Err() on Close so Error() remains usable after
+	// source is nilled out.
+	err error
 }
 
 var _ versiondb.Iterator = (*rocksDBIterator)(nil)
@@ -159,7 +163,7 @@ func (itr *rocksDBIterator) trySkipZeroVersion() {
 // Error implements Iterator.
 func (itr *rocksDBIterator) Error() error {
 	if itr.source == nil {
-		return nil
+		return itr.err
 	}
 	return itr.source.Err()
 }
@@ -167,9 +171,8 @@ func (itr *rocksDBIterator) Error() error {
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
 	itr.isInvalid = true
-	var err error
 	if itr.source != nil {
-		err = itr.source.Err()
+		itr.err = itr.source.Err()
 		itr.source.Close()
 		itr.source = nil
 	}
@@ -177,7 +180,7 @@ func (itr *rocksDBIterator) Close() error {
 		itr.readOpts.Destroy()
 		itr.readOpts = nil
 	}
-	return err
+	return itr.err
 }
 
 func (itr *rocksDBIterator) assertIsValid() {
