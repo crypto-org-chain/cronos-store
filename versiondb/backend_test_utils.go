@@ -10,6 +10,11 @@ import (
 	"cosmossdk.io/store/types"
 )
 
+const (
+	testStoreKeyEVM     = "evm"
+	testStoreKeyStaking = "staking"
+)
+
 var (
 	key1       = []byte("key1")
 	value1     = []byte("value1")
@@ -20,30 +25,30 @@ func SetupTestDB(t *testing.T, store VersionStore) {
 	t.Helper()
 	changeSets := [][]*types.StoreKVPair{
 		{
-			{StoreKey: "evm", Key: []byte("delete-in-block2"), Value: []byte("1")},
-			{StoreKey: "evm", Key: []byte("re-add-in-block3"), Value: []byte("1")},
-			{StoreKey: "evm", Key: []byte("z-genesis-only"), Value: []byte("2")},
-			{StoreKey: "evm", Key: []byte("modify-in-block2"), Value: []byte("1")},
-			{StoreKey: "staking", Key: []byte("key1"), Value: []byte("value1")},
-			{StoreKey: "staking", Key: []byte("key1/subkey"), Value: []byte("value1")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("delete-in-block2"), Value: []byte("1")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("re-add-in-block3"), Value: []byte("1")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("z-genesis-only"), Value: []byte("2")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("modify-in-block2"), Value: []byte("1")},
+			{StoreKey: testStoreKeyStaking, Key: []byte("key1"), Value: []byte("value1")},
+			{StoreKey: testStoreKeyStaking, Key: []byte("key1/subkey"), Value: []byte("value1")},
 		},
 		{
-			{StoreKey: "evm", Key: []byte("re-add-in-block3"), Delete: true},
-			{StoreKey: "evm", Key: []byte("add-in-block1"), Value: []byte("1")},
-			{StoreKey: "staking", Key: []byte("key1"), Delete: true},
+			{StoreKey: testStoreKeyEVM, Key: []byte("re-add-in-block3"), Delete: true},
+			{StoreKey: testStoreKeyEVM, Key: []byte("add-in-block1"), Value: []byte("1")},
+			{StoreKey: testStoreKeyStaking, Key: []byte("key1"), Delete: true},
 		},
 		{
-			{StoreKey: "evm", Key: []byte("add-in-block2"), Value: []byte("1")},
-			{StoreKey: "evm", Key: []byte("delete-in-block2"), Delete: true},
-			{StoreKey: "evm", Key: []byte("modify-in-block2"), Value: []byte("2")},
-			{StoreKey: "evm", Key: []byte("key2"), Delete: true},
-			{StoreKey: "staking", Key: []byte("key1"), Value: []byte("value2")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("add-in-block2"), Value: []byte("1")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("delete-in-block2"), Delete: true},
+			{StoreKey: testStoreKeyEVM, Key: []byte("modify-in-block2"), Value: []byte("2")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("key2"), Delete: true},
+			{StoreKey: testStoreKeyStaking, Key: []byte("key1"), Value: []byte("value2")},
 		},
 		{
-			{StoreKey: "evm", Key: []byte("re-add-in-block3"), Value: []byte("2")},
+			{StoreKey: testStoreKeyEVM, Key: []byte("re-add-in-block3"), Value: []byte("2")},
 		},
 		{
-			{StoreKey: "evm", Key: []byte("re-add-in-block3"), Delete: true},
+			{StoreKey: testStoreKeyEVM, Key: []byte("re-add-in-block3"), Delete: true},
 		},
 	}
 	for i, changeSet := range changeSets {
@@ -60,7 +65,7 @@ func Run(t *testing.T, storeCreator func() VersionStore) {
 	// test delete in genesis, noop
 	store := storeCreator()
 	err := store.PutAtVersion(0, []*types.StoreKVPair{
-		{StoreKey: "evm", Key: []byte{1}, Delete: true},
+		{StoreKey: testStoreKeyEVM, Key: []byte{1}, Delete: true},
 	})
 	require.NoError(t, err)
 }
@@ -71,58 +76,58 @@ func testBasics(t *testing.T, store VersionStore) {
 
 	SetupTestDB(t, store)
 
-	value, err := store.GetAtVersion("evm", []byte("z-genesis-only"), nil)
+	value, err := store.GetAtVersion(testStoreKeyEVM, []byte("z-genesis-only"), nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte("2"), value)
 
 	v = 4
-	ok, err := store.HasAtVersion("evm", []byte("z-genesis-only"), &v)
+	ok, err := store.HasAtVersion(testStoreKeyEVM, []byte("z-genesis-only"), &v)
 	require.NoError(t, err)
 	require.True(t, ok)
-	value, err = store.GetAtVersion("evm", []byte("z-genesis-only"), &v)
+	value, err = store.GetAtVersion(testStoreKeyEVM, []byte("z-genesis-only"), &v)
 	require.NoError(t, err)
 	require.Equal(t, value, []byte("2"))
 
-	value, err = store.GetAtVersion("evm", []byte("re-add-in-block3"), nil)
+	value, err = store.GetAtVersion(testStoreKeyEVM, []byte("re-add-in-block3"), nil)
 	require.NoError(t, err)
 	require.Empty(t, value)
 
-	ok, err = store.HasAtVersion("staking", key1, nil)
+	ok, err = store.HasAtVersion(testStoreKeyStaking, key1, nil)
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	value, err = store.GetAtVersion("staking", key1, nil)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1, nil)
 	require.NoError(t, err)
 	require.Equal(t, value, []byte("value2"))
 
 	v = 2
-	value, err = store.GetAtVersion("staking", key1, &v)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.Equal(t, value, []byte("value2"))
 
-	ok, err = store.HasAtVersion("staking", key1, &v)
+	ok, err = store.HasAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	v = 0
-	value, err = store.GetAtVersion("staking", key1, &v)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.Equal(t, value, []byte("value1"))
 
 	v = 1
-	value, err = store.GetAtVersion("staking", key1, &v)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.Empty(t, value)
 
-	ok, err = store.HasAtVersion("staking", key1, &v)
+	ok, err = store.HasAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.False(t, ok)
 
 	v = 0
-	value, err = store.GetAtVersion("staking", key1, &v)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
 	require.Equal(t, value1, value)
-	value, err = store.GetAtVersion("staking", key1Subkey, &v)
+	value, err = store.GetAtVersion(testStoreKeyStaking, key1Subkey, &v)
 	require.NoError(t, err)
 	require.Equal(t, value1, value)
 }
@@ -172,11 +177,11 @@ func testIterator(t *testing.T, store VersionStore) {
 	for i, exp := range expItems {
 		t.Run(fmt.Sprintf("block-%d", i), func(t *testing.T) {
 			v := int64(i)
-			it, err := store.IteratorAtVersion("evm", nil, nil, &v)
+			it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
 			require.Equal(t, exp, consumeIterator(it))
 
-			it, err = store.ReverseIteratorAtVersion("evm", nil, nil, &v)
+			it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
 			actual := consumeIterator(it)
 			require.Equal(t, len(exp), len(actual))
@@ -184,35 +189,35 @@ func testIterator(t *testing.T, store VersionStore) {
 		})
 	}
 
-	it, err := store.IteratorAtVersion("evm", nil, nil, nil)
+	it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, expItems[len(expItems)-1], consumeIterator(it))
 
-	it, err = store.ReverseIteratorAtVersion("evm", nil, nil, nil)
+	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, reversed(expItems[len(expItems)-1]), consumeIterator(it))
 
 	// with start parameter
 	v := int64(2)
-	it, err = store.IteratorAtVersion("evm", []byte("\xff"), nil, &v)
+	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("\xff"), nil, &v)
 	require.NoError(t, err)
 	require.Empty(t, consumeIterator(it))
-	it, err = store.ReverseIteratorAtVersion("evm", nil, []byte("\x00"), &v)
+	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("\x00"), &v)
 	require.NoError(t, err)
 	require.Empty(t, consumeIterator(it))
 
-	it, err = store.IteratorAtVersion("evm", []byte("modify-in-block2"), nil, &v)
+	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("modify-in-block2"), nil, &v)
 	require.NoError(t, err)
 	require.Equal(t, expItems[2][len(expItems[2])-2:], consumeIterator(it))
 
-	it, err = store.ReverseIteratorAtVersion("evm", nil, []byte("mp"), &v)
+	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("mp"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
 		consumeIterator(it),
 	)
 
-	it, err = store.ReverseIteratorAtVersion("evm", nil, []byte("modify-in-block3"), &v)
+	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("modify-in-block3"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
@@ -224,18 +229,18 @@ func testIterator(t *testing.T, store VersionStore) {
 	err = store.PutAtVersion(
 		v,
 		[]*types.StoreKVPair{
-			{StoreKey: "evm", Key: []byte("z-genesis-only"), Delete: true},
+			{StoreKey: testStoreKeyEVM, Key: []byte("z-genesis-only"), Delete: true},
 		},
 	)
 	require.NoError(t, err)
-	it, err = store.IteratorAtVersion("evm", nil, nil, &v)
+	it, err = store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v-1][:len(expItems[v-1])-1],
 		consumeIterator(it),
 	)
 	v--
-	it, err = store.IteratorAtVersion("evm", nil, nil, &v)
+	it, err = store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v],
@@ -252,13 +257,13 @@ func testHeightInFuture(t *testing.T, store VersionStore) {
 
 	// query in future height is the same as latest height.
 	v := latest + 1
-	_, err = store.GetAtVersion("staking", key1, &v)
+	_, err = store.GetAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
-	_, err = store.HasAtVersion("staking", key1, &v)
+	_, err = store.HasAtVersion(testStoreKeyStaking, key1, &v)
 	require.NoError(t, err)
-	_, err = store.IteratorAtVersion("staking", nil, nil, &v)
+	_, err = store.IteratorAtVersion(testStoreKeyStaking, nil, nil, &v)
 	require.NoError(t, err)
-	_, err = store.ReverseIteratorAtVersion("staking", nil, nil, &v)
+	_, err = store.ReverseIteratorAtVersion(testStoreKeyStaking, nil, nil, &v)
 	require.NoError(t, err)
 }
 

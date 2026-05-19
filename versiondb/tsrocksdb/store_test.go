@@ -157,6 +157,44 @@ func TestUserTimestampPruning(t *testing.T) {
 	bz.Free()
 }
 
+// TestIteratorReadOptsLifetime verifies that all keys remain visible across multiple Next() calls.
+// Regression test for use-after-free: defer readOpts.Destroy() in iteratorAtVersion freed the
+// ReadOptions before the iterator was used, zeroing DBIter::timestamp_ub_ and causing IsVisible
+// to reject every key after the first Next().
+func TestIteratorReadOptsLifetime(t *testing.T) {
+	storeKey := "test"
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	version := int64(1)
+	err = store.PutAtVersion(version, []*types.StoreKVPair{
+		{StoreKey: storeKey, Key: []byte("a"), Value: []byte{1}},
+		{StoreKey: storeKey, Key: []byte("b"), Value: []byte{2}},
+		{StoreKey: storeKey, Key: []byte("c"), Value: []byte{3}},
+		{StoreKey: storeKey, Key: []byte("d"), Value: []byte{4}},
+	})
+	require.NoError(t, err)
+
+	expected := []kvPair{
+		{Key: []byte("a"), Value: []byte{1}},
+		{Key: []byte("b"), Value: []byte{2}},
+		{Key: []byte("c"), Value: []byte{3}},
+		{Key: []byte("d"), Value: []byte{4}},
+	}
+
+	it, err := store.IteratorAtVersion(storeKey, nil, nil, &version)
+	require.NoError(t, err)
+	require.Equal(t, expected, consumeIterator(t, it))
+
+	rit, err := store.ReverseIteratorAtVersion(storeKey, nil, nil, &version)
+	require.NoError(t, err)
+	reversed := make([]kvPair, len(expected))
+	for i, p := range expected {
+		reversed[len(expected)-1-i] = p
+	}
+	require.Equal(t, reversed, consumeIterator(t, rit))
+}
+
 func TestSkipVersionZero(t *testing.T) {
 	storeKey := "test"
 
@@ -197,7 +235,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key2Wrong, Value: []byte{2}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		consumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(true)
@@ -216,7 +254,7 @@ func TestSkipVersionZero(t *testing.T) {
 			{Key: key1, Value: []byte{1}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		consumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(false)
@@ -233,11 +271,12 @@ type kvPair struct {
 	Value []byte
 }
 
-func consumeIterator(it dbm.Iterator) []kvPair {
+func consumeIterator(t *testing.T, it dbm.Iterator) []kvPair {
+	t.Helper()
 	var result []kvPair
 	for ; it.Valid(); it.Next() {
 		result = append(result, kvPair{it.Key(), it.Value()})
 	}
-	it.Close()
+	require.NoError(t, it.Close())
 	return result
 }

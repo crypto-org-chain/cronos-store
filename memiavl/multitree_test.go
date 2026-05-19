@@ -12,10 +12,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	store1Name = "store1"
+	store2Name = "store2"
+	store3Name = "store3"
+	store4Name = "store4"
+	store5Name = "store5"
+)
+
 func TestMultiTreeWriteSnapshotWithContextCancellation(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{"store1", "store2", "store3", "store4", "store5"}
+	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
@@ -52,7 +60,7 @@ func TestMultiTreeWriteSnapshotWithContextCancellation(t *testing.T) {
 func TestMultiTreeWriteSnapshotWithTimeoutContext(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{"store1", "store2", "store3"}
+	stores := []string{store1Name, store2Name, store3Name}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
@@ -90,7 +98,7 @@ func TestMultiTreeWriteSnapshotWithTimeoutContext(t *testing.T) {
 func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{"store1", "store2", "store3"}
+	stores := []string{store1Name, store2Name, store3Name}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
@@ -157,7 +165,7 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{"store1", "store2", "store3", "store4", "store5", "store6", "store7", "store8"}
+	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8"}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
@@ -243,7 +251,7 @@ func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
 func TestMultiTreeWriteSnapshotParallelWrites(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{"store1", "store2", "store3", "store4", "store5", "store6", "store7", "store8", "store9", "store10"}
+	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8", "store9", "store10"}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
