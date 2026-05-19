@@ -11,6 +11,8 @@ import (
 	"cosmossdk.io/store/snapshots/types"
 )
 
+const testStoreKey = "bank"
+
 // TestReadSnapshotEntriesSkipsInternalNodes is a regression test for the
 // restore-versiondb fix: only IAVL leaf nodes (Height == 0) carry user data,
 // so internal nodes must be dropped.
@@ -24,7 +26,7 @@ func TestReadSnapshotEntriesSkipsInternalNodes(t *testing.T) {
 
 	write(&types.SnapshotItem{
 		Item: &types.SnapshotItem_Store{
-			Store: &types.SnapshotStoreItem{Name: "bank"},
+			Store: &types.SnapshotStoreItem{Name: testStoreKey},
 		},
 	})
 	write(&types.SnapshotItem{
@@ -70,7 +72,7 @@ func TestReadSnapshotEntriesSkipsInternalNodes(t *testing.T) {
 	require.NoError(t, <-errCh)
 
 	require.Equal(t, []versiondb.ImportEntry{
-		{StoreKey: "bank", Key: []byte("k1"), Value: []byte("v1")},
-		{StoreKey: "bank", Key: []byte("k2"), Value: []byte("v2")},
+		{StoreKey: testStoreKey, Key: []byte("k1"), Value: []byte("v1")},
+		{StoreKey: testStoreKey, Key: []byte("k2"), Value: []byte("v2")},
 	}, got)
 }
