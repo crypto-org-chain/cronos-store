@@ -346,7 +346,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	if version == 0 || (rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version) {
 		return rs.CacheMultiStore(), nil
 	}
-	// H2: guard int64 → uint32 cast.
+	// guard int64 → uint32 cast.
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
@@ -693,7 +693,7 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	if version == 0 {
 		version = rs.db.Version()
 	}
-	// H2: guard int64 → uint32 cast.
+	// guard int64 → uint32 cast.
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
