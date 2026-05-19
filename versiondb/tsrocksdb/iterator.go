@@ -166,6 +166,18 @@ func (itr *rocksDBIterator) Error() error {
 
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
+	var err error
+	if itr.source != nil {
+		err = itr.source.Err()
+		itr.source.Close()
+		itr.source = nil
+	}
+	if itr.readOpts != nil {
+		itr.readOpts.Destroy()
+		itr.readOpts = nil
+	}
+	return err
+}
 	itr.isInvalid = true
 	var err error
 	if itr.source != nil {
