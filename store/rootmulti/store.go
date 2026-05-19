@@ -135,8 +135,6 @@ func (c *historicalDBCache) release(e *historicalDBEntry) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if e.refs <= 0 {
 		panic(fmt.Sprintf("historicalDBCache: release called on entry with refs=%d", e.refs))
 	}
