@@ -130,6 +130,11 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 // release decrements the ref count. If the entry was evicted and refs reaches
 // zero, the underlying DB is closed.
 func (c *historicalDBCache) release(e *historicalDBEntry) {
+	if e == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e.refs <= 0 {
