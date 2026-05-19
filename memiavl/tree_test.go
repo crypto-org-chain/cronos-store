@@ -24,12 +24,19 @@ var (
 	RefHashesInitialVersion [][]byte
 )
 
+const (
+	testStoreName  = "test"
+	test1StoreName = "test1"
+	test2StoreName = "test2"
+	otherStoreName = "other"
+)
+
 func mockKVPairs(kvPairs ...string) []*KVPair {
 	result := make([]*KVPair, len(kvPairs)/2)
 	for i := 0; i < len(kvPairs); i += 2 {
 		result[i/2] = &KVPair{
 			Key:   []byte(kvPairs[i]),
-			Value: []byte(kvPairs[i+1]),
+			Value: []byte(kvPairs[i+1]), //nolint:gosec // called with even-length args only
 		}
 	}
 	return result

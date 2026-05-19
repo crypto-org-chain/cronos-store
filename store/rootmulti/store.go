@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -160,23 +159,6 @@ func (c *historicalDBCache) close() error {
 	}
 	c.entries = nil
 	return stderrors.Join(errs...)
-}
-
-// versionedCacheMultiStore is a types.CacheMultiStore that owns a read-only
-// *memiavl.DB opened for a specific historical version. The SDK's BaseApp
-// never calls Close() on query-context stores, so runtime.SetFinalizer is
-// used as a safety net to ensure the DB is eventually closed by the GC.
-type versionedCacheMultiStore struct {
-	cachemulti.Store
-	db *memiavl.DB
-}
-
-func newVersionedCacheMultiStore(cms cachemulti.Store, db *memiavl.DB) *versionedCacheMultiStore {
-	v := &versionedCacheMultiStore{Store: cms, db: db}
-	runtime.SetFinalizer(v, func(v *versionedCacheMultiStore) {
-		_ = v.db.Close()
-	})
-	return v
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -371,10 +353,10 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	opts := rs.opts
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
-	// Load a fresh DB per call: the SDK's BaseApp never calls Close() on the
-	// returned CacheMultiStore, so we cannot use the borrow/release cache here.
-	// versionedCacheMultiStore owns db and uses runtime.SetFinalizer as a
-	// safety net so the DB is closed when the GC collects the store.
+	// Load a fresh DB per call. The SDK's BaseApp closes the returned
+	// CacheMultiStore via the closer passed to cachemulti.NewStore, which
+	// closes the DB. We cannot use the historicalDBCache borrow/release path
+	// here because the same query context can outlive a single call.
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return nil, err
@@ -394,8 +376,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		stores[rs.keysByName[tree.Name]] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
-	cms := cachemulti.NewStore(stores, nil, nil, nil)
-	return newVersionedCacheMultiStore(cms, db), nil
+	return cachemulti.NewStore(stores, nil, nil, db), nil
 }
 
 // GetStore Implements interface MultiStore

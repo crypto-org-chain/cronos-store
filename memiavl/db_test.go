@@ -19,14 +19,14 @@ const TestAppChainID = "test_chain"
 func TestRewriteSnapshot(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
-		InitialStores:   []string{"test"},
+		InitialStores:   []string{testStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
 
 	for i, changes := range ChangeSets {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test",
+				Name:      testStoreName,
 				Changeset: changes,
 			},
 		}
@@ -58,7 +58,7 @@ func TestRemoveSnapshotDir(t *testing.T) {
 	}
 	db, err := Load(dbDir, Options{
 		CreateIfMissing:    true,
-		InitialStores:      []string{"test"},
+		InitialStores:      []string{testStoreName},
 		SnapshotKeepRecent: 0,
 	}, TestAppChainID)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestRemoveSnapshotDir(t *testing.T) {
 func TestRewriteSnapshotBackground(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:    true,
-		InitialStores:      []string{"test"},
+		InitialStores:      []string{testStoreName},
 		SnapshotKeepRecent: 0, // only a single snapshot is kept
 	}, TestAppChainID)
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	for i, changes := range ChangeSets {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test",
+				Name:      testStoreName,
 				Changeset: changes,
 			},
 		}
@@ -128,13 +128,13 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test", "delete"}}, TestAppChainID)
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName, "delete"}}, TestAppChainID)
 	require.NoError(t, err)
 
 	for _, changes := range ChangeSets {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test",
+				Name:      testStoreName,
 				Changeset: changes,
 			},
 		}
@@ -148,7 +148,7 @@ func TestWAL(t *testing.T) {
 	require.NoError(t, db.ApplyUpgrades([]*TreeNameUpgrade{
 		{
 			Name:       "newtest",
-			RenameFrom: "test",
+			RenameFrom: testStoreName,
 		},
 		{
 			Name:   "delete",
@@ -183,7 +183,7 @@ func mockNameChangeSet(name, key, value string) []*NamedChangeSet {
 // ...
 // 100 -> v: 100
 func TestInitialVersion(t *testing.T) {
-	name := "test"
+	name := testStoreName
 	name1 := "new"
 	name2 := "new2"
 	key := "hello"
@@ -257,14 +257,14 @@ func TestLoadVersion(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
-		InitialStores:   []string{"test"},
+		InitialStores:   []string{testStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
 
 	for i, changes := range ChangeSets {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test",
+				Name:      testStoreName,
 				Changeset: changes,
 			},
 		}
@@ -289,8 +289,8 @@ func TestLoadVersion(t *testing.T) {
 			ReadOnly:      true,
 		}, TestAppChainID)
 		require.NoError(t, err)
-		require.Equal(t, RefHashes[v-1], tmp.TreeByName("test").RootHash())
-		require.Equal(t, expItems, collectIter(tmp.TreeByName("test").Iterator(nil, nil, true)))
+		require.Equal(t, RefHashes[v-1], tmp.TreeByName(testStoreName).RootHash())
+		require.Equal(t, expItems, collectIter(tmp.TreeByName(testStoreName).Iterator(nil, nil, true)))
 	}
 }
 
@@ -298,7 +298,7 @@ func TestTreeTraverseStateChanges(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
-		InitialStores:   []string{"test", "other"},
+		InitialStores:   []string{testStoreName, otherStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
@@ -310,24 +310,24 @@ func TestTreeTraverseStateChanges(t *testing.T) {
 	}
 
 	applyAndCommit([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
 	})
 	applyAndCommit([]*NamedChangeSet{
-		{Name: "other", Changeset: ChangeSet{Pairs: mockKVPairs("baz", "qux")}},
+		{Name: otherStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("baz", "qux")}},
 	})
 	applyAndCommit([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "baz")}},
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "baz")}},
 	})
 
 	firstVersion, err := db.FirstVersion()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, firstVersion)
-	starts, err := db.FirstStoreVersions([]string{"test", "other"})
+	starts, err := db.FirstStoreVersions([]string{testStoreName, otherStoreName})
 	require.NoError(t, err)
-	require.EqualValues(t, 1, starts["test"])
-	require.EqualValues(t, 2, starts["other"])
+	require.EqualValues(t, 1, starts[testStoreName])
+	require.EqualValues(t, 2, starts[otherStoreName])
 
-	tree := db.TreeByName("test")
+	tree := db.TreeByName(testStoreName)
 	require.NotNil(t, tree)
 
 	var versions []int64
@@ -364,12 +364,12 @@ func TestTraverseStateChangesWithoutWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
-		InitialStores:   []string{"test"},
+		InitialStores:   []string{testStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestTraverseStateChangesWithoutWAL(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, readonly.Close()) }()
 
-	tree := readonly.TreeByName("test")
+	tree := readonly.TreeByName(testStoreName)
 	require.NotNil(t, tree)
 
 	err = tree.TraverseStateChanges(1, 1, func(version int64, cs *ChangeSet) error {
@@ -394,10 +394,10 @@ func TestTraverseStateChangesWithoutWAL(t *testing.T) {
 }
 
 func TestZeroCopy(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{InitialStores: []string{"test", "test2"}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
+	db, err := Load(t.TempDir(), Options{InitialStores: []string{testStoreName, test2StoreName}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSets[0]},
+		{Name: testStoreName, Changeset: ChangeSets[0]},
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
@@ -408,18 +408,18 @@ func TestZeroCopy(t *testing.T) {
 
 	// the test tree's root hash will reference the zero-copy value
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test2", Changeset: ChangeSets[0]},
+		{Name: test2StoreName, Changeset: ChangeSets[0]},
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
 
 	commitInfo := *db.LastCommitInfo()
 
-	value := db.TreeByName("test").Get([]byte("hello"))
+	value := db.TreeByName(testStoreName).Get([]byte("hello"))
 	require.Equal(t, []byte("world"), value)
 
 	db.SetZeroCopy(false)
-	valueCloned := db.TreeByName("test").Get([]byte("hello"))
+	valueCloned := db.TreeByName(testStoreName).Get([]byte("hello"))
 	require.Equal(t, []byte("world"), valueCloned)
 
 	_ = commitInfo.StoreInfos[0].CommitId.Hash[0]
@@ -458,11 +458,11 @@ func TestWalIndexConversion(t *testing.T) {
 
 func TestEmptyValue(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Load(dir, Options{InitialStores: []string{"test"}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
+	db, err := Load(dir, Options{InitialStores: []string{testStoreName}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
 			Pairs: []*KVPair{
 				{Key: []byte("hello1"), Value: []byte("")},
 				{Key: []byte("hello2"), Value: []byte("")},
@@ -474,7 +474,7 @@ func TestEmptyValue(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test", Changeset: ChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
 			Pairs: []*KVPair{{Key: []byte("hello1"), Delete: true}},
 		}},
 	}))
@@ -529,7 +529,7 @@ func TestExclusiveLock(t *testing.T) {
 func TestFastCommit(t *testing.T) {
 	dir := t.TempDir()
 
-	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{"test"}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
 	require.NoError(t, err)
 
 	cs := ChangeSet{
@@ -541,7 +541,7 @@ func TestFastCommit(t *testing.T) {
 	// the bug reproduce when the wal writing is slower than commit, that happens when wal segment is full and create a new one, the wal writing will slow down a little bit,
 	// segment size is 20m, each change set is 1m, so we need a bit more than 20 commits to reproduce.
 	for i := 0; i < 30; i++ {
-		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{{Name: "test", Changeset: cs}}))
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{{Name: testStoreName, Changeset: cs}}))
 		_, err := db.Commit()
 		require.NoError(t, err)
 	}
@@ -551,16 +551,16 @@ func TestFastCommit(t *testing.T) {
 }
 
 func TestRepeatedApplyChangeSet(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{"test1", "test2"}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
+	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{test1StoreName, test2StoreName}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
 	require.NoError(t, err)
 
 	err = db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: "test1", Changeset: ChangeSet{
+		{Name: test1StoreName, Changeset: ChangeSet{
 			Pairs: []*KVPair{
 				{Key: []byte("hello1"), Value: []byte("world1")},
 			},
 		}},
-		{Name: "test2", Changeset: ChangeSet{
+		{Name: test2StoreName, Changeset: ChangeSet{
 			Pairs: []*KVPair{
 				{Key: []byte("hello2"), Value: []byte("world2")},
 			},
@@ -568,10 +568,10 @@ func TestRepeatedApplyChangeSet(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = db.ApplyChangeSets([]*NamedChangeSet{{Name: "test1"}})
+	err = db.ApplyChangeSets([]*NamedChangeSet{{Name: test1StoreName}})
 	require.NoError(t, err)
 
-	err = db.ApplyChangeSet("test1", ChangeSet{
+	err = db.ApplyChangeSet(test1StoreName, ChangeSet{
 		Pairs: []*KVPair{
 			{Key: []byte("hello2"), Value: []byte("world2")},
 		},
@@ -581,26 +581,26 @@ func TestRepeatedApplyChangeSet(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	err = db.ApplyChangeSet("test1", ChangeSet{
+	err = db.ApplyChangeSet(test1StoreName, ChangeSet{
 		Pairs: []*KVPair{
 			{Key: []byte("hello2"), Value: []byte("world2")},
 		},
 	})
 	require.NoError(t, err)
-	err = db.ApplyChangeSet("test2", ChangeSet{
+	err = db.ApplyChangeSet(test2StoreName, ChangeSet{
 		Pairs: []*KVPair{
 			{Key: []byte("hello2"), Value: []byte("world2")},
 		},
 	})
 	require.NoError(t, err)
 
-	err = db.ApplyChangeSet("test1", ChangeSet{
+	err = db.ApplyChangeSet(test1StoreName, ChangeSet{
 		Pairs: []*KVPair{
 			{Key: []byte("hello2"), Value: []byte("world2")},
 		},
 	})
 	require.NoError(t, err)
-	err = db.ApplyChangeSet("test2", ChangeSet{
+	err = db.ApplyChangeSet(test2StoreName, ChangeSet{
 		Pairs: []*KVPair{
 			{Key: []byte("hello2"), Value: []byte("world2")},
 		},
@@ -659,7 +659,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 
 	db, err := Load(dir, Options{
 		CreateIfMissing:   true,
-		InitialStores:     []string{"test1", "test2"},
+		InitialStores:     []string{test1StoreName, test2StoreName},
 		AsyncCommitBuffer: asyncCommitBuffer,
 	}, TestAppChainID)
 	require.NoError(t, err)
@@ -669,11 +669,11 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	for i := 0; i < 10; i++ {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test1",
+				Name:      test1StoreName,
 				Changeset: ChangeSet{Pairs: mockKVPairs("hello", fmt.Sprintf("world%d", i))},
 			},
 			{
-				Name:      "test2",
+				Name:      test2StoreName,
 				Changeset: ChangeSet{Pairs: mockKVPairs("hello", fmt.Sprintf("world%d", i))},
 			},
 		}

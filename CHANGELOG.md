@@ -1,5 +1,10 @@
+# Changelog
 
-- [#50](https://github.com/crypto-org-chain/cronos-store/pull/50) perf(store): add LRU cache for historical DB instances, fix fd leak in `CacheMultiStoreWithVersion`, and harden `historicalDBCache` against use-after-close and double-release.
+- [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
+- [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
+- [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
+- [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
+- [#50](https://github.com/crypto-org-chain/cronos-store/pull/50) perf(store): add LRU cache for historical DB instances and harden `historicalDBCache` against use-after-close and double-release.
 - [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators.
 - [#45](https://github.com/crypto-org-chain/cronos-store/pull/45) feat: use rocksdb v10.9.1.
 - [#41](https://github.com/crypto-org-chain/cronos-store/pull/41) fix: update cosmos-sdk with signature incarnation cache removed for SigVerificationDecorator

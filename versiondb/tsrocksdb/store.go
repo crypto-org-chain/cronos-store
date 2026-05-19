@@ -96,7 +96,7 @@ func (s Store) PutAtVersion(version int64, changeSet []*types.StoreKVPair) error
 
 func (s Store) GetAtVersionSlice(storeKey string, key []byte, version *int64) (*grocksdb.Slice, error) {
 	readOpts := newTSReadOptions(version)
-	defer readOpts.Destroy()
+	defer readOpts.Destroy() // safe: GetCFWithTS completes synchronously before this function returns
 	value, ts, err := s.db.GetCFWithTS(
 		readOpts,
 		s.cfHandle,
@@ -168,9 +168,8 @@ func (s Store) iteratorAtVersion(storeKey string, start, end []byte, version *in
 	start, end = iterateWithPrefix(prefix, start, end)
 
 	readOpts := newTSReadOptions(version)
-	defer readOpts.Destroy()
 	itr := s.db.NewIteratorCF(readOpts, s.cfHandle)
-	return newRocksDBIterator(itr, prefix, start, end, reverse, s.skipVersionZero), nil
+	return newRocksDBIterator(itr, prefix, start, end, reverse, s.skipVersionZero, readOpts), nil
 }
 
 // FeedChangeSet is used to migrate legacy change sets into versiondb
@@ -365,7 +364,7 @@ func cloneAppend(bz, tail []byte) (res []byte) {
 	res = make([]byte, len(bz)+len(tail))
 	copy(res, bz)
 	copy(res[len(bz):], tail)
-	return
+	return res
 }
 
 // Returns a slice of the same length (big endian)
@@ -381,7 +380,7 @@ func cpIncr(bz []byte) (ret []byte) {
 	for i := len(bz) - 1; i >= 0; i-- {
 		if ret[i] < byte(0xFF) {
 			ret[i]++
-			return
+			return ret
 		}
 		ret[i] = byte(0x00)
 		if i == 0 {
