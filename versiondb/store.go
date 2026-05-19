@@ -7,7 +7,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
-const StoreTypeVersionDB = 100
+const StoreTypeVersionDB = 1000
 
 var _ types.KVStore = (*Store)(nil)
 

@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"testing"
 
-	dbm "github.com/cosmos/cosmos-db"
 	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/linxGnu/grocksdb"
 	"github.com/stretchr/testify/require"
@@ -175,7 +174,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	expected := []kvPair{
+	expected := []versiondb.KVPair{
 		{Key: []byte("a"), Value: []byte{1}},
 		{Key: []byte("b"), Value: []byte{2}},
 		{Key: []byte("c"), Value: []byte{3}},
@@ -184,15 +183,15 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 
 	it, err := store.IteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
-	require.Equal(t, expected, consumeIterator(it))
+	require.Equal(t, expected, versiondb.ConsumeIterator(it))
 
 	rit, err := store.ReverseIteratorAtVersion(storeKey, nil, nil, &version)
 	require.NoError(t, err)
-	reversed := make([]kvPair, len(expected))
+	reversed := make([]versiondb.KVPair, len(expected))
 	for i, p := range expected {
 		reversed[len(expected)-1-i] = p
 	}
-	require.Equal(t, reversed, consumeIterator(rit))
+	require.Equal(t, reversed, versiondb.ConsumeIterator(rit))
 }
 
 func TestSkipVersionZero(t *testing.T) {
@@ -230,12 +229,12 @@ func TestSkipVersionZero(t *testing.T) {
 	it, err := store.IteratorAtVersion(storeKey, nil, nil, &i)
 	require.NoError(t, err)
 	require.Equal(t,
-		[]kvPair{
+		[]versiondb.KVPair{
 			{Key: key1, Value: []byte{1}},
 			{Key: key2Wrong, Value: []byte{2}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		versiondb.ConsumeIterator(it),
 	)
 
 	store.SetSkipVersionZero(true)
@@ -250,11 +249,11 @@ func TestSkipVersionZero(t *testing.T) {
 	it, err = store.IteratorAtVersion(storeKey, nil, nil, &i)
 	require.NoError(t, err)
 	require.Equal(t,
-		[]kvPair{
+		[]versiondb.KVPair{
 			{Key: key1, Value: []byte{1}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		versiondb.ConsumeIterator(it),
 	)
 
 	store.SetSkipVersionZero(false)
@@ -264,18 +263,4 @@ func TestSkipVersionZero(t *testing.T) {
 	bz, err = store.GetAtVersion(storeKey, key2, &i)
 	require.NoError(t, err)
 	require.Equal(t, []byte{2}, bz)
-}
-
-type kvPair struct {
-	Key   []byte
-	Value []byte
-}
-
-func consumeIterator(it dbm.Iterator) []kvPair {
-	var result []kvPair
-	for ; it.Valid(); it.Next() {
-		result = append(result, kvPair{it.Key(), it.Value()})
-	}
-	it.Close()
-	return result
 }

@@ -132,7 +132,7 @@ func testBasics(t *testing.T, store VersionStore) {
 	require.Equal(t, value1, value)
 }
 
-type kvPair struct {
+type KVPair struct {
 	Key   []byte
 	Value []byte
 }
@@ -141,37 +141,37 @@ func testIterator(t *testing.T, store VersionStore) {
 	t.Helper()
 	SetupTestDB(t, store)
 
-	expItems := [][]kvPair{
+	expItems := [][]KVPair{
 		{
-			kvPair{[]byte("delete-in-block2"), []byte("1")},
-			kvPair{[]byte("modify-in-block2"), []byte("1")},
-			kvPair{[]byte("re-add-in-block3"), []byte("1")},
-			kvPair{[]byte("z-genesis-only"), []byte("2")},
+			KVPair{[]byte("delete-in-block2"), []byte("1")},
+			KVPair{[]byte("modify-in-block2"), []byte("1")},
+			KVPair{[]byte("re-add-in-block3"), []byte("1")},
+			KVPair{[]byte("z-genesis-only"), []byte("2")},
 		},
 		{
-			kvPair{[]byte("add-in-block1"), []byte("1")},
-			kvPair{[]byte("delete-in-block2"), []byte("1")},
-			kvPair{[]byte("modify-in-block2"), []byte("1")},
-			kvPair{[]byte("z-genesis-only"), []byte("2")},
+			KVPair{[]byte("add-in-block1"), []byte("1")},
+			KVPair{[]byte("delete-in-block2"), []byte("1")},
+			KVPair{[]byte("modify-in-block2"), []byte("1")},
+			KVPair{[]byte("z-genesis-only"), []byte("2")},
 		},
 		{
-			kvPair{[]byte("add-in-block1"), []byte("1")},
-			kvPair{[]byte("add-in-block2"), []byte("1")},
-			kvPair{[]byte("modify-in-block2"), []byte("2")},
-			kvPair{[]byte("z-genesis-only"), []byte("2")},
+			KVPair{[]byte("add-in-block1"), []byte("1")},
+			KVPair{[]byte("add-in-block2"), []byte("1")},
+			KVPair{[]byte("modify-in-block2"), []byte("2")},
+			KVPair{[]byte("z-genesis-only"), []byte("2")},
 		},
 		{
-			kvPair{[]byte("add-in-block1"), []byte("1")},
-			kvPair{[]byte("add-in-block2"), []byte("1")},
-			kvPair{[]byte("modify-in-block2"), []byte("2")},
-			kvPair{[]byte("re-add-in-block3"), []byte("2")},
-			kvPair{[]byte("z-genesis-only"), []byte("2")},
+			KVPair{[]byte("add-in-block1"), []byte("1")},
+			KVPair{[]byte("add-in-block2"), []byte("1")},
+			KVPair{[]byte("modify-in-block2"), []byte("2")},
+			KVPair{[]byte("re-add-in-block3"), []byte("2")},
+			KVPair{[]byte("z-genesis-only"), []byte("2")},
 		},
 		{
-			kvPair{[]byte("add-in-block1"), []byte("1")},
-			kvPair{[]byte("add-in-block2"), []byte("1")},
-			kvPair{[]byte("modify-in-block2"), []byte("2")},
-			kvPair{[]byte("z-genesis-only"), []byte("2")},
+			KVPair{[]byte("add-in-block1"), []byte("1")},
+			KVPair{[]byte("add-in-block2"), []byte("1")},
+			KVPair{[]byte("modify-in-block2"), []byte("2")},
+			KVPair{[]byte("z-genesis-only"), []byte("2")},
 		},
 	}
 	for i, exp := range expItems {
@@ -179,11 +179,11 @@ func testIterator(t *testing.T, store VersionStore) {
 			v := int64(i)
 			it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
-			require.Equal(t, exp, consumeIterator(it))
+			require.Equal(t, exp, ConsumeIterator(it))
 
 			it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 			require.NoError(t, err)
-			actual := consumeIterator(it)
+			actual := ConsumeIterator(it)
 			require.Equal(t, len(exp), len(actual))
 			require.Equal(t, reversed(exp), actual)
 		})
@@ -191,37 +191,37 @@ func testIterator(t *testing.T, store VersionStore) {
 
 	it, err := store.IteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, expItems[len(expItems)-1], consumeIterator(it))
+	require.Equal(t, expItems[len(expItems)-1], ConsumeIterator(it))
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, reversed(expItems[len(expItems)-1]), consumeIterator(it))
+	require.Equal(t, reversed(expItems[len(expItems)-1]), ConsumeIterator(it))
 
 	// with start parameter
 	v := int64(2)
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("\xff"), nil, &v)
 	require.NoError(t, err)
-	require.Empty(t, consumeIterator(it))
+	require.Empty(t, ConsumeIterator(it))
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("\x00"), &v)
 	require.NoError(t, err)
-	require.Empty(t, consumeIterator(it))
+	require.Empty(t, ConsumeIterator(it))
 
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, []byte("modify-in-block2"), nil, &v)
 	require.NoError(t, err)
-	require.Equal(t, expItems[2][len(expItems[2])-2:], consumeIterator(it))
+	require.Equal(t, expItems[2][len(expItems[2])-2:], ConsumeIterator(it))
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("mp"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
-		consumeIterator(it),
+		ConsumeIterator(it),
 	)
 
 	it, err = store.ReverseIteratorAtVersion(testStoreKeyEVM, nil, []byte("modify-in-block3"), &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		reversed(expItems[2][:len(expItems[2])-1]),
-		consumeIterator(it),
+		ConsumeIterator(it),
 	)
 
 	// delete the last key, cover some edge cases
@@ -237,14 +237,14 @@ func testIterator(t *testing.T, store VersionStore) {
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v-1][:len(expItems[v-1])-1],
-		consumeIterator(it),
+		ConsumeIterator(it),
 	)
 	v--
 	it, err = store.IteratorAtVersion(testStoreKeyEVM, nil, nil, &v)
 	require.NoError(t, err)
 	require.Equal(t,
 		expItems[v],
-		consumeIterator(it),
+		ConsumeIterator(it),
 	)
 }
 
@@ -267,10 +267,10 @@ func testHeightInFuture(t *testing.T, store VersionStore) {
 	require.NoError(t, err)
 }
 
-func consumeIterator(it dbm.Iterator) []kvPair {
-	var result []kvPair
+func ConsumeIterator(it dbm.Iterator) []KVPair {
+	var result []KVPair
 	for ; it.Valid(); it.Next() {
-		result = append(result, kvPair{it.Key(), it.Value()})
+		result = append(result, KVPair{it.Key(), it.Value()})
 	}
 	it.Close()
 	return result

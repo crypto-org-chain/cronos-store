@@ -37,7 +37,7 @@ type Store struct {
 	logger  log.Logger
 	chainId string
 
-	// to keep it comptaible with cosmos-sdk 0.46, merge the memstores into commit info
+	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
 	lastCommitInfo *types.CommitInfo
 
 	storesParams map[types.StoreKey]storeParams
@@ -254,8 +254,8 @@ func (rs *Store) TracingEnabled() bool {
 }
 
 // SetTracer Implements interface MultiStore
-func (rs *Store) SetTracer(w io.Writer) types.MultiStore {
-	return nil
+func (rs *Store) SetTracer(_ io.Writer) types.MultiStore {
+	return rs
 }
 
 // SetTracingContext Implements interface MultiStore
