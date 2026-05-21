@@ -210,7 +210,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// backport/26023-staking-queue-optimization (release/v0.54.x)
-replace github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20260515130858-7639ceda5615
+// crypto-org-chain/cosmos-sdk#1814: expose v6 staking queue migration as utility (release/v0.54.x)
+replace github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20260521144821-f2bcc1893cf0
 
 replace github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
