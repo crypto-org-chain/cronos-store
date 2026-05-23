@@ -9,7 +9,7 @@ require (
 	cosmossdk.io/log v1.6.1
 	cosmossdk.io/store v1.1.2
 	github.com/alitto/pond v1.8.3
-	github.com/cometbft/cometbft v0.38.20
+	github.com/cometbft/cometbft v0.38.21
 	github.com/cosmos/cosmos-db v1.1.3
 	github.com/cosmos/cosmos-sdk v0.53.4
 	github.com/cosmos/gogoproto v1.7.2
