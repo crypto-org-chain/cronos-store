@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alitto/pond"
@@ -81,6 +82,11 @@ type DB struct {
 	mtx sync.Mutex
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
+
+	// cached earliest snapshot version. Loaded lazily and refreshed by
+	// pruneSnapshots. Zero means "not cached"; readers should fall back to
+	// scanning the directory.
+	earliestSnapshotCache atomic.Int64
 
 	// reusable write batch
 	wbatch wal.Batch
@@ -588,6 +594,8 @@ func (db *DB) pruneSnapshots() {
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
 			db.logger.Error("failed to find first snapshot", "err", err)
+		} else {
+			db.earliestSnapshotCache.Store(earliestVersion)
 		}
 
 		if err := db.wal.TruncateFront(walIndex(earliestVersion+1, db.initialVersion)); err != nil {
@@ -943,6 +951,26 @@ func (db *DB) FirstVersion() (int64, error) {
 		return 0, nil
 	}
 	return walVersion(firstIndex, initialVersion), nil
+}
+
+// EarliestVersion returns the earliest queryable version, which is the
+// version of the earliest snapshot retained on disk. WAL entries older than
+// the earliest snapshot are pruned, so the snapshot version is the true
+// lower bound for queries.
+//
+// The result is cached and refreshed by pruneSnapshots. SDK callers may hit
+// this on every height-bound query, so we avoid scanning the snapshot
+// directory on the hot path.
+func (db *DB) EarliestVersion() (int64, error) {
+	if v := db.earliestSnapshotCache.Load(); v > 0 {
+		return v, nil
+	}
+	v, err := firstSnapshotVersion(db.dir)
+	if err != nil {
+		return 0, err
+	}
+	db.earliestSnapshotCache.Store(v)
+	return v, nil
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.

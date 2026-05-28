@@ -270,8 +270,14 @@ func (rs *Store) LatestVersion() int64 {
 
 // EarliestVersion Implements interface CommitMultiStore
 func (rs *Store) EarliestVersion() int64 {
-	// memiavl manages its own pruning; return 1 as the earliest available version.
-	return 1
+	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
+	// earliest queryable version is the version of that snapshot.
+	v, err := rs.db.EarliestVersion()
+	if err != nil {
+		rs.logger.Error("failed to get earliest version", "err", err)
+		return 0
+	}
+	return v
 }
 
 // PruneSnapshotHeight Implements interface Snapshotter
