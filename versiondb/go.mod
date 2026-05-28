@@ -283,7 +283,7 @@ require (
 )
 
 replace (
-	// crypto-org-chain/cosmos-sdk#1814: expose v6 staking queue migration as utility (release/v0.54.x)
-	github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20260521144821-f2bcc1893cf0
+	// crypto-org-chain/release/v0.54.x
+	github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20260528042428-ce5e0ee61fa5
 	github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
 )
