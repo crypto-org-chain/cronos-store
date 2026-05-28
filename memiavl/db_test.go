@@ -737,9 +737,10 @@ func TestEarliestVersion(t *testing.T) {
 
 	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
-	// wait for the goroutine to finish.
+	// Lock acquisition blocks until the prune goroutine releases; nothing
+	// executes inside — the synchronization IS the point.
 	db.pruneSnapshotLock.Lock()
-	db.pruneSnapshotLock.Unlock()
+	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
 
 	// snapshotKeepRecent=1 + current means snapshots at versions 2 and 3 are
 	// retained; snapshot-0 and snapshot-1 are pruned.
