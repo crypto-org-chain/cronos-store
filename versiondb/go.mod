@@ -282,8 +282,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace (
-	// crypto-org-chain/release/v0.54.x
-	github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.50.6-0.20260528042428-ce5e0ee61fa5
-	github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
-)
+replace github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
