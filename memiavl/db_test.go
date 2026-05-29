@@ -792,4 +792,3 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
-
