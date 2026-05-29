@@ -10,7 +10,7 @@ import (
 	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/stretchr/testify/require"
 
-	"cosmossdk.io/store/snapshots/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 )
 
 const testStoreKey = "bank"

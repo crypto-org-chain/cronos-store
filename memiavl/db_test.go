@@ -710,3 +710,85 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	require.NoError(t, err)
 	require.Equal(t, commitInfo, *db.LastCommitInfo())
 }
+
+// TestEarliestVersion verifies that EarliestVersion returns the earliest
+// retained snapshot version (not the WAL FirstVersion), and that the cache
+// is refreshed by pruneSnapshots.
+func TestEarliestVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotKeepRecent: 1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// commit and snapshot 3 versions: snapshot-1, snapshot-2, snapshot-3
+	// (snapshot-0 also exists from initEmptyDB).
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs(fmt.Sprintf("k%d", i), "v")}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+
+	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
+	db.pruneSnapshots()
+	// Lock acquisition blocks until the prune goroutine releases; nothing
+	// executes inside — the synchronization IS the point.
+	db.pruneSnapshotLock.Lock()
+	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
+
+	// snapshotKeepRecent=1 + current means snapshots at versions 2 and 3 are
+	// retained; snapshot-0 and snapshot-1 are pruned.
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 2, earliest, "earliest snapshot should be version 2")
+
+	// pruneSnapshots populated the cache directly; readers should hit the
+	// cache without a directory scan.
+	require.EqualValues(t, 2, db.earliestSnapshotCache.Load(),
+		"cache should be populated by pruneSnapshots, not lazy-load")
+
+	// WAL is truncated past the earliest snapshot, so FirstVersion (WAL-based)
+	// must be strictly later than EarliestVersion.
+	walFirst, err := db.FirstVersion()
+	require.NoError(t, err)
+	require.Greater(t, walFirst, earliest,
+		"WAL first version must be past the earliest retained snapshot")
+
+	// cached value is reused on a second call.
+	earliest2, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.Equal(t, earliest, earliest2)
+}
+
+// TestEarliestVersionUnpruned verifies that EarliestVersion does not report
+// height 0 for unpruned stores that still have snapshot-0 on disk.
+func TestEarliestVersionUnpruned(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		// no SnapshotKeepRecent set → nothing pruned
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// Commit a few versions without pruning; snapshot-0 stays on disk.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs(fmt.Sprintf("k%d", i), "v")}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
+}

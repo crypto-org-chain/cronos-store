@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alitto/pond"
@@ -81,6 +82,11 @@ type DB struct {
 	mtx sync.Mutex
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
+
+	// cached earliest snapshot version. Loaded lazily and refreshed by
+	// pruneSnapshots. Zero means "not cached"; readers should fall back to
+	// scanning the directory.
+	earliestSnapshotCache atomic.Int64
 
 	// reusable write batch
 	wbatch wal.Batch
@@ -588,6 +594,8 @@ func (db *DB) pruneSnapshots() {
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
 			db.logger.Error("failed to find first snapshot", "err", err)
+		} else {
+			db.earliestSnapshotCache.Store(earliestVersion)
 		}
 
 		if err := db.wal.TruncateFront(walIndex(earliestVersion+1, db.initialVersion)); err != nil {
@@ -945,6 +953,34 @@ func (db *DB) FirstVersion() (int64, error) {
 	return walVersion(firstIndex, initialVersion), nil
 }
 
+// EarliestVersion returns the earliest queryable version, which is the
+// version of the earliest snapshot retained on disk. WAL entries older than
+// the earliest snapshot are pruned, so the snapshot version is the true
+// lower bound for queries.
+//
+// The result is cached and refreshed by pruneSnapshots. SDK callers may hit
+// this on every height-bound query, so we avoid scanning the snapshot
+// directory on the hot path.
+func (db *DB) EarliestVersion() (int64, error) {
+	if v := db.earliestSnapshotCache.Load(); v > 0 {
+		return v, nil
+	}
+	v, err := firstSnapshotVersion(db.dir)
+	if err != nil {
+		return 0, err
+	}
+	if v == 0 {
+		// snapshot-0 is the genesis placeholder; the first queryable height is
+		// initialVersion (defaults to 1 for standard chains).
+		v = int64(db.initialVersion)
+		if v == 0 {
+			v = 1
+		}
+	}
+	db.earliestSnapshotCache.Store(v)
+	return v, nil
+}
+
 // FirstStoreVersions returns the first version each store appears in the WAL.
 func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(stores))
@@ -1127,15 +1163,19 @@ func seekSnapshot(root string, targetVersion uint32) (int64, error) {
 
 // firstSnapshotVersion returns the earliest snapshot name in the db
 func firstSnapshotVersion(root string) (int64, error) {
-	var found int64
+	var (
+		found   int64
+		hasSnap bool
+	)
 	if err := traverseSnapshots(root, true, func(version int64) (bool, error) {
 		found = version
+		hasSnap = true
 		return true, nil
 	}); err != nil {
 		return 0, err
 	}
 
-	if found == 0 {
+	if !hasSnap {
 		return 0, errors.New("empty memiavl db")
 	}
 

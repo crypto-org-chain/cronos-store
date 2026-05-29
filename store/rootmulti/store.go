@@ -13,15 +13,14 @@ import (
 	"github.com/crypto-org-chain/cronos-store/store/memiavlstore"
 
 	"cosmossdk.io/errors"
-	"cosmossdk.io/log"
-	"cosmossdk.io/store/listenkv"
-	"cosmossdk.io/store/mem"
-	"cosmossdk.io/store/metrics"
-	pruningtypes "cosmossdk.io/store/pruning/types"
-	"cosmossdk.io/store/rootmulti"
-	"cosmossdk.io/store/transient"
-	"cosmossdk.io/store/types"
+	log "cosmossdk.io/log/v2"
 
+	"github.com/cosmos/cosmos-sdk/store/v2/listenkv"
+	"github.com/cosmos/cosmos-sdk/store/v2/mem"
+	pruningtypes "github.com/cosmos/cosmos-sdk/store/v2/pruning/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/rootmulti"
+	"github.com/cosmos/cosmos-sdk/store/v2/transient"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
@@ -38,7 +37,7 @@ type Store struct {
 	logger  log.Logger
 	chainId string
 
-	// to keep it comptaible with cosmos-sdk 0.46, merge the memstores into commit info
+	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
 	lastCommitInfo *types.CommitInfo
 
 	storesParams map[types.StoreKey]storeParams
@@ -159,8 +158,8 @@ func (rs *Store) LastCommitID() types.CommitID {
 func (rs *Store) SetPruning(pruningtypes.PruningOptions) {
 }
 
-// SetMetrics sets the metrics gatherer for the store package
-func (rs *Store) SetMetrics(metrics metrics.StoreMetrics) {
+// SetMetrics is a noop as metrics support was removed in store/v2
+func (rs *Store) SetMetrics(_ interface{}) {
 }
 
 // GetPruning Implements interface Committer
@@ -179,7 +178,7 @@ func (rs *Store) CacheWrap() types.CacheWrap {
 }
 
 // CacheWrapWithTrace Implements interface CacheWrapper
-func (rs *Store) CacheWrapWithTrace(_ io.Writer, _ types.TraceContext) types.CacheWrap {
+func (rs *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap {
 	return rs.CacheWrap()
 }
 
@@ -255,18 +254,30 @@ func (rs *Store) TracingEnabled() bool {
 }
 
 // SetTracer Implements interface MultiStore
-func (rs *Store) SetTracer(w io.Writer) types.MultiStore {
-	return nil
+func (rs *Store) SetTracer(_ io.Writer) types.MultiStore {
+	return rs
 }
 
 // SetTracingContext Implements interface MultiStore
-func (rs *Store) SetTracingContext(types.TraceContext) types.MultiStore {
-	return nil
+func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
+	return rs
 }
 
 // LatestVersion Implements interface MultiStore
 func (rs *Store) LatestVersion() int64 {
 	return rs.db.Version()
+}
+
+// EarliestVersion Implements interface CommitMultiStore
+func (rs *Store) EarliestVersion() int64 {
+	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
+	// earliest queryable version is the version of that snapshot.
+	v, err := rs.db.EarliestVersion()
+	if err != nil {
+		rs.logger.Error("failed to get earliest version", "err", err)
+		return 0
+	}
+	return v
 }
 
 // PruneSnapshotHeight Implements interface Snapshotter
