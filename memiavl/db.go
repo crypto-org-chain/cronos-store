@@ -969,6 +969,14 @@ func (db *DB) EarliestVersion() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if v == 0 {
+		// snapshot-0 is the genesis placeholder; the first queryable height is
+		// initialVersion (defaults to 1 for standard chains).
+		v = int64(db.initialVersion)
+		if v == 0 {
+			v = 1
+		}
+	}
 	db.earliestSnapshotCache.Store(v)
 	return v, nil
 }
@@ -1155,15 +1163,19 @@ func seekSnapshot(root string, targetVersion uint32) (int64, error) {
 
 // firstSnapshotVersion returns the earliest snapshot name in the db
 func firstSnapshotVersion(root string) (int64, error) {
-	var found int64
+	var (
+		found   int64
+		hasSnap bool
+	)
 	if err := traverseSnapshots(root, true, func(version int64) (bool, error) {
 		found = version
+		hasSnap = true
 		return true, nil
 	}); err != nil {
 		return 0, err
 	}
 
-	if found == 0 {
+	if !hasSnap {
 		return 0, errors.New("empty memiavl db")
 	}
 

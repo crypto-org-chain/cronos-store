@@ -765,3 +765,31 @@ func TestEarliestVersion(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, earliest, earliest2)
 }
+
+// TestEarliestVersionUnpruned verifies that EarliestVersion does not report
+// height 0 for unpruned stores that still have snapshot-0 on disk.
+func TestEarliestVersionUnpruned(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		// no SnapshotKeepRecent set → nothing pruned
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// Commit a few versions without pruning; snapshot-0 stays on disk.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs(fmt.Sprintf("k%d", i), "v")}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
+}
+
