@@ -2,11 +2,9 @@ package versiondb
 
 import (
 	"fmt"
-	"io"
-	"sync"
 
-	"cosmossdk.io/store/cachemulti"
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/cachemulti"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 var _ types.MultiStore = (*MultiStore)(nil)
@@ -21,10 +19,6 @@ type MultiStore struct {
 
 	// proxy the calls for transient or mem stores to the parent
 	parent types.MultiStore
-
-	traceWriter       io.Writer
-	traceContext      types.TraceContext
-	traceContextMutex sync.Mutex
 }
 
 // NewMultiStore returns a new versiondb `MultiStore`.
@@ -64,7 +58,7 @@ func (s *MultiStore) cacheMultiStore(version *int64) types.CacheMultiStore {
 			stores[k] = NewKVStore(s.versionDB, k.Name(), version)
 		}
 	}
-	return cachemulti.NewStore(stores, s.traceWriter, s.getTracingContext())
+	return cachemulti.NewStore(stores)
 }
 
 // CacheMultiStore implements `MultiStore` interface
@@ -99,44 +93,19 @@ func (s *MultiStore) GetKVStore(storeKey types.StoreKey) types.KVStore {
 	return s.GetStore(storeKey).(types.KVStore)
 }
 
-// SetTracer sets the tracer for the MultiStore that the underlying
-// stores will utilize to trace operations. A MultiStore is returned.
-func (s *MultiStore) SetTracer(w io.Writer) types.MultiStore {
-	s.traceWriter = w
+// SetTracer implements `MultiStore` interface.
+func (s *MultiStore) SetTracer(_ interface{}) types.MultiStore {
 	return s
 }
 
-// SetTracingContext updates the tracing context for the MultiStore by merging
-// the given context with the existing context by key. Any existing keys will
-// be overwritten. It is implied that the caller should update the context when
-// necessary between tracing operations. It returns a modified MultiStore.
-func (s *MultiStore) SetTracingContext(tc types.TraceContext) types.MultiStore {
-	s.traceContextMutex.Lock()
-	defer s.traceContextMutex.Unlock()
-	s.traceContext = s.traceContext.Merge(tc)
-
+// SetTracingContext implements `MultiStore` interface.
+func (s *MultiStore) SetTracingContext(_ interface{}) types.MultiStore {
 	return s
-}
-
-func (s *MultiStore) getTracingContext() types.TraceContext {
-	s.traceContextMutex.Lock()
-	defer s.traceContextMutex.Unlock()
-
-	if s.traceContext == nil {
-		return nil
-	}
-
-	ctx := types.TraceContext{}
-	for k, v := range s.traceContext {
-		ctx[k] = v
-	}
-
-	return ctx
 }
 
 // TracingEnabled returns if tracing is enabled for the MultiStore.
 func (s *MultiStore) TracingEnabled() bool {
-	return s.traceWriter != nil
+	return false
 }
 
 // LatestVersion returns the latest version saved in versiondb
@@ -151,9 +120,4 @@ func (s *MultiStore) LatestVersion() int64 {
 // Close will flush the versiondb
 func (s *MultiStore) Close() error {
 	return s.versionDB.Flush()
-}
-
-// CacheWrapWithTrace is kept to build with upstream sdk.
-func (s *MultiStore) CacheWrapWithTrace(w io.Writer, tc types.TraceContext) types.CacheWrap {
-	panic("not implemented")
 }

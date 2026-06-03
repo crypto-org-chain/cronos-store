@@ -7,7 +7,7 @@ import (
 	"github.com/crypto-org-chain/cronos-store/store/rootmulti"
 	"github.com/spf13/cast"
 
-	"cosmossdk.io/log"
+	log "cosmossdk.io/log/v2"
 
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
