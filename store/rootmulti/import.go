@@ -78,7 +78,9 @@ loop:
 			if node.Height == 0 && node.Value == nil {
 				node.Value = []byte{}
 			}
-			importer.AddNode(node)
+			if err := importer.AddNode(node); err != nil {
+				return types.SnapshotItem{}, cosmoserrors.Wrap(sdkerrors.ErrLogic, err.Error())
+			}
 		default:
 			// unknown element, could be an extension
 			break loop
