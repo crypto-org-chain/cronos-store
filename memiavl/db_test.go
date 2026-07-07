@@ -126,6 +126,32 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
+func TestCloseDuringSnapshotPrune(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		db, err := Load(t.TempDir(), Options{
+			CreateIfMissing:    true,
+			InitialStores:      []string{testStoreName},
+			SnapshotKeepRecent: 0,
+		}, TestAppChainID)
+		require.NoError(t, err)
+
+		for _, changes := range ChangeSets {
+			require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+				{Name: testStoreName, Changeset: changes},
+			}))
+			_, err := db.Commit()
+			require.NoError(t, err)
+		}
+
+		require.NoError(t, db.RewriteSnapshotBackground())
+		for db.snapshotRewriteChan != nil {
+			require.NoError(t, db.checkAsyncTasks())
+		}
+
+		require.NoError(t, db.Close())
+	}
+}
+
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName, "delete"}}, TestAppChainID)
