@@ -126,6 +126,37 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
+func TestReloadRetainsSnapshotForCopy(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	// commit a known key and make it snapshot-backed
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+
+	// a copy shares the live mmap'd snapshot
+	cp := db.Copy()
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+
+	// one more reload cycle: the old code munmaps the copy's snapshot here.
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k2", "v2")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+
+	// the copy must still read correctly from the retained generation
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+
+	require.NoError(t, db.Close())
+}
+
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName, "delete"}}, TestAppChainID)
