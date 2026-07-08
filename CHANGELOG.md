@@ -1,5 +1,6 @@
 # Changelog
 
+- [#68](https://github.com/crypto-org-chain/cronos-store/pull/68) fix(deps): use crypto-org-chain/cosmos-sdk fork (release/v0.54.x, includes #1816) so historical-height queries close the read-only memiavl DB instead of leaking fds/mmaps.
 - [#57](https://github.com/crypto-org-chain/cronos-store/pull/57) feat: upgrade to cosmos-sdk v0.54.3 (fork branch backport/26023-staking-queue-optimization).
 - [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
 - [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
