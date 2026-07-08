@@ -29,29 +29,45 @@ import (
 
 const defaultHistoricalDBCacheSize = 4
 
-// historicalDBEntry is a single cached read-only *memiavl.DB instance.
+// historicalDBEntry is a cached read-only *memiavl.DB, ref-counted so it's
+// only closed once every borrow() has a matching release().
 type historicalDBEntry struct {
 	version int64
 	db      *memiavl.DB
-	refs    int  // number of active borrows
-	evicted bool // removed from cache index but still held by a borrow
+	refs    int  // active borrows
+	evicted bool // removed from the LRU index but still held by a borrow
 }
 
 // historicalDBCache is a small bounded LRU cache of read-only *memiavl.DB
-// instances keyed by version. It uses reference counting so a DB is only
-// closed once all borrows have been released.
+// instances keyed by version.
 type historicalDBCache struct {
 	mu      sync.Mutex
 	maxSize int
-	entries []*historicalDBEntry // ordered: index 0 is most-recently used
+	entries []*historicalDBEntry // index 0 is most-recently used
 	closed  bool
+	loadSem chan struct{} // bounds concurrent slow-path loads to maxSize
 }
 
 func newHistoricalDBCache(maxSize int) *historicalDBCache {
 	if maxSize <= 0 {
 		maxSize = defaultHistoricalDBCacheSize
 	}
-	return &historicalDBCache{maxSize: maxSize}
+	return &historicalDBCache{maxSize: maxSize, loadSem: make(chan struct{}, maxSize)}
+}
+
+// lookup returns the cached entry for version and moves it to the front
+// (MRU), incrementing its ref count. Returns nil if not cached. Caller must
+// hold c.mu.
+func (c *historicalDBCache) lookup(version int64) *historicalDBEntry {
+	for i, e := range c.entries {
+		if e.version == version {
+			e.refs++
+			copy(c.entries[1:i+1], c.entries[0:i]) // move to front (MRU)
+			c.entries[0] = e
+			return e
+		}
+	}
+	return nil
 }
 
 // borrow returns the cached entry for version, loading it via load() if it is
@@ -62,27 +78,24 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		c.mu.Unlock()
 		return nil, fmt.Errorf("historicalDBCache: cache is closed")
 	}
-	// Fast path: already cached.
-	for i, e := range c.entries {
-		if e.version == version {
-			e.refs++
-			// Move to front (MRU).
-			copy(c.entries[1:i+1], c.entries[0:i])
-			c.entries[0] = e
-			c.mu.Unlock()
-			return e, nil
-		}
+	if e := c.lookup(version); e != nil {
+		c.mu.Unlock()
+		return e, nil
 	}
 	c.mu.Unlock()
 
-	// Slow path: open the DB outside the lock to avoid holding it during I/O.
+	// Cap concurrent loads at maxSize so a burst of distinct-version queries
+	// can't fan out unbounded fd/mmap usage; excess callers queue here.
+	c.loadSem <- struct{}{}
+	defer func() { <-c.loadSem }()
+
+	// load outside the lock so slow I/O doesn't block other borrowers.
 	db, err := load()
 	if err != nil {
 		return nil, err
 	}
 
-	// Safety net: close db if we return without inserting it into the cache
-	// (e.g. because another goroutine raced us, or the cache was closed).
+	// close db if we return without caching it (closed, or another goroutine won the race).
 	dbInserted := false
 	defer func() {
 		if !dbInserted {
@@ -93,23 +106,15 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Guard against the cache being closed while we were doing I/O.
 	if c.closed {
 		return nil, fmt.Errorf("historicalDBCache: cache is closed")
 	}
 
-	// Another goroutine may have loaded the same version while we were doing I/O.
-	for i, e := range c.entries {
-		if e.version == version {
-			// Use the existing entry; our db will be closed by the defer.
-			e.refs++
-			copy(c.entries[1:i+1], c.entries[0:i])
-			c.entries[0] = e
-			return e, nil
-		}
+	// another goroutine may have loaded the same version while we were doing I/O.
+	if e := c.lookup(version); e != nil {
+		return e, nil
 	}
 
-	// Evict the oldest entry if we are at capacity.
 	if len(c.entries) >= c.maxSize {
 		oldest := c.entries[len(c.entries)-1]
 		c.entries = c.entries[:len(c.entries)-1]
@@ -117,18 +122,17 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		if oldest.refs == 0 {
 			_ = oldest.db.Close()
 		}
-		// If refs > 0 the entry will be closed in release().
+		// if refs > 0, release() closes it once the last borrower is done.
 	}
 
 	entry := &historicalDBEntry{version: version, db: db, refs: 1}
-	// Prepend (most-recently used).
-	c.entries = append([]*historicalDBEntry{entry}, c.entries...)
+	c.entries = append([]*historicalDBEntry{entry}, c.entries...) // prepend as MRU
 	dbInserted = true
 	return entry, nil
 }
 
-// release decrements the ref count. If the entry was evicted and refs reaches
-// zero, the underlying DB is closed.
+// release decrements the ref count and closes the DB if it was evicted and
+// this was the last borrow.
 func (c *historicalDBCache) release(e *historicalDBEntry) {
 	if e == nil {
 		return
@@ -144,8 +148,8 @@ func (c *historicalDBCache) release(e *historicalDBEntry) {
 	}
 }
 
-// close drains the cache. Entries with active borrows (refs > 0) are marked
-// evicted so that the last release() will close them.
+// close drains the cache; entries still borrowed are closed by release() once
+// their last borrower is done.
 func (c *historicalDBCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,10 +162,25 @@ func (c *historicalDBCache) close() error {
 				errs = append(errs, err)
 			}
 		}
-		// If refs > 0 the entry will be closed by the last release().
 	}
 	c.entries = nil
 	return stderrors.Join(errs...)
+}
+
+// loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
+// memiavl.Load's silent fallback to the latest reachable version.
+func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
+	opts.TargetVersion = uint32(version)
+	opts.ReadOnly = true
+	db, err := memiavl.Load(dir, opts, chainId)
+	if err != nil {
+		return nil, err
+	}
+	if actual := db.Version(); actual != version {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to load state at height %d; latest height is %d", version, actual)
+	}
+	return db, nil
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -353,17 +372,10 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
-	opts := rs.opts
-	opts.TargetVersion = uint32(version)
-	opts.ReadOnly = true
-	// Load a fresh DB per call and hand its lifetime to the returned
-	// CacheMultiStore via cachemulti.NewStore's closer arg. The SDK's
-	// createQueryContext calls Close() on the returned store, which invokes
-	// the closer and shuts the DB down (see PR #54). historicalDBCache is
-	// not used here because the returned store's lifetime is owned by the
-	// caller, not scoped to a single function — the cache's borrow/release
-	// model only fits Query()'s short-lived use.
-	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
+	// historicalDBCache isn't used here: the returned store's lifetime is owned
+	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
+	// not scoped to this call, so the cache's borrow/release model doesn't fit.
+	db, err := loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 	if err != nil {
 		return nil, err
 	}
@@ -710,22 +722,9 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	db := rs.db
 	var borrowedEntry *historicalDBEntry
 	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
-		opts := rs.opts
-		opts.TargetVersion = uint32(version)
-		opts.ReadOnly = true
 		var err error
 		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
-			db, err := memiavl.Load(rs.dir, opts, rs.chainId)
-			if err != nil {
-				return nil, err
-			}
-			// memiavl.Load silently falls back to the latest version if the
-			// target is unreachable; don't cache the mismatch under the wrong key.
-			if actual := db.Version(); actual != version {
-				_ = db.Close()
-				return nil, fmt.Errorf("failed to load state at height %d; latest height is %d", version, actual)
-			}
-			return db, nil
+			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 		})
 		if err != nil {
 			return nil, err

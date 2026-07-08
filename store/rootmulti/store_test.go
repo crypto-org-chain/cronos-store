@@ -236,3 +236,31 @@ func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 
 	require.NoError(t, closer.Close())
 }
+
+// TestCacheMultiStoreWithVersionFutureHeight verifies that requesting a
+// height beyond the latest committed version errors instead of silently
+// serving state from the latest version (memiavl.Load's fallback behavior).
+func TestCacheMultiStoreWithVersionFutureHeight(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey("test")
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+
+	commitID := rs.Commit()
+	require.Equal(t, int64(1), commitID.Version)
+
+	_, err := rs.CacheMultiStoreWithVersion(100)
+	require.Error(t, err)
+}
+
+// TestQueryFutureHeight is the Query() analog of
+// TestCacheMultiStoreWithVersionFutureHeight, covering the cached load path.
+func TestQueryFutureHeight(t *testing.T) {
+	store, _ := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+
+	_, err := store.Query(&types.RequestQuery{Path: "/test/key", Data: []byte("k"), Height: 100})
+	require.Error(t, err)
+}
