@@ -715,7 +715,17 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		opts.ReadOnly = true
 		var err error
 		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
-			return memiavl.Load(rs.dir, opts, rs.chainId)
+			db, err := memiavl.Load(rs.dir, opts, rs.chainId)
+			if err != nil {
+				return nil, err
+			}
+			// memiavl.Load silently falls back to the latest version if the
+			// target is unreachable; don't cache the mismatch under the wrong key.
+			if actual := db.Version(); actual != version {
+				_ = db.Close()
+				return nil, fmt.Errorf("failed to load state at height %d; latest height is %d", version, actual)
+			}
+			return db, nil
 		})
 		if err != nil {
 			return nil, err
