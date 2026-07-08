@@ -18,7 +18,17 @@ func CreateTSComparator() *grocksdb.Comparator {
 // compareTS compares timestamp as little endian encoded integers.
 //
 // NOTICE: the behavior must be identical to rocksdb builtin comparator "leveldb.BytewiseComparator.u64ts".
+// nil slice means "unset timestamp" (nullptr in C++): unset < any-set, matching the builtin behavior.
+// RocksDB calls CompareTimestamp(current_ts, timestamp_lb_) where timestamp_lb_ comes from iter_start_ts;
+// when iter_start_ts is not set, timestamp_lb_ is nullptr → bz2 is nil here.
 func compareTS(bz1, bz2 []byte) int {
+	if bz1 == nil && bz2 == nil {
+		return 0
+	} else if bz2 == nil {
+		return 1 // any set timestamp > unset (nullptr)
+	} else if bz1 == nil {
+		return -1 // unset (nullptr) < any set timestamp
+	}
 	ts1 := binary.LittleEndian.Uint64(bz1)
 	ts2 := binary.LittleEndian.Uint64(bz2)
 	switch {

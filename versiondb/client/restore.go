@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"path/filepath"
 	"strconv"
 
@@ -14,10 +13,10 @@ import (
 	"github.com/spf13/cobra"
 
 	cosmossdkio "cosmossdk.io/errors"
-	"cosmossdk.io/store/snapshots"
-	"cosmossdk.io/store/snapshots/types"
 
 	"github.com/cosmos/cosmos-sdk/server"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 )
 
 // RestoreVersionDBCmd returns a command to restore a versiondb from local snapshot
@@ -65,16 +64,17 @@ func RestoreVersionDBCmd() *cobra.Command {
 			}
 
 			ch := make(chan versiondb.ImportEntry, 128)
+			errCh := make(chan error, 1)
 
 			go func() {
 				defer close(ch)
-
-				if err := readSnapshotEntries(streamReader, ch); err != nil {
-					ctx.Logger.Error("failed to read snapshot entries", "err", err)
-				}
+				errCh <- readSnapshotEntries(streamReader, ch)
 			}()
 
-			return versionDB.Import(int64(height), ch)
+			if err := versionDB.Import(int64(height), ch); err != nil {
+				return err
+			}
+			return <-errCh
 		},
 	}
 	return cmd
@@ -101,12 +101,13 @@ loop:
 		case *types.SnapshotItem_Store:
 			storeKey = item.Store.Name
 		case *types.SnapshotItem_IAVL:
-			if storeKey == "" {
-				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
+			// IAVL contains internal nodes for Merkle proof generation. However, versiondb
+			// does not require proof regeneration, so these internal nodes can be skipped.
+			if item.IAVL.Height != 0 {
+				continue
 			}
-			if item.IAVL.Height > math.MaxInt8 {
-				return fmt.Errorf("node height %v cannot exceed %v",
-					item.IAVL.Height, math.MaxInt8)
+			if storeKey == "" {
+				return errors.New("invalid protobuf message, store name is empty")
 			}
 			ch <- versiondb.ImportEntry{
 				StoreKey: storeKey,

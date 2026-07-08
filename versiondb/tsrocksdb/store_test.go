@@ -4,12 +4,11 @@ import (
 	"encoding/binary"
 	"testing"
 
-	dbm "github.com/cosmos/cosmos-db"
 	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/linxGnu/grocksdb"
 	"github.com/stretchr/testify/require"
 
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 func TestTSVersionDB(t *testing.T) {
@@ -157,6 +156,44 @@ func TestUserTimestampPruning(t *testing.T) {
 	bz.Free()
 }
 
+// TestIteratorReadOptsLifetime verifies that all keys remain visible across multiple Next() calls.
+// Regression test for use-after-free: defer readOpts.Destroy() in iteratorAtVersion freed the
+// ReadOptions before the iterator was used, zeroing DBIter::timestamp_ub_ and causing IsVisible
+// to reject every key after the first Next().
+func TestIteratorReadOptsLifetime(t *testing.T) {
+	storeKey := "test"
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	version := int64(1)
+	err = store.PutAtVersion(version, []*types.StoreKVPair{
+		{StoreKey: storeKey, Key: []byte("a"), Value: []byte{1}},
+		{StoreKey: storeKey, Key: []byte("b"), Value: []byte{2}},
+		{StoreKey: storeKey, Key: []byte("c"), Value: []byte{3}},
+		{StoreKey: storeKey, Key: []byte("d"), Value: []byte{4}},
+	})
+	require.NoError(t, err)
+
+	expected := []versiondb.KVPair{
+		{Key: []byte("a"), Value: []byte{1}},
+		{Key: []byte("b"), Value: []byte{2}},
+		{Key: []byte("c"), Value: []byte{3}},
+		{Key: []byte("d"), Value: []byte{4}},
+	}
+
+	it, err := store.IteratorAtVersion(storeKey, nil, nil, &version)
+	require.NoError(t, err)
+	require.Equal(t, expected, versiondb.ConsumeIterator(t, it))
+
+	rit, err := store.ReverseIteratorAtVersion(storeKey, nil, nil, &version)
+	require.NoError(t, err)
+	reversed := make([]versiondb.KVPair, len(expected))
+	for i, p := range expected {
+		reversed[len(expected)-1-i] = p
+	}
+	require.Equal(t, reversed, versiondb.ConsumeIterator(t, rit))
+}
+
 func TestSkipVersionZero(t *testing.T) {
 	storeKey := "test"
 
@@ -192,12 +229,12 @@ func TestSkipVersionZero(t *testing.T) {
 	it, err := store.IteratorAtVersion(storeKey, nil, nil, &i)
 	require.NoError(t, err)
 	require.Equal(t,
-		[]kvPair{
+		[]versiondb.KVPair{
 			{Key: key1, Value: []byte{1}},
 			{Key: key2Wrong, Value: []byte{2}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		versiondb.ConsumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(true)
@@ -212,11 +249,11 @@ func TestSkipVersionZero(t *testing.T) {
 	it, err = store.IteratorAtVersion(storeKey, nil, nil, &i)
 	require.NoError(t, err)
 	require.Equal(t,
-		[]kvPair{
+		[]versiondb.KVPair{
 			{Key: key1, Value: []byte{1}},
 			{Key: key3, Value: []byte{3}},
 		},
-		consumeIterator(it),
+		versiondb.ConsumeIterator(t, it),
 	)
 
 	store.SetSkipVersionZero(false)
@@ -226,18 +263,4 @@ func TestSkipVersionZero(t *testing.T) {
 	bz, err = store.GetAtVersion(storeKey, key2, &i)
 	require.NoError(t, err)
 	require.Equal(t, []byte{2}, bz)
-}
-
-type kvPair struct {
-	Key   []byte
-	Value []byte
-}
-
-func consumeIterator(it dbm.Iterator) []kvPair {
-	var result []kvPair
-	for ; it.Valid(); it.Next() {
-		result = append(result, kvPair{it.Key(), it.Value()})
-	}
-	it.Close()
-	return result
 }

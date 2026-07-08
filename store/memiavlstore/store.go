@@ -9,12 +9,11 @@ import (
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 
 	"cosmossdk.io/errors"
-	"cosmossdk.io/log"
-	"cosmossdk.io/store/cachekv"
-	pruningtypes "cosmossdk.io/store/pruning/types"
-	"cosmossdk.io/store/tracekv"
-	"cosmossdk.io/store/types"
+	log "cosmossdk.io/log/v2"
 
+	"github.com/cosmos/cosmos-sdk/store/v2/cachekv"
+	pruningtypes "github.com/cosmos/cosmos-sdk/store/v2/pruning/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
@@ -75,8 +74,9 @@ func (st *Store) CacheWrap() types.CacheWrap {
 }
 
 // CacheWrapWithTrace implements the Store interface.
-func (st *Store) CacheWrapWithTrace(w io.Writer, tc types.TraceContext) types.CacheWrap {
-	return cachekv.NewStore(tracekv.NewStore(st, w, tc))
+// tracekv was removed in store/v2; fall back to regular CacheWrap.
+func (st *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap {
+	return cachekv.NewStore(st)
 }
 
 // Set Implements types.KVStore.

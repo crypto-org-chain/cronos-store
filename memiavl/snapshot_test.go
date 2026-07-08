@@ -134,7 +134,7 @@ func TestSnapshotImportExport(t *testing.T) {
 func TestDBSnapshotRestore(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
-		InitialStores:     []string{"test", "test2"},
+		InitialStores:     []string{testStoreName, test2StoreName},
 		AsyncCommitBuffer: -1,
 	}, TestAppChainID)
 	require.NoError(t, err)
@@ -142,11 +142,11 @@ func TestDBSnapshotRestore(t *testing.T) {
 	for _, changes := range ChangeSets {
 		cs := []*NamedChangeSet{
 			{
-				Name:      "test",
+				Name:      testStoreName,
 				Changeset: changes,
 			},
 			{
-				Name:      "test2",
+				Name:      test2StoreName,
 				Changeset: changes,
 			},
 		}

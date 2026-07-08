@@ -16,11 +16,20 @@ type rocksDBIterator struct {
 
 	// see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 	skipVersionZero bool
+
+	// readOpts must outlive the iterator because DBIter holds a pointer into the
+	// rocksdb_readoptions_t struct (timestamp_ub_). Destroying ReadOptions while
+	// the iterator is alive causes a dangling pointer and use-after-free.
+	readOpts *grocksdb.ReadOptions
+
+	// err is captured from source.Err() on Close so Error() remains usable after
+	// source is nilled out.
+	err error
 }
 
 var _ versiondb.Iterator = (*rocksDBIterator)(nil)
 
-func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, isReverse, skipVersionZero bool) *rocksDBIterator {
+func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, isReverse, skipVersionZero bool, readOpts *grocksdb.ReadOptions) *rocksDBIterator {
 	if isReverse {
 		if end == nil {
 			source.SeekToLast()
@@ -51,6 +60,7 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, is
 		isReverse:       isReverse,
 		isInvalid:       false,
 		skipVersionZero: skipVersionZero,
+		readOpts:        readOpts,
 	}
 
 	it.trySkipZeroVersion()
@@ -121,7 +131,7 @@ func (itr *rocksDBIterator) Value() []byte {
 }
 
 // Next implements Iterator.
-func (itr rocksDBIterator) Next() {
+func (itr *rocksDBIterator) Next() {
 	itr.assertIsValid()
 	if itr.isReverse {
 		itr.source.Prev()
@@ -132,29 +142,45 @@ func (itr rocksDBIterator) Next() {
 	itr.trySkipZeroVersion()
 }
 
-func (itr rocksDBIterator) timestamp() uint64 {
+func (itr *rocksDBIterator) timestamp() uint64 {
 	ts := itr.source.Timestamp()
 	defer ts.Free()
 	return binary.LittleEndian.Uint64(ts.Data())
 }
 
-func (itr rocksDBIterator) trySkipZeroVersion() {
+func (itr *rocksDBIterator) trySkipZeroVersion() {
 	if itr.skipVersionZero {
 		for itr.Valid() && itr.timestamp() == 0 {
-			itr.Next()
+			if itr.isReverse {
+				itr.source.Prev()
+			} else {
+				itr.source.Next()
+			}
 		}
 	}
 }
 
 // Error implements Iterator.
 func (itr *rocksDBIterator) Error() error {
+	if itr.source == nil {
+		return itr.err
+	}
 	return itr.source.Err()
 }
 
 // Close implements Iterator.
 func (itr *rocksDBIterator) Close() error {
-	itr.source.Close()
-	return nil
+	itr.isInvalid = true
+	if itr.source != nil {
+		itr.err = itr.source.Err()
+		itr.source.Close()
+		itr.source = nil
+	}
+	if itr.readOpts != nil {
+		itr.readOpts.Destroy()
+		itr.readOpts = nil
+	}
+	return itr.err
 }
 
 func (itr *rocksDBIterator) assertIsValid() {

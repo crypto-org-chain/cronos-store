@@ -3,7 +3,7 @@
 
 package versiondb
 
-import "cosmossdk.io/store/types"
+import "github.com/cosmos/cosmos-sdk/store/v2/types"
 
 // GetObjKVStore implements `MultiStore` interface
 func (s *MultiStore) GetObjKVStore(storeKey types.StoreKey) types.ObjKVStore {

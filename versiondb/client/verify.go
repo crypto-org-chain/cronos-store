@@ -17,7 +17,7 @@ import (
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/spf13/cobra"
 
-	storetypes "cosmossdk.io/store/types"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {

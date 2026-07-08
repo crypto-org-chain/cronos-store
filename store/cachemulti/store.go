@@ -3,8 +3,8 @@ package cachemulti
 import (
 	"io"
 
-	"cosmossdk.io/store/cachemulti"
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/cachemulti"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 var NoopCloser io.Closer = CloserFunc(func() error { return nil })
@@ -23,13 +23,13 @@ type Store struct {
 
 func NewStore(
 	stores map[types.StoreKey]types.CacheWrapper,
-	traceWriter io.Writer, traceContext types.TraceContext,
+	_ io.Writer, _ interface{},
 	closer io.Closer,
 ) Store {
 	if closer == nil {
 		closer = NoopCloser
 	}
-	store := cachemulti.NewStore(stores, traceWriter, traceContext)
+	store := cachemulti.NewStore(stores)
 	return Store{
 		Store:  store,
 		Closer: closer,

@@ -106,5 +106,5 @@ func newHeapEntry(stream NextFunc) (*heapEntry, error) {
 // update fetch the next item in the stream
 func (entry *heapEntry) update() (err error) {
 	entry.value, err = entry.stream()
-	return
+	return err
 }

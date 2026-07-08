@@ -1,6 +1,14 @@
+# Changelog
 
 - [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
 - [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators.
+- [#64](https://github.com/crypto-org-chain/cronos-store/pull/64) fix(versiondb): return real error when snapshot store name is empty.
+- [#57](https://github.com/crypto-org-chain/cronos-store/pull/57) feat: upgrade to cosmos-sdk v0.54.3 (fork branch backport/26023-staking-queue-optimization).
+- [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
+- [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
+- [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
+- [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
+- [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators. 
 - [#45](https://github.com/crypto-org-chain/cronos-store/pull/45) feat: use rocksdb v10.9.1.
 - [#41](https://github.com/crypto-org-chain/cronos-store/pull/41) fix: update cosmos-sdk with signature incarnation cache removed for SigVerificationDecorator
 - [#40](https://github.com/crypto-org-chain/cronos-store/pull/40) fix: update cosmos-sdk with pre-estimate bug fixed
