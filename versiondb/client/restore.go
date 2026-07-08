@@ -107,7 +107,7 @@ loop:
 				continue
 			}
 			if storeKey == "" {
-				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
+				return errors.New("invalid protobuf message, store name is empty")
 			}
 			ch <- versiondb.ImportEntry{
 				StoreKey: storeKey,
