@@ -792,6 +792,7 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 	}
 	if db.retiredMultiTree != nil {
 		if err := db.retiredMultiTree.Close(); err != nil {
+			db.retiredMultiTree = nil // closed (even if partially); don't close again
 			return errors.Join(err, mtree.Close())
 		}
 	}
