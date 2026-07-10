@@ -1,13 +1,16 @@
 package rootmulti
 
 import (
+	"bytes"
 	"io"
 	"testing"
 
+	protoio "github.com/cosmos/gogoproto/io"
 	"github.com/stretchr/testify/require"
 
 	log "cosmossdk.io/log/v2"
 
+	snapshottypes "github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
@@ -49,4 +52,25 @@ func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 	require.Equal(t, []byte("v"), val)
 
 	require.NoError(t, closer.Close())
+}
+
+func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	var buf bytes.Buffer
+	w := protoio.NewDelimitedWriter(&buf)
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_IAVL{
+			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Value: []byte("v"), Height: 0, Version: 1},
+		},
+	}))
+	require.NoError(t, w.Close())
+
+	r := protoio.NewDelimitedReader(&buf, 1<<20)
+	defer r.Close()
+
+	require.NotPanics(t, func() {
+		_, err := rs.restore(1, 1, r)
+		require.ErrorContains(t, err, "received node item before tree item")
+	})
 }
