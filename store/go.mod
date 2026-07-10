@@ -211,3 +211,6 @@ require (
 )
 
 replace github.com/crypto-org-chain/cronos-store/memiavl => ../memiavl
+
+// crypto-org-chain/release/v0.54.x (includes #1816: close multistore opened for historical queries)
+replace github.com/cosmos/cosmos-sdk => github.com/crypto-org-chain/cosmos-sdk v0.54.3
