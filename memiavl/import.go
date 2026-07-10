@@ -115,7 +115,9 @@ func NewTreeImporter(dir string, version int64) *TreeImporter {
 }
 
 func (ai *TreeImporter) Add(node *ExportNode) error {
-	// surface an early consumer error instead of blocking on a full channel.
+	// Surface an early consumer error instead of blocking on a full channel.
+	// The import error is delivered once, via Add or Close (whichever reads
+	// quitChan first); the other then observes the closed channel and returns nil.
 	select {
 	case ai.nodesChan <- node:
 		return nil

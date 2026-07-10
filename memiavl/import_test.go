@@ -29,7 +29,7 @@ func TestImportErrorDoesNotHang(t *testing.T) {
 	select {
 	case e := <-done:
 		require.Error(t, e, "import error should be surfaced to the producer")
-	case <-time.After(30 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("AddNode hung: import error was not surfaced")
 	}
 }
