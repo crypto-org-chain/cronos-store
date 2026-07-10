@@ -1,6 +1,7 @@
 # Changelog
 
 - [#66](https://github.com/crypto-org-chain/cronos-store/pull/66) fix(memiavl): synchronize snapshot prune goroutine with Close.
+- [#64](https://github.com/crypto-org-chain/cronos-store/pull/64) fix(versiondb): return real error when snapshot store name is empty.
 - [#57](https://github.com/crypto-org-chain/cronos-store/pull/57) feat: upgrade to cosmos-sdk v0.54.3 (fork branch backport/26023-staking-queue-optimization).
 - [#60](https://github.com/crypto-org-chain/cronos-store/pull/60) fix(versiondb): propagate readSnapshotEntries error in restore-versiondb.
 - [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
