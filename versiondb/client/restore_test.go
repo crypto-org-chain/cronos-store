@@ -79,6 +79,30 @@ func TestReadSnapshotEntriesSkipsInternalNodes(t *testing.T) {
 	}, got)
 }
 
+// TestReadSnapshotEntriesEmptyStoreName checks that an IAVL leaf before any
+// Store item fails the restore instead of silently succeeding.
+func TestReadSnapshotEntriesEmptyStoreName(t *testing.T) {
+	r := makeSnapshotReader([]*types.SnapshotItem{
+		{Item: &types.SnapshotItem_IAVL{IAVL: &types.SnapshotIAVLItem{Key: []byte("k1"), Value: []byte("v1"), Height: 0}}},
+	})
+
+	ch := make(chan versiondb.ImportEntry, 8)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(ch)
+		errCh <- readSnapshotEntries(r, ch)
+	}()
+
+	// drain the channel; nothing should be emitted
+	var got []versiondb.ImportEntry
+	for e := range ch {
+		got = append(got, e)
+	}
+
+	require.ErrorContains(t, <-errCh, "store name is empty")
+	require.Empty(t, got)
+}
+
 // errReader is a protoio.Reader that returns a fixed error after n successful reads.
 type errReader struct {
 	inner protoio.Reader
