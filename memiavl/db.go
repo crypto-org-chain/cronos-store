@@ -560,6 +560,13 @@ func (db *DB) pruneSnapshots() {
 	// wait until last prune finish
 	db.pruneSnapshotLock.Lock()
 
+	initialVersion := db.initialVersion
+	wal := db.wal
+	if wal == nil {
+		db.pruneSnapshotLock.Unlock()
+		return
+	}
+
 	go func() {
 		defer db.pruneSnapshotLock.Unlock()
 
@@ -602,7 +609,7 @@ func (db *DB) pruneSnapshots() {
 			db.earliestSnapshotCache.Store(earliestVersion)
 		}
 
-		if err := db.wal.TruncateFront(walIndex(earliestVersion+1, db.initialVersion)); err != nil {
+		if err := wal.TruncateFront(walIndex(earliestVersion+1, initialVersion)); err != nil {
 			db.logger.Error("failed to truncate wal", "err", err, "version", earliestVersion+1)
 		}
 	}()
@@ -890,6 +897,10 @@ func (db *DB) Close() error {
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	}
+
+	// wait for any in-flight prune goroutine to finish before closing the WAL.
+	db.pruneSnapshotLock.Lock()
+	defer db.pruneSnapshotLock.Unlock()
 
 	errs = append(errs,
 		db.MultiTree.Close(),
