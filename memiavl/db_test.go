@@ -156,6 +156,7 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 
 	require.NoError(t, db.Close())
 }
+
 func TestCloseDuringSnapshotPrune(t *testing.T) {
 	for iter := 0; iter < 50; iter++ {
 		db, err := Load(t.TempDir(), Options{
