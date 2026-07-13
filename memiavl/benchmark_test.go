@@ -2,6 +2,7 @@ package memiavl
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -12,6 +13,81 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/btree"
 )
+
+// BenchmarkHashNodeLeaf measures HashNode on a leaf node (pool path).
+func BenchmarkHashNodeLeaf(b *testing.B) {
+	node := newLeafNode([]byte("benchmark-key-0001"), []byte("benchmark-value-0001"), 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		node.hash = nil
+		_ = HashNode(node)
+	}
+}
+
+// BenchmarkHashNodeInner measures HashNode on an inner node whose children
+// already have cached hashes (the common path during SaveVersion).
+func BenchmarkHashNodeInner(b *testing.B) {
+	left := newLeafNode([]byte("aaa"), []byte("aaa-value"), 1)
+	right := newLeafNode([]byte("bbb"), []byte("bbb-value"), 1)
+	// Pre-compute and cache children hashes so the benchmark exercises only
+	// the inner-node hash path, not recursive leaf hashing.
+	left.Hash()
+	right.Hash()
+	inner := &MemNode{
+		height:  1,
+		size:    2,
+		version: 1,
+		key:     right.key,
+		left:    left,
+		right:   right,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		inner.hash = nil
+		_ = HashNode(inner)
+	}
+}
+
+// BenchmarkHashNodeNoPool is the baseline: sha256.New() without pooling.
+// Used to quantify the allocation savings of the pool approach.
+func BenchmarkHashNodeNoPool(b *testing.B) {
+	node := newLeafNode([]byte("benchmark-key-0001"), []byte("benchmark-value-0001"), 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		node.hash = nil
+		h := sha256.New()
+		if err := writeHashBytes(node, h); err != nil {
+			b.Fatal(err)
+		}
+		_ = h.Sum(nil)
+	}
+}
+
+// BenchmarkSaveVersionHash measures the full SaveVersion hash update path
+// across a tree with many dirty nodes, which is the primary production hot path.
+func BenchmarkSaveVersionHash(b *testing.B) {
+	const kvCount = 1000
+	items := make([]struct{ key, value []byte }, kvCount)
+	for i := range items {
+		key := make([]byte, 8)
+		binary.BigEndian.PutUint64(key, uint64(i))
+		items[i].key = key
+		items[i].value = []byte("value")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		tree := New(0)
+		for _, item := range items {
+			tree.set(item.key, item.value)
+		}
+		_, _, _ = tree.SaveVersion(true)
+	}
+}
 
 func BenchmarkByteCompare(b *testing.B) {
 	var x, y [32]byte
