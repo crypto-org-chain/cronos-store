@@ -44,6 +44,10 @@ var errReadOnly = errors.New("db is read-only")
 // ```
 type DB struct {
 	MultiTree
+
+	// previous MultiTree generation, retained for one reload cycle (see reloadMultiTree).
+	retiredMultiTree *MultiTree
+
 	dir      string
 	logger   Logger
 	fileLock FileLock
@@ -556,6 +560,13 @@ func (db *DB) pruneSnapshots() {
 	// wait until last prune finish
 	db.pruneSnapshotLock.Lock()
 
+	initialVersion := db.initialVersion
+	wal := db.wal
+	if wal == nil {
+		db.pruneSnapshotLock.Unlock()
+		return
+	}
+
 	go func() {
 		defer db.pruneSnapshotLock.Unlock()
 
@@ -598,7 +609,7 @@ func (db *DB) pruneSnapshots() {
 			db.earliestSnapshotCache.Store(earliestVersion)
 		}
 
-		if err := db.wal.TruncateFront(walIndex(earliestVersion+1, db.initialVersion)); err != nil {
+		if err := wal.TruncateFront(walIndex(earliestVersion+1, initialVersion)); err != nil {
 			db.logger.Error("failed to truncate wal", "err", err, "version", earliestVersion+1)
 		}
 	}()
@@ -781,15 +792,23 @@ func (db *DB) reload() error {
 }
 
 func (db *DB) reloadMultiTree(mtree *MultiTree) error {
-	if err := db.MultiTree.Close(); err != nil {
-		return err
+	// do the fallible work first; on failure the new tree isn't installed, so
+	// close it to release its mmap'd snapshot.
+	if err := mtree.applyWALEntry(db.pendingLog); err != nil {
+		return errors.Join(err, mtree.Close())
+	}
+	if db.retiredMultiTree != nil {
+		if err := db.retiredMultiTree.Close(); err != nil {
+			db.retiredMultiTree = nil // closed (even if partially); don't close again
+			return errors.Join(err, mtree.Close())
+		}
 	}
 
+	// retain the outgoing generation for one reload cycle: copies and lock-free
+	// readers may still hold PersistedNodes into its mmap'd snapshot.
+	old := db.MultiTree
 	db.MultiTree = *mtree
-	// catch-up the pending changes
-	if err := db.applyWALEntry(db.pendingLog); err != nil {
-		return err
-	}
+	db.retiredMultiTree = &old
 	db.attachTraverseStateChanges()
 	return nil
 }
@@ -879,12 +898,21 @@ func (db *DB) Close() error {
 		db.snapshotRewriteCancel = nil
 	}
 
+	// wait for any in-flight prune goroutine to finish before closing the WAL.
+	db.pruneSnapshotLock.Lock()
+	defer db.pruneSnapshotLock.Unlock()
+
 	errs = append(errs,
 		db.MultiTree.Close(),
 		db.wal.Close(),
 	)
 
 	db.wal = nil
+
+	if db.retiredMultiTree != nil {
+		errs = append(errs, db.retiredMultiTree.Close())
+		db.retiredMultiTree = nil
+	}
 
 	if db.fileLock != nil {
 		errs = append(errs, db.fileLock.Unlock(), db.fileLock.Destroy())
