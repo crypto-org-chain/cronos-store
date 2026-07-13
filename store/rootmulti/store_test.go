@@ -1,16 +1,20 @@
 package rootmulti
 
 import (
+	"bytes"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	protoio "github.com/cosmos/gogoproto/io"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 	"github.com/stretchr/testify/require"
 
-	"cosmossdk.io/log"
-	"cosmossdk.io/store/types"
+	log "cosmossdk.io/log/v2"
+
+	snapshottypes "github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 const TestAppChainID = "test_chain"
@@ -263,4 +267,25 @@ func TestQueryFutureHeight(t *testing.T) {
 
 	_, err := store.Query(&types.RequestQuery{Path: "/test/key", Data: []byte("k"), Height: 100})
 	require.Error(t, err)
+}
+
+func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	var buf bytes.Buffer
+	w := protoio.NewDelimitedWriter(&buf)
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_IAVL{
+			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Value: []byte("v"), Height: 0, Version: 1},
+		},
+	}))
+	require.NoError(t, w.Close())
+
+	r := protoio.NewDelimitedReader(&buf, 1<<20)
+	defer r.Close()
+
+	require.NotPanics(t, func() {
+		_, err := rs.restore(1, 1, r)
+		require.ErrorContains(t, err, "received node item before tree item")
+	})
 }

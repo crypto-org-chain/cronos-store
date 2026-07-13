@@ -10,8 +10,8 @@ import (
 	"github.com/crypto-org-chain/cronos-store/memiavl"
 
 	cosmoserrors "cosmossdk.io/errors"
-	"cosmossdk.io/store/snapshots/types"
 
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
@@ -78,7 +78,9 @@ loop:
 			if node.Height == 0 && node.Value == nil {
 				node.Value = []byte{}
 			}
-			importer.AddNode(node)
+			if err := importer.AddNode(node); err != nil {
+				return types.SnapshotItem{}, cosmoserrors.Wrap(sdkerrors.ErrLogic, err.Error())
+			}
 		default:
 			// unknown element, could be an extension
 			break loop

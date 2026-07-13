@@ -11,7 +11,7 @@ import (
 	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/linxGnu/grocksdb"
 
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 const (

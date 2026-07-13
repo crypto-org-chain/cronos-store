@@ -13,10 +13,10 @@ import (
 	"github.com/spf13/cobra"
 
 	cosmossdkio "cosmossdk.io/errors"
-	"cosmossdk.io/store/snapshots"
-	"cosmossdk.io/store/snapshots/types"
 
 	"github.com/cosmos/cosmos-sdk/server"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 )
 
 // RestoreVersionDBCmd returns a command to restore a versiondb from local snapshot
@@ -107,7 +107,7 @@ loop:
 				continue
 			}
 			if storeKey == "" {
-				return cosmossdkio.Wrap(err, "invalid protobuf message, store name is empty")
+				return errors.New("invalid protobuf message, store name is empty")
 			}
 			ch <- versiondb.ImportEntry{
 				StoreKey: storeKey,

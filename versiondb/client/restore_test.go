@@ -10,7 +10,7 @@ import (
 	"github.com/crypto-org-chain/cronos-store/versiondb"
 	"github.com/stretchr/testify/require"
 
-	"cosmossdk.io/store/snapshots/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 )
 
 const testStoreKey = "bank"
@@ -77,6 +77,30 @@ func TestReadSnapshotEntriesSkipsInternalNodes(t *testing.T) {
 		{StoreKey: testStoreKey, Key: []byte("k1"), Value: []byte("v1")},
 		{StoreKey: testStoreKey, Key: []byte("k2"), Value: []byte("v2")},
 	}, got)
+}
+
+// TestReadSnapshotEntriesEmptyStoreName checks that an IAVL leaf before any
+// Store item fails the restore instead of silently succeeding.
+func TestReadSnapshotEntriesEmptyStoreName(t *testing.T) {
+	r := makeSnapshotReader([]*types.SnapshotItem{
+		{Item: &types.SnapshotItem_IAVL{IAVL: &types.SnapshotIAVLItem{Key: []byte("k1"), Value: []byte("v1"), Height: 0}}},
+	})
+
+	ch := make(chan versiondb.ImportEntry, 8)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(ch)
+		errCh <- readSnapshotEntries(r, ch)
+	}()
+
+	// drain the channel; nothing should be emitted
+	var got []versiondb.ImportEntry
+	for e := range ch {
+		got = append(got, e)
+	}
+
+	require.ErrorContains(t, <-errCh, "store name is empty")
+	require.Empty(t, got)
 }
 
 // errReader is a protoio.Reader that returns a fixed error after n successful reads.

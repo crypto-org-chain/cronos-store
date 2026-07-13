@@ -45,8 +45,7 @@ func (mti *MultiTreeImporter) tmpDir() string {
 func (mti *MultiTreeImporter) Add(item interface{}) error {
 	switch item := item.(type) {
 	case *ExportNode:
-		mti.AddNode(item)
-		return nil
+		return mti.AddNode(item)
 	case string:
 		return mti.AddTree(item)
 	default:
@@ -64,8 +63,12 @@ func (mti *MultiTreeImporter) AddTree(name string) error {
 	return nil
 }
 
-func (mti *MultiTreeImporter) AddNode(node *ExportNode) {
+func (mti *MultiTreeImporter) AddNode(node *ExportNode) error {
+	if mti.importer == nil {
+		return errors.New("received node item before tree item")
+	}
 	mti.importer.Add(node)
+	return nil
 }
 
 func (mti *MultiTreeImporter) Finalize() error {
