@@ -11,6 +11,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
+const testStoreKey = "test"
+
 func TestTSVersionDB(t *testing.T) {
 	versiondb.Run(t, func() versiondb.VersionStore {
 		store, err := NewStore(t.TempDir())
@@ -24,7 +26,7 @@ func TestImportDoesNotSetLatestVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	ch := make(chan versiondb.ImportEntry, 2)
-	ch <- versiondb.ImportEntry{StoreKey: "test", Key: []byte("k"), Value: []byte("v")}
+	ch <- versiondb.ImportEntry{StoreKey: testStoreKey, Key: []byte("k"), Value: []byte("v")}
 	close(ch)
 	require.NoError(t, store.Import(5, ch))
 
@@ -175,7 +177,7 @@ func TestUserTimestampPruning(t *testing.T) {
 // ReadOptions before the iterator was used, zeroing DBIter::timestamp_ub_ and causing IsVisible
 // to reject every key after the first Next().
 func TestIteratorReadOptsLifetime(t *testing.T) {
-	storeKey := "test"
+	storeKey := testStoreKey
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
 
@@ -209,7 +211,7 @@ func TestIteratorReadOptsLifetime(t *testing.T) {
 }
 
 func TestSkipVersionZero(t *testing.T) {
-	storeKey := "test"
+	storeKey := testStoreKey
 
 	var wrongTz [8]byte
 	binary.LittleEndian.PutUint64(wrongTz[:], 100)
