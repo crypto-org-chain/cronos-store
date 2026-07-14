@@ -1,5 +1,6 @@
 # Changelog
 
+- [#71](https://github.com/crypto-org-chain/cronos-store/pull/71) fix(versiondb): free the value slice on GetAtVersionSlice's skipVersionZero early return to avoid a C-heap leak.
 - [#70](https://github.com/crypto-org-chain/cronos-store/pull/70) fix(versiondb): use the passed version in buildCommitInfo.
 - [#69](https://github.com/crypto-org-chain/cronos-store/pull/69) fix(memiavl): reject malformed branch node and avoid import hang.
 - [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
