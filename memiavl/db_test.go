@@ -417,6 +417,42 @@ func TestTreeTraverseStateChanges(t *testing.T) {
 	require.Equal(t, []byte("baz"), changeSets[2].Pairs[0].Value)
 }
 
+func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
+	// endVersion <= 0 ("to latest") must not be rejected by the reversed-range guard.
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	applyAndCommit := func(changeSets []*NamedChangeSet) {
+		require.NoError(t, db.ApplyChangeSets(changeSets))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	applyAndCommit([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	})
+	applyAndCommit([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "baz")}},
+	})
+	applyAndCommit([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "qux")}},
+	})
+
+	tree := db.TreeByName(testStoreName)
+	require.NotNil(t, tree)
+
+	var versions []int64
+	require.NoError(t, tree.TraverseStateChanges(1, 0, func(version int64, cs *ChangeSet) error {
+		versions = append(versions, version)
+		return nil
+	}))
+	require.Equal(t, []int64{1, 2, 3}, versions, "endVersion=0 must traverse through the latest version")
+}
+
 func TestTraverseStateChangesWithoutWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{

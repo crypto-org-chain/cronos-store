@@ -462,7 +462,9 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return err
 	}
-	if endVersion < startVersion {
+	// endVersion <= 0 means "to latest" (resolved below); only short-circuit a
+	// genuine reversed range here.
+	if endVersion > 0 && endVersion < startVersion {
 		return nil
 	}
 	firstIndex, err := walLog.FirstIndex()
