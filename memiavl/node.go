@@ -5,8 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"io"
+	"sync"
 )
+
+// sha256Pool reuses sha256 hash objects to avoid a heap allocation per HashNode call.
+var sha256Pool = sync.Pool{
+	New: func() any { return sha256.New() },
+}
 
 // Node interface encapsulate the interface of both PersistedNode and MemNode.
 type Node interface {
@@ -188,11 +195,15 @@ func HashNode(node Node) []byte {
 	if node == nil {
 		return nil
 	}
-	h := sha256.New()
+	h := sha256Pool.Get().(hash.Hash)
+	h.Reset()
 	if err := writeHashBytes(node, h); err != nil {
+		sha256Pool.Put(h)
 		panic(err)
 	}
-	return h.Sum(nil)
+	result := h.Sum(nil)
+	sha256Pool.Put(h)
+	return result
 }
 
 // VerifyHash compare node's cached hash with computed one

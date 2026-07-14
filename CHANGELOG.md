@@ -1,6 +1,7 @@
 # Changelog
 
 - [#69](https://github.com/crypto-org-chain/cronos-store/pull/69) fix(memiavl): reject malformed branch node and avoid import hang.
+- [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
 - [#65](https://github.com/crypto-org-chain/cronos-store/pull/65) fix(store): guard against IAVL node before store item in state-sync restore.
 - [#68](https://github.com/crypto-org-chain/cronos-store/pull/68) fix(deps): use crypto-org-chain/cosmos-sdk fork (release/v0.54.x, includes #1816) so historical-height queries close the read-only memiavl DB instead of leaking fds/mmaps.
 - [#67](https://github.com/crypto-org-chain/cronos-store/pull/67) fix(memiavl): retain previous MultiTree generation across a reload to avoid a use-after-free of the mmap'd snapshot shared by copies.
@@ -11,7 +12,8 @@
 - [#56](https://github.com/crypto-org-chain/cronos-store/pull/56) fix(versiondb): fix use-after-free in tsrocksdb iterator — ReadOptions must outlive the iterator to prevent dangling pointer in DBIter::timestamp_ub_.
 - [#55](https://github.com/crypto-org-chain/cronos-store/pull/55) fix(versiondb): ignore non-leaf nodes data in restore-versiondb cli command.
 - [#54](https://github.com/crypto-org-chain/cronos-store/pull/54) fix(store): close memiavl db loaded in CacheMultiStoreWithVersion.
-- [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators. 
+- [#50](https://github.com/crypto-org-chain/cronos-store/pull/50) perf(store): add LRU cache for historical DB instances.
+- [#47](https://github.com/crypto-org-chain/cronos-store/pull/47) feat(cosmos-sdk): Optimize staking end-block queue through using pending queue slots instead of iterators.
 - [#45](https://github.com/crypto-org-chain/cronos-store/pull/45) feat: use rocksdb v10.9.1.
 - [#41](https://github.com/crypto-org-chain/cronos-store/pull/41) fix: update cosmos-sdk with signature incarnation cache removed for SigVerificationDecorator
 - [#40](https://github.com/crypto-org-chain/cronos-store/pull/40) fix: update cosmos-sdk with pre-estimate bug fixed
