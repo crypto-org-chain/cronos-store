@@ -849,3 +849,47 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
+
+// TestCommitAbortsOnAsyncWALWriteError ensures a failed async wal write surfaces
+// as a Commit error instead of deadlocking on the walChan send while holding db.mtx.
+func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 0, // unbuffered async writer: the worst case for the deadlock
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	commit := func() (int64, error) {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
+			return 0, err
+		}
+		return db.Commit()
+	}
+
+	// warm up: spin the async writer goroutine with a successful write.
+	_, err = commit()
+	require.NoError(t, err)
+
+	// break the underlying wal so the writer's next write fails.
+	require.NoError(t, db.wal.Close())
+
+	_, _ = commit()
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := commit()
+		done <- cerr
+	}()
+	select {
+	case cerr := <-done:
+		require.Error(t, cerr, "Commit must surface the async wal write error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Commit deadlocked after async wal writer failure")
+	}
+
+	// the error is latched, so every subsequent commit keeps failing.
+	_, cerr := commit()
+	require.Error(t, cerr, "Commit must stay failed after an async wal error")
+}
