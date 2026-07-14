@@ -378,7 +378,7 @@ func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(vers
 }
 
 // ScanPostOrder scans the tree in post-order, and call the callback function on each node.
-// If the callback function returns false, the scan will be stopped.
+// If the callback function returns true, the scan will be stopped.
 func (t *Tree) ScanPostOrder(callback func(node Node) bool) {
 	if t.root == nil {
 		return
@@ -390,7 +390,9 @@ func (t *Tree) ScanPostOrder(callback func(node Node) bool) {
 		entry := stack[len(stack)-1]
 
 		if entry.node.IsLeaf() || entry.expanded {
-			callback(entry.node)
+			if callback(entry.node) {
+				return
+			}
 			stack = stack[:len(stack)-1]
 			continue
 		}
