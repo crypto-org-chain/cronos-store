@@ -19,6 +19,20 @@ func TestTSVersionDB(t *testing.T) {
 	})
 }
 
+func TestImportDoesNotSetLatestVersion(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	ch := make(chan versiondb.ImportEntry, 2)
+	ch <- versiondb.ImportEntry{StoreKey: "test", Key: []byte("k"), Value: []byte("v")}
+	close(ch)
+	require.NoError(t, store.Import(5, ch))
+
+	v, err := store.GetLatestVersion()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), v, "Import must not set the latest version")
+}
+
 // TestUserTimestampBasic tests the behaviors of user-defined timestamp feature of rocksdb
 func TestUserTimestampBasic(t *testing.T) {
 	key := []byte("hello")

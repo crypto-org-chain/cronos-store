@@ -195,7 +195,10 @@ func (s Store) FeedChangeSet(version int64, store string, changeSet *iavl.Change
 	return s.db.Write(defaultWriteOpts, batch)
 }
 
-// Import loads the initial version of the state
+// Import writes the streamed entries at the given version. It does NOT mark the
+// version as latest: the caller must SetLatestVersion only after the entry
+// stream has been fully consumed without error, otherwise a partial import
+// would leave the DB marked complete at this version.
 func (s Store) Import(version int64, ch <-chan versiondb.ImportEntry) error {
 	batch := grocksdb.NewWriteBatch()
 	defer batch.Destroy()
@@ -223,7 +226,7 @@ func (s Store) Import(version int64, ch <-chan versiondb.ImportEntry) error {
 		}
 	}
 
-	return s.SetLatestVersion(version)
+	return nil
 }
 
 func (s Store) Flush() error {
