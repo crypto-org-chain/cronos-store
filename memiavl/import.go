@@ -67,8 +67,7 @@ func (mti *MultiTreeImporter) AddNode(node *ExportNode) error {
 	if mti.importer == nil {
 		return errors.New("received node item before tree item")
 	}
-	mti.importer.Add(node)
-	return nil
+	return mti.importer.Add(node)
 }
 
 func (mti *MultiTreeImporter) Finalize() error {
@@ -115,8 +114,16 @@ func NewTreeImporter(dir string, version int64) *TreeImporter {
 	return &TreeImporter{nodesChan, quitChan}
 }
 
-func (ai *TreeImporter) Add(node *ExportNode) {
-	ai.nodesChan <- node
+func (ai *TreeImporter) Add(node *ExportNode) error {
+	// Surface an early consumer error instead of blocking on a full channel.
+	// The import error is delivered once, via Add or Close (whichever reads
+	// quitChan first); the other then observes the closed channel and returns nil.
+	select {
+	case ai.nodesChan <- node:
+		return nil
+	case err := <-ai.quitChan:
+		return err
+	}
 }
 
 func (ai *TreeImporter) Close() error {
@@ -188,6 +195,11 @@ func (i *importer) Add(n *ExportNode) error {
 		i.leavesStack = append(i.leavesStack, i.leafCounter)
 		i.nodeStack = append(i.nodeStack, node)
 		return nil
+	}
+
+	// a branch node before its two child subtrees would index out of range below.
+	if len(i.leavesStack) < 2 || len(i.nodeStack) < 2 {
+		return fmt.Errorf("invalid node structure: branch node with %d leaves, %d nodes on stack", len(i.leavesStack), len(i.nodeStack))
 	}
 
 	// branch node

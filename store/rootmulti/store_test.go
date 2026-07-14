@@ -289,3 +289,27 @@ func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {
 		require.ErrorContains(t, err, "received node item before tree item")
 	})
 }
+
+func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	var buf bytes.Buffer
+	w := protoio.NewDelimitedWriter(&buf)
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_Store{
+			Store: &snapshottypes.SnapshotStoreItem{Name: "test"},
+		},
+	}))
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_IAVL{
+			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Height: 1, Version: 1},
+		},
+	}))
+	require.NoError(t, w.Close())
+
+	r := protoio.NewDelimitedReader(&buf, 1<<20)
+	defer r.Close()
+
+	_, err := rs.restore(1, 1, r)
+	require.ErrorContains(t, err, "invalid node structure")
+}

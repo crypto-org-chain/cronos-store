@@ -1,5 +1,6 @@
 # Changelog
 
+- [#69](https://github.com/crypto-org-chain/cronos-store/pull/69) fix(memiavl): reject malformed branch node and avoid import hang.
 - [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
 - [#65](https://github.com/crypto-org-chain/cronos-store/pull/65) fix(store): guard against IAVL node before store item in state-sync restore.
 - [#68](https://github.com/crypto-org-chain/cronos-store/pull/68) fix(deps): use crypto-org-chain/cosmos-sdk fork (release/v0.54.x, includes #1816) so historical-height queries close the read-only memiavl DB instead of leaking fds/mmaps.
