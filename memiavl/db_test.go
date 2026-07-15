@@ -418,7 +418,7 @@ func TestTreeTraverseStateChanges(t *testing.T) {
 }
 
 func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
-	// endVersion <= 0 ("to latest") must not be rejected by the reversed-range guard.
+	// endVersion == 0 ("to latest") must not be rejected by the reversed-range guard.
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
@@ -498,6 +498,25 @@ func TestTraverseStateChangesWithoutWAL(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestCatchupWALNegativeEndVersion(t *testing.T) {
+	// endVersion < 0 is invalid and must be rejected, not silently treated as latest.
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	require.Error(t, db.MultiTree.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
 func TestZeroCopy(t *testing.T) {
