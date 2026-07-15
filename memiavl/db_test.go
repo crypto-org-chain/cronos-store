@@ -516,7 +516,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.MultiTree.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
 func TestZeroCopy(t *testing.T) {
