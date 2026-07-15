@@ -1,6 +1,9 @@
 # Changelog
 
 - [#73](https://github.com/crypto-org-chain/cronos-store/pull/73) fix(memiavl): treat `endVersion == 0` as "to latest" (consistently in `TraverseStateChanges` and `CatchupWAL`) and reject a negative `endVersion` with an error instead of silently traversing nothing.
+- [#72](https://github.com/crypto-org-chain/cronos-store/pull/72) fix(versiondb): mark s/latest only after a clean snapshot read.
+- [#71](https://github.com/crypto-org-chain/cronos-store/pull/71) fix(versiondb): free the value slice on GetAtVersionSlice's skipVersionZero early return to avoid a C-heap leak.
+- [#70](https://github.com/crypto-org-chain/cronos-store/pull/70) fix(versiondb): use the passed version in buildCommitInfo.
 - [#69](https://github.com/crypto-org-chain/cronos-store/pull/69) fix(memiavl): reject malformed branch node and avoid import hang.
 - [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
 - [#65](https://github.com/crypto-org-chain/cronos-store/pull/65) fix(store): guard against IAVL node before store item in state-sync restore.

@@ -109,6 +109,7 @@ func (s Store) GetAtVersionSlice(storeKey string, key []byte, version *int64) (*
 
 	if value.Exists() && s.skipVersionZero {
 		if binary.LittleEndian.Uint64(ts.Data()) == 0 {
+			value.Free() // not returned to the caller on this path; free the C buffer
 			return grocksdb.NewSlice(nil, 0), nil
 		}
 	}
@@ -195,7 +196,9 @@ func (s Store) FeedChangeSet(version int64, store string, changeSet *iavl.Change
 	return s.db.Write(defaultWriteOpts, batch)
 }
 
-// Import loads the initial version of the state
+// Import writes the streamed entries at the given version. It does not mark the
+// version as latest; callers must call SetLatestVersion once the stream has been
+// fully consumed.
 func (s Store) Import(version int64, ch <-chan versiondb.ImportEntry) error {
 	batch := grocksdb.NewWriteBatch()
 	defer batch.Destroy()
@@ -223,7 +226,7 @@ func (s Store) Import(version int64, ch <-chan versiondb.ImportEntry) error {
 		}
 	}
 
-	return s.SetLatestVersion(version)
+	return nil
 }
 
 func (s Store) Flush() error {
