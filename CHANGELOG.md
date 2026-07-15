@@ -1,5 +1,6 @@
 # Changelog
 
+- [#74](https://github.com/crypto-org-chain/cronos-store/pull/74) fix(memiavl): honor the early-stop return value in `ScanPostOrder` so the scan stops when the callback returns true, instead of always walking the whole tree.
 - [#69](https://github.com/crypto-org-chain/cronos-store/pull/69) fix(memiavl): reject malformed branch node and avoid import hang.
 - [#49](https://github.com/crypto-org-chain/cronos-store/pull/49) perf(memiavl): pool sha256 hashers in `HashNode` to reduce per-call allocations (~15% faster, −53% bytes/op).
 - [#65](https://github.com/crypto-org-chain/cronos-store/pull/65) fix(store): guard against IAVL node before store item in state-sync restore.
