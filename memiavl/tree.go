@@ -142,7 +142,7 @@ type Tree struct {
 }
 
 // traverseStateChangesFn traverses change sets in [startVersion, endVersion] (inclusive).
-// endVersion <= 0 means "to the latest available version".
+// endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
 type traverseStateChangesFn func(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error
 
 type cacheNode struct {
@@ -372,8 +372,8 @@ func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 }
 
 // TraverseStateChanges iterates the change sets between startVersion and endVersion (inclusive).
-// endVersion <= 0 means "to the latest available version". A genuine reversed range
-// (0 < endVersion < startVersion) yields nothing.
+// endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
+// A genuine reversed range (0 < endVersion < startVersion) yields nothing.
 func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
 	if t.traverseStateChanges == nil {
 		return fmt.Errorf("TraverseStateChanges not supported")
@@ -459,6 +459,9 @@ func (db *DB) attachTraverseStateChanges() {
 }
 
 func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
+	if endVersion < 0 {
+		return fmt.Errorf("invalid end version: %d", endVersion)
+	}
 	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
 	if err != nil {
 		return err
@@ -481,9 +484,9 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	lastAvailable := walVersion(lastIndex, initialVersion)
 
 	// Resolve the requested [startVersion, endVersion] range against the retained
-	// WAL window [firstAvailable, lastAvailable]. endVersion <= 0 means "to the
-	// latest available version".
-	if endVersion <= 0 || endVersion > lastAvailable {
+	// WAL window [firstAvailable, lastAvailable]. endVersion == 0 means "to the
+	// latest available version" (negative values are rejected above).
+	if endVersion == 0 || endVersion > lastAvailable {
 		endVersion = lastAvailable
 	}
 	if startVersion < firstAvailable {

@@ -459,6 +459,12 @@ func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
 		return nil
 	}))
 	require.Empty(t, versions, "reversed range must traverse nothing")
+
+	// A negative endVersion is invalid and must return an error.
+	err = tree.TraverseStateChanges(1, -1, func(version int64, cs *ChangeSet) error {
+		return nil
+	})
+	require.Error(t, err, "negative endVersion must return an error")
 }
 
 func TestTraverseStateChangesWithoutWAL(t *testing.T) {
