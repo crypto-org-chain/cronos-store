@@ -74,7 +74,12 @@ func RestoreVersionDBCmd() *cobra.Command {
 			if err := versionDB.Import(int64(height), ch); err != nil {
 				return err
 			}
-			return <-errCh
+			// Only mark the version complete once the whole snapshot stream was
+			// read without error; a partial/failed read must not set s/latest.
+			if err := <-errCh; err != nil {
+				return err
+			}
+			return versionDB.SetLatestVersion(int64(height))
 		},
 	}
 	return cmd
