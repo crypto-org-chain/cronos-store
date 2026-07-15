@@ -451,6 +451,14 @@ func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
 		return nil
 	}))
 	require.Equal(t, []int64{1, 2, 3}, versions, "endVersion=0 must traverse through the latest version")
+
+	// A genuine reversed range (0 < endVersion < startVersion) must traverse nothing.
+	versions = nil
+	require.NoError(t, tree.TraverseStateChanges(3, 1, func(version int64, cs *ChangeSet) error {
+		versions = append(versions, version)
+		return nil
+	}))
+	require.Empty(t, versions, "reversed range must traverse nothing")
 }
 
 func TestTraverseStateChangesWithoutWAL(t *testing.T) {

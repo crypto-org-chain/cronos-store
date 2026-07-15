@@ -141,6 +141,8 @@ type Tree struct {
 	traverseStateChanges traverseStateChangesFn
 }
 
+// traverseStateChangesFn traverses change sets in [startVersion, endVersion] (inclusive).
+// endVersion <= 0 means "to the latest available version".
 type traverseStateChangesFn func(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error
 
 type cacheNode struct {
@@ -369,7 +371,9 @@ func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 	return NewIterator(start, end, ascending, t.root, t.zeroCopy)
 }
 
-// TraverseStateChanges iterates the change sets between the given versions (inclusive).
+// TraverseStateChanges iterates the change sets between startVersion and endVersion (inclusive).
+// endVersion <= 0 means "to the latest available version". A genuine reversed range
+// (0 < endVersion < startVersion) yields nothing.
 func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
 	if t.traverseStateChanges == nil {
 		return fmt.Errorf("TraverseStateChanges not supported")
@@ -462,11 +466,6 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return err
 	}
-	// endVersion <= 0 means "to latest" (resolved below); only short-circuit a
-	// genuine reversed range here.
-	if endVersion > 0 && endVersion < startVersion {
-		return nil
-	}
 	firstIndex, err := walLog.FirstIndex()
 	if err != nil {
 		return err
@@ -479,16 +478,19 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 		return nil
 	}
 	firstAvailable := walVersion(firstIndex, initialVersion)
-	if startVersion < firstAvailable {
-		startVersion = firstAvailable
-	}
 	lastAvailable := walVersion(lastIndex, initialVersion)
+
+	// Resolve the requested [startVersion, endVersion] range against the retained
+	// WAL window [firstAvailable, lastAvailable]. endVersion <= 0 means "to the
+	// latest available version".
 	if endVersion <= 0 || endVersion > lastAvailable {
 		endVersion = lastAvailable
 	}
-	// If the requested interval sits entirely before the retained WAL window,
-	// clamping start to firstAvailable jumps past endVersion. In that case there
-	// is nothing left to traverse.
+	if startVersion < firstAvailable {
+		startVersion = firstAvailable
+	}
+	// Nothing to traverse: either a reversed range (endVersion < startVersion), or
+	// the requested interval falls entirely outside the retained WAL window.
 	if endVersion < startVersion {
 		return nil
 	}
