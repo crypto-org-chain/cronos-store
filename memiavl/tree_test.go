@@ -397,3 +397,27 @@ func TestApplyChangeSetClonesInputDisableZeroCopy(t *testing.T) {
 	got := tree.Get(lookupKey)
 	require.Equal(t, expectedValue, got)
 }
+
+func TestScanPostOrderEarlyStop(t *testing.T) {
+	tree := New(0)
+	for i := 0; i < 8; i++ {
+		tree.set([]byte(fmt.Sprintf("key-%02d", i)), []byte{byte(i)})
+	}
+	_, _, err := tree.SaveVersion(true)
+	require.NoError(t, err)
+
+	var total int
+	tree.ScanPostOrder(func(Node) bool {
+		total++
+		return false
+	})
+	require.Greater(t, total, 1)
+
+	// returning true must stop the scan immediately, not walk the whole tree.
+	var visited int
+	tree.ScanPostOrder(func(Node) bool {
+		visited++
+		return true
+	})
+	require.Equal(t, 1, visited, "ScanPostOrder must stop when the callback returns true")
+}
