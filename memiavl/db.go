@@ -637,8 +637,6 @@ func (db *DB) Commit() (int64, error) {
 		return 0, errReadOnly
 	}
 
-	// fail fast if the async writer already died, before SaveVersion advances
-	// the in-memory tree past the WAL.
 	if err := db.checkAsyncCommit(); err != nil {
 		return 0, err
 	}

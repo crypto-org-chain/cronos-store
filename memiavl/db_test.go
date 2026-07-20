@@ -962,3 +962,39 @@ func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	_, cerr := commit()
 	require.Error(t, cerr, "Commit must stay failed after an async wal error")
 }
+
+// TestCommitAbortsOnAsyncWALWriteErrorBuffered covers the buffered channel case:
+// once the writer dies, no Commit may report success (that would drop a version).
+func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 16,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	commit := func() (int64, error) {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
+			return 0, err
+		}
+		return db.Commit()
+	}
+
+	_, err = commit()
+	require.NoError(t, err)
+
+	require.NoError(t, db.wal.Close())
+
+	sawError := false
+	for i := 0; i < 20; i++ {
+		_, cerr := commit()
+		if sawError {
+			require.Error(t, cerr, "Commit returned success after a prior async wal failure")
+		} else if cerr != nil {
+			sawError = true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.True(t, sawError, "async wal writer death never surfaced as a Commit error")
+}
+
