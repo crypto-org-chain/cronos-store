@@ -1,5 +1,6 @@
 # Changelog
 
+- [#75](https://github.com/crypto-org-chain/cronos-store/pull/75) fix(memiavl): abort `Commit` on an async WAL write error instead of deadlocking on the `walChan` send under `db.mtx`; also break the snapshot catch-up loop and free the completed snapshot tree when the writer dies.
 - [#73](https://github.com/crypto-org-chain/cronos-store/pull/73) fix(memiavl): treat `endVersion == 0` as "to latest" (consistently in `TraverseStateChanges` and `CatchupWAL`) and reject a negative `endVersion` with an error instead of silently traversing nothing.
 - [#74](https://github.com/crypto-org-chain/cronos-store/pull/74) fix(memiavl): honor the early-stop return value in `ScanPostOrder` so the scan stops when the callback returns true, instead of always walking the whole tree.
 - [#72](https://github.com/crypto-org-chain/cronos-store/pull/72) fix(versiondb): mark s/latest only after a clean snapshot read.
