@@ -536,11 +536,11 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
 		for {
 			if err := db.checkAsyncCommit(); err != nil {
-				return err
+				return errors.Join(err, result.mtree.Close())
 			}
 			committedVersion, err := db.CommittedVersion()
 			if err != nil {
-				return fmt.Errorf("get wal version failed: %w", err)
+				return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
 			}
 			if db.lastCommitInfo.Version == committedVersion {
 				break
@@ -550,10 +550,10 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// catchup the remaining wal
 		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return fmt.Errorf("catchup failed: %w", err)
+			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
 		}
 
-		// do the switch
+		// do the switch. reloadMultiTree closes result.mtree itself on failure.
 		if err := db.reloadMultiTree(result.mtree); err != nil {
 			return fmt.Errorf("switch multitree failed: %w", err)
 		}

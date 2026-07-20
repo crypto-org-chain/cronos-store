@@ -1020,7 +1020,6 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	db.walErr = errors.New("simulated async wal writer death")
 
 	mtree := db.MultiTree.Copy(0)
-	defer mtree.Close()
 	ch := make(chan snapshotResult, 1)
 	ch <- snapshotResult{mtree: mtree}
 	db.snapshotRewriteChan = ch
