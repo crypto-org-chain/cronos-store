@@ -141,6 +141,8 @@ type Tree struct {
 	traverseStateChanges traverseStateChangesFn
 }
 
+// traverseStateChangesFn traverses change sets in [startVersion, endVersion] (inclusive).
+// endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
 type traverseStateChangesFn func(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error
 
 type cacheNode struct {
@@ -369,7 +371,9 @@ func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 	return NewIterator(start, end, ascending, t.root, t.zeroCopy)
 }
 
-// TraverseStateChanges iterates the change sets between the given versions (inclusive).
+// TraverseStateChanges iterates the change sets between startVersion and endVersion (inclusive).
+// endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
+// A genuine reversed range (0 < endVersion < startVersion) yields nothing.
 func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
 	if t.traverseStateChanges == nil {
 		return fmt.Errorf("TraverseStateChanges not supported")
@@ -378,7 +382,7 @@ func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(vers
 }
 
 // ScanPostOrder scans the tree in post-order, and call the callback function on each node.
-// If the callback function returns false, the scan will be stopped.
+// If the callback function returns true, the scan will be stopped.
 func (t *Tree) ScanPostOrder(callback func(node Node) bool) {
 	if t.root == nil {
 		return
@@ -390,7 +394,9 @@ func (t *Tree) ScanPostOrder(callback func(node Node) bool) {
 		entry := stack[len(stack)-1]
 
 		if entry.node.IsLeaf() || entry.expanded {
-			callback(entry.node)
+			if callback(entry.node) {
+				return
+			}
 			stack = stack[:len(stack)-1]
 			continue
 		}
@@ -455,15 +461,15 @@ func (db *DB) attachTraverseStateChanges() {
 }
 
 func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
+	if endVersion < 0 {
+		return fmt.Errorf("invalid end version: %d", endVersion)
+	}
 	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
 	if err != nil {
 		return err
 	}
 	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return err
-	}
-	if endVersion < startVersion {
-		return nil
 	}
 	firstIndex, err := walLog.FirstIndex()
 	if err != nil {
@@ -477,16 +483,19 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 		return nil
 	}
 	firstAvailable := walVersion(firstIndex, initialVersion)
+	lastAvailable := walVersion(lastIndex, initialVersion)
+
+	// Resolve the requested [startVersion, endVersion] range against the retained
+	// WAL window [firstAvailable, lastAvailable]. endVersion == 0 means "to the
+	// latest available version" (negative values are rejected above).
+	if endVersion == 0 || endVersion > lastAvailable {
+		endVersion = lastAvailable
+	}
 	if startVersion < firstAvailable {
 		startVersion = firstAvailable
 	}
-	lastAvailable := walVersion(lastIndex, initialVersion)
-	if endVersion <= 0 || endVersion > lastAvailable {
-		endVersion = lastAvailable
-	}
-	// If the requested interval sits entirely before the retained WAL window,
-	// clamping start to firstAvailable jumps past endVersion. In that case there
-	// is nothing left to traverse.
+	// Nothing to traverse: either a reversed range (endVersion < startVersion), or
+	// the requested interval falls entirely outside the retained WAL window.
 	if endVersion < startVersion {
 		return nil
 	}
