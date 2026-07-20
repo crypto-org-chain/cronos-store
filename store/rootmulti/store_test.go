@@ -17,7 +17,15 @@ import (
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
-const TestAppChainID = "test_chain"
+const (
+	TestAppChainID   = "test_chain"
+	testStoreName    = "test"
+	orphanStoreName  = "orphan"
+	oldStoreName     = "old"
+	newStoreName     = "new"
+	addedStoreName   = "added"
+	deletedStoreName = "deleted"
+)
 
 func TestLastCommitID(t *testing.T) {
 	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
@@ -28,7 +36,7 @@ func TestLoadLatestVersionRejectsUnexpectedMemiAVLTree(t *testing.T) {
 	dir := t.TempDir()
 	db, err := memiavl.Load(dir, memiavl.Options{
 		CreateIfMissing:   true,
-		InitialStores:     []string{"orphan", "test"},
+		InitialStores:     []string{orphanStoreName, testStoreName},
 		AsyncCommitBuffer: -1,
 	}, TestAppChainID)
 	require.NoError(t, err)
@@ -37,7 +45,7 @@ func TestLoadLatestVersionRejectsUnexpectedMemiAVLTree(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
-	store.MountStoreWithDB(types.NewKVStoreKey("test"), types.StoreTypeIAVL, nil)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
 
 	err = store.LoadLatestVersion()
 	require.ErrorContains(t, err, "memiavl tree membership mismatch")
@@ -48,22 +56,22 @@ func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
 	dir := t.TempDir()
 	db, err := memiavl.Load(dir, memiavl.Options{
 		CreateIfMissing:   true,
-		InitialStores:     []string{"old", "test"},
+		InitialStores:     []string{oldStoreName, testStoreName},
 		AsyncCommitBuffer: -1,
 	}, TestAppChainID)
 	require.NoError(t, err)
 	_, err = db.Commit()
 	require.NoError(t, err)
-	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: "old", Delete: true}}))
+	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
-	store.MountStoreWithDB(types.NewKVStoreKey("test"), types.StoreTypeIAVL, nil)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
 
 	require.NoError(t, store.LoadVersion(1))
-	require.NotNil(t, store.db.TreeByName("old"))
+	require.NotNil(t, store.db.TreeByName(oldStoreName))
 	require.NoError(t, store.Close())
 }
 
@@ -78,26 +86,26 @@ func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T)
 	}{
 		{
 			name:          "add",
-			initialStores: []string{"test"},
-			mountedStores: []string{"added", "test"},
-			upgrades:      &types.StoreUpgrades{Added: []string{"added"}},
+			initialStores: []string{testStoreName},
+			mountedStores: []string{addedStoreName, testStoreName},
+			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
 		},
 		{
 			name:          "delete",
-			initialStores: []string{"deleted", "test"},
-			mountedStores: []string{"test"},
-			upgrades:      &types.StoreUpgrades{Deleted: []string{"deleted"}},
+			initialStores: []string{deletedStoreName, testStoreName},
+			mountedStores: []string{testStoreName},
+			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
 		},
 		{
 			name:          "rename",
-			initialStores: []string{"old", "test"},
-			mountedStores: []string{"new", "test"},
+			initialStores: []string{oldStoreName, testStoreName},
+			mountedStores: []string{newStoreName, testStoreName},
 			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
-				OldKey: "old",
-				NewKey: "new",
+				OldKey: oldStoreName,
+				NewKey: newStoreName,
 			}}},
-			dataStore:   "old",
-			loadedStore: "new",
+			dataStore:   oldStoreName,
+			loadedStore: newStoreName,
 		},
 	}
 
@@ -147,23 +155,23 @@ func TestLoadLatestVersionAndUpgradeRejectsUnexpectedMemiAVLTree(t *testing.T) {
 	}{
 		{
 			name:          "add",
-			initialStores: []string{"orphan", "test"},
-			mountedStores: []string{"added", "test"},
-			upgrades:      &types.StoreUpgrades{Added: []string{"added"}},
+			initialStores: []string{orphanStoreName, testStoreName},
+			mountedStores: []string{addedStoreName, testStoreName},
+			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
 		},
 		{
 			name:          "delete",
-			initialStores: []string{"deleted", "orphan", "test"},
-			mountedStores: []string{"test"},
-			upgrades:      &types.StoreUpgrades{Deleted: []string{"deleted"}},
+			initialStores: []string{deletedStoreName, orphanStoreName, testStoreName},
+			mountedStores: []string{testStoreName},
+			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
 		},
 		{
 			name:          "rename",
-			initialStores: []string{"old", "orphan", "test"},
-			mountedStores: []string{"new", "test"},
+			initialStores: []string{oldStoreName, orphanStoreName, testStoreName},
+			mountedStores: []string{newStoreName, testStoreName},
 			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
-				OldKey: "old",
-				NewKey: "new",
+				OldKey: oldStoreName,
+				NewKey: newStoreName,
 			}}},
 		},
 	}
