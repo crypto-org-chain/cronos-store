@@ -998,3 +998,44 @@ func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	require.True(t, sawError, "async wal writer death never surfaced as a Commit error")
 }
 
+// TestSnapshotRewriteWaitAbortsOnAsyncWALError ensures the snapshot-completion
+// WAL catch-up loop bails out when the async wal writer has died, instead of
+// spinning forever because the WAL can never reach lastCommitInfo.Version.
+func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 0,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.WaitAsyncCommit())
+
+	cv, err := db.CommittedVersion()
+	require.NoError(t, err)
+	db.lastCommitInfo.Version = cv + 1
+	db.walErr = errors.New("simulated async wal writer death")
+
+	mtree := db.MultiTree.Copy(0)
+	defer mtree.Close()
+	ch := make(chan snapshotResult, 1)
+	ch <- snapshotResult{mtree: mtree}
+	db.snapshotRewriteChan = ch
+	db.snapshotRewriteCancel = func() {}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- db.checkBackgroundSnapshotRewrite()
+	}()
+	select {
+	case cerr := <-done:
+		require.Error(t, cerr, "snapshot rewrite catch-up must surface the async wal error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
+	}
+}
+
+

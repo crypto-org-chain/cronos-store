@@ -535,6 +535,9 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
 		for {
+			if err := db.checkAsyncCommit(); err != nil {
+				return err
+			}
 			committedVersion, err := db.CommittedVersion()
 			if err != nil {
 				return fmt.Errorf("get wal version failed: %w", err)
