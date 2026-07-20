@@ -554,8 +554,10 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
-	if err := validateMemiAVLTreeMembership(db, initialStores); err != nil {
-		return err
+	if version == 0 || upgrades != nil {
+		if err := validateMemiAVLTreeMembership(db, initialStores); err != nil {
+			return err
+		}
 	}
 
 	newStores := make(map[types.StoreKey]types.CommitStore, len(storesKeys))
