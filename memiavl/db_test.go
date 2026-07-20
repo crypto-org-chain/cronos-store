@@ -1036,5 +1036,3 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
 }
-
-
