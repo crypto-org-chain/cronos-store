@@ -637,8 +637,10 @@ func (db *DB) Commit() (int64, error) {
 		return 0, errReadOnly
 	}
 
-	if db.walErr != nil {
-		return 0, db.walErr
+	// fail fast if the async writer already died, before SaveVersion advances
+	// the in-memory tree past the WAL.
+	if err := db.checkAsyncCommit(); err != nil {
+		return 0, err
 	}
 
 	v, err := db.MultiTree.SaveVersion(true)
@@ -662,7 +664,7 @@ func (db *DB) Commit() (int64, error) {
 				if e := db.latchWalErr(err); e != nil {
 					return 0, e
 				}
-				db.walErr = errors.New("async wal writing goroutine exited unexpectedly")
+				db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
 				return 0, db.walErr
 			}
 		} else {
@@ -746,7 +748,7 @@ func (db *DB) WaitAsyncCommit() error {
 
 func (db *DB) waitAsyncCommit() error {
 	if db.walChan == nil {
-		return nil
+		return db.walErr
 	}
 
 	close(db.walChan)
@@ -754,7 +756,10 @@ func (db *DB) waitAsyncCommit() error {
 
 	db.walChan = nil
 	db.walQuit = nil
-	return err
+	if err != nil {
+		return db.latchWalErr(err)
+	}
+	return db.walErr
 }
 
 func (db *DB) Copy() *DB {
