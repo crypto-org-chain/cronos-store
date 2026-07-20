@@ -528,6 +528,12 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	if err != nil {
 		return errors.Wrapf(err, "fail to load memiavl at %s", rs.dir)
 	}
+	dbInstalled := false
+	defer func() {
+		if !dbInstalled {
+			_ = db.Close()
+		}
+	}()
 
 	var treeUpgrades []*memiavl.TreeNameUpgrade
 	if upgrades != nil {
@@ -548,6 +554,10 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
+	if err := validateMemiAVLTreeMembership(db, initialStores); err != nil {
+		return err
+	}
+
 	newStores := make(map[types.StoreKey]types.CommitStore, len(storesKeys))
 	for _, key := range storesKeys {
 		newStores[key], err = rs.loadCommitStoreFromParams(db, key, rs.storesParams[key])
@@ -557,6 +567,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	}
 
 	rs.db = db
+	dbInstalled = true
 	rs.stores = newStores
 	// to keep the root hash compatible with cosmos-sdk 0.46
 	if db.Version() != 0 {
@@ -568,6 +579,33 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		rs.lastCommitInfo = &types.CommitInfo{}
 	}
 
+	return nil
+}
+
+func validateMemiAVLTreeMembership(db *memiavl.DB, expectedNames []string) error {
+	expected := make(map[string]struct{}, len(expectedNames))
+	for _, name := range expectedNames {
+		expected[name] = struct{}{}
+	}
+
+	unexpected := make([]string, 0)
+	for _, tree := range db.Trees() {
+		if _, ok := expected[tree.Name]; ok {
+			delete(expected, tree.Name)
+			continue
+		}
+		unexpected = append(unexpected, tree.Name)
+	}
+
+	missing := make([]string, 0, len(expected))
+	for name := range expected {
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 || len(unexpected) > 0 {
+		return fmt.Errorf("memiavl tree membership mismatch: missing=%v unexpected=%v", missing, unexpected)
+	}
 	return nil
 }
 

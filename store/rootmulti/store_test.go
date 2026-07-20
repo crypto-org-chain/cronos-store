@@ -24,6 +24,26 @@ func TestLastCommitID(t *testing.T) {
 	require.Equal(t, types.CommitID{}, store.LastCommitID())
 }
 
+func TestLoadLatestVersionRejectsUnexpectedMemiAVLTree(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{"orphan", "test"},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey("test"), types.StoreTypeIAVL, nil)
+
+	err = store.LoadLatestVersion()
+	require.ErrorContains(t, err, "memiavl tree membership mismatch")
+	require.ErrorContains(t, err, "unexpected=[orphan]")
+}
+
 // newTestStore creates a rootmulti Store with one IAVL sub-store ("test") mounted,
 // loaded, and committed numVersions times so that historical queries are possible.
 // The store uses SnapshotInterval=1 so every commit creates a snapshot.
