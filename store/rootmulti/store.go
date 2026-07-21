@@ -554,6 +554,8 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
+	// Validate latest and post-upgrade membership. Historical loads may
+	// legitimately contain stores that were deleted or renamed later.
 	if version == 0 || upgrades != nil {
 		if err := validateMemiAVLTreeMembership(db, initialStores); err != nil {
 			return err
@@ -603,9 +605,11 @@ func validateMemiAVLTreeMembership(db *memiavl.DB, expectedNames []string) error
 	for name := range expected {
 		missing = append(missing, name)
 	}
-	sort.Strings(missing)
 
 	if len(missing) > 0 || len(unexpected) > 0 {
+		// The map iteration order is undefined, so sort missing for deterministic
+		// error presentation. unexpected follows db.Trees(), which is ordered by name.
+		sort.Strings(missing)
 		return fmt.Errorf("memiavl tree membership mismatch: missing=%v unexpected=%v", missing, unexpected)
 	}
 	return nil
