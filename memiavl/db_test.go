@@ -519,10 +519,8 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
-// corruptTrailingWALEntry appends a garbage WAL entry right after the wal's current
-// last index, so any CatchupWAL call that reaches it fails to unmarshal. It returns
-// the version the corrupt entry pretends to be, so callers can keep lastCommitInfo
-// consistent with the wal's reported committed version.
+// corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
+// callers can keep lastCommitInfo consistent with the wal's reported committed version.
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
@@ -535,9 +533,6 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	return walVersion(corruptIndex, db.initialVersion)
 }
 
-// TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure verifies that when the
-// wal catch-up step in checkBackgroundSnapshotRewrite fails, the freshly loaded MultiTree
-// (which just mmap'd a whole snapshot's worth of files) is closed rather than leaked.
 func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
@@ -555,9 +550,8 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	require.NoError(t, db.RewriteSnapshot())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
-	// bypass the wal-catchup wait loop: we appended the corrupt entry directly to the
-	// wal, not through Commit, so db.lastCommitInfo.Version must be nudged to match the
-	// wal's reported committed version or checkBackgroundSnapshotRewrite would spin forever.
+	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
+	// reported version or checkBackgroundSnapshotRewrite's wait loop spins forever.
 	db.lastCommitInfo.Version = corruptVersion
 
 	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
@@ -571,14 +565,10 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	err = db.checkBackgroundSnapshotRewrite()
 	require.Error(t, err, "catchup failure must be propagated")
 
-	// MultiTree.Close nils out t.trees unconditionally, so this is a reliable witness
-	// that Close was actually invoked on the leaked-then-fixed mtree.
+	// MultiTree.Close nils out t.trees unconditionally, so this is a reliable witness that Close ran.
 	require.Nil(t, mtree.trees, "mtree must be closed on catchup failure, not leaked")
 }
 
-// TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure exercises the background
-// rewrite goroutine's own best-effort CatchupWAL call and checks that a failure there
-// is reported cleanly (no panic, no hang) via the result channel.
 func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
