@@ -126,6 +126,67 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
+// TestWaitCommittedVersionTimesOut guards against the wal catch-up wait in
+// checkBackgroundSnapshotRewrite spinning forever when the wal writer can
+// never reach the target version (e.g. it died or got stuck). It must return
+// an error within the bounded timeout instead of blocking indefinitely.
+func TestWaitCommittedVersionTimesOut(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+
+	// target a version that the wal will never reach, simulating a stuck/dead wal writer.
+	unreachableTarget := committedVersion + 1000
+
+	const testTimeout = 200 * time.Millisecond
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.waitCommittedVersion(unreachableTarget, testTimeout)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "timed out waiting for wal to catch up")
+	case <-time.After(testTimeout * 10):
+		t.Fatal("waitCommittedVersion did not return within the bounded timeout; it is spinning forever")
+	}
+}
+
+// TestWaitCommittedVersionSucceedsWhenCaughtUp verifies the healthy path is
+// unchanged: waiting for a version that's already committed returns immediately
+// without error.
+func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.waitCommittedVersion(committedVersion, 5*time.Second)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitCommittedVersion did not return for an already-caught-up version")
+	}
+}
+
 func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
