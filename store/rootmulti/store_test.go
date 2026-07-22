@@ -314,10 +314,6 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 	require.ErrorContains(t, err, "invalid node structure")
 }
 
-// TestConcurrentCommitAndQuery drives Commit() in a loop on one goroutine
-// while another goroutine concurrently hammers the reader paths that touch
-// lastCommitInfo (Query, LastCommitID, CacheMultiStoreWithVersion). Before
-// the mtx fix, `go test -race` flags this as a data race on lastCommitInfo.
 func TestConcurrentCommitAndQuery(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)

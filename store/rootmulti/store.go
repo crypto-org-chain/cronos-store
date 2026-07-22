@@ -195,9 +195,8 @@ type Store struct {
 	logger  log.Logger
 	chainId string
 
-	// mtx guards lastCommitInfo and the per-store tree pointer swap in Commit
-	// against concurrent readers (e.g. the ABCI Query path running alongside
-	// block commit).
+	// mtx guards lastCommitInfo and the live memiavl tree pointers from
+	// concurrent Commit/Query access.
 	mtx sync.RWMutex
 
 	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
@@ -279,11 +278,8 @@ func (rs *Store) WorkingHash() []byte {
 
 // Commit Implements interface Committer
 func (rs *Store) Commit() types.CommitID {
-	// Lock for the whole commit, not just the tree-pointer swap: flush() and
-	// db.Commit() mutate the live memiavl trees in place, and Query() reads
-	// those same trees directly (via rs.db.TreeByName) for the latest height.
-	// Without holding the lock across the mutation, a concurrent Query could
-	// still race on the live tree even though lastCommitInfo itself is safe.
+	// Locked for the whole commit, not just the lastCommitInfo swap: flush()
+	// and db.Commit() mutate the live memiavl trees that Query() reads directly.
 	rs.mtx.Lock()
 	defer rs.mtx.Unlock()
 
@@ -751,12 +747,8 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 
 // Query Implements interface Queryable
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
-	// Held through the version resolution and, for the latest-height path
-	// below, through the whole query: that path reads the live memiavl trees
-	// directly (via rs.db), which Commit() mutates in place under its write
-	// lock. Historical reads use an independent, read-only *memiavl.DB that
-	// Commit() never touches, so the lock is released before that (possibly
-	// slow) load to avoid stalling block commits on archive queries.
+	// Held for the latest-height path, which reads the live trees Commit()
+	// mutates; released early for historical reads, which use an independent DB.
 	rs.mtx.RLock()
 
 	version := req.Height
