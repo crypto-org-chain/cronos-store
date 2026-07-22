@@ -15,6 +15,7 @@ import (
 
 	snapshottypes "github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
+	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
 const (
@@ -479,6 +480,7 @@ func TestQueryUnknownStore(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, res)
 	require.Contains(t, err.Error(), "doesnotexist")
+	require.ErrorIs(t, err, sdkerrors.ErrUnknownRequest)
 }
 
 func TestQueryEmptyStoreName(t *testing.T) {
@@ -489,6 +491,7 @@ func TestQueryEmptyStoreName(t *testing.T) {
 		res, err := store.Query(&types.RequestQuery{Path: path, Data: []byte("k")})
 		require.Error(t, err, "path %q", path)
 		require.Nil(t, res, "path %q", path)
+		require.ErrorIs(t, err, sdkerrors.ErrUnknownRequest, "path %q", path)
 	}
 }
 

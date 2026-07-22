@@ -800,7 +800,7 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	tree := db.TreeByName(storeName)
 	if tree == nil {
-		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "no such store: %s", storeName)
+		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "store %s not present in historical snapshot at this version", storeName)
 	}
 
 	store := types.Queryable(memiavlstore.New(tree, rs.logger))
