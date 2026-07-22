@@ -21,8 +21,6 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Ensure the RocksDB handle/lock is released on every exit path,
-			// without clobbering an earlier error.
 			defer func() {
 				if cerr := versionDB.Close(); cerr != nil && err == nil {
 					err = cerr
