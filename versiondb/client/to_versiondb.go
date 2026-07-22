@@ -21,9 +21,8 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Close the store on every exit path (including early errors from
-			// FeedChangeSet/Flush) so the RocksDB handle and its exclusive LOCK
-			// file are never leaked.
+			// Ensure the RocksDB handle/lock is released on every exit path,
+			// without clobbering an earlier error.
 			defer func() {
 				if cerr := versionDB.Close(); cerr != nil && err == nil {
 					err = cerr
@@ -45,11 +44,8 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 				}
 			}
 
-			// Flush the memtable to disk before reporting success, otherwise a
-			// power loss right after this command prints "success" can silently
-			// lose the tail of the migrated changesets, with no way for a re-run
-			// to detect the loss. The deferred Close above releases the store
-			// afterwards on this and every other exit path.
+			// Flush before reporting success, so a crash right after can't
+			// silently lose the tail of the migrated changesets.
 			return versionDB.Flush()
 		},
 	}

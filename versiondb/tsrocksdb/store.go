@@ -239,9 +239,7 @@ func (s Store) Flush() error {
 	)
 }
 
-// Close releases the underlying RocksDB handles. Callers that need the
-// writes to be durable on disk before closing should call Flush first;
-// Close itself does not flush the memtable.
+// Close does not flush the memtable; call Flush first if durability is needed.
 func (s Store) Close() error {
 	s.cfHandle.Destroy()
 	s.db.Close()
