@@ -553,7 +553,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
 		}
 
-		// do the switch. reloadMultiTree closes result.mtree itself on failure.
+		// do the switch
 		if err := db.reloadMultiTree(result.mtree); err != nil {
 			return fmt.Errorf("switch multitree failed: %w", err)
 		}
@@ -662,10 +662,10 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case err := <-db.walQuit:
-				if e := db.latchWalErr(err); e != nil {
-					return 0, e
+				_ = db.latchWalErr(err)
+				if db.walErr == nil {
+					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
 				}
-				db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
 				return 0, db.walErr
 			}
 		} else {
@@ -757,10 +757,7 @@ func (db *DB) waitAsyncCommit() error {
 
 	db.walChan = nil
 	db.walQuit = nil
-	if err != nil {
-		return db.latchWalErr(err)
-	}
-	return db.walErr
+	return db.latchWalErr(err)
 }
 
 func (db *DB) Copy() *DB {
