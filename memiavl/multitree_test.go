@@ -388,3 +388,61 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	}
 }
+
+// TestLoadMultiTreeRejectsStaleMetadata reproduces a clean restart where the
+// on-disk `__metadata` file's commit info no longer matches what the trees
+// actually loaded from disk would hash to (e.g. a torn write, or a stray/
+// stale snapshot directory). There's no pending WAL entry to replay, so
+// `CatchupWAL`'s `UpdateCommitInfo` call never happens on this path; `Load`
+// itself must catch the mismatch instead of silently trusting the metadata.
+func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+
+	stores := []string{store1Name, store2Name}
+	var upgrades []*TreeNameUpgrade
+	for _, name := range stores {
+		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
+	}
+	require.NoError(t, mtree.ApplyUpgrades(upgrades))
+
+	for _, storeName := range stores {
+		tree := mtree.TreeByName(storeName)
+		require.NotNil(t, tree)
+		tree.set([]byte("key"), []byte("value"))
+	}
+
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	pool := pond.New(2, 10)
+	defer pool.StopAndWait()
+
+	snapshotDir := t.TempDir()
+	require.NoError(t, mtree.WriteSnapshot(snapshotDir, pool))
+
+	// Sanity check: loading the untouched snapshot succeeds.
+	mtreeOK, err := LoadMultiTree(snapshotDir, false, 0, TestAppChainID)
+	require.NoError(t, err)
+	mtreeOK.Close()
+
+	// Corrupt the trusted metadata to no longer match the trees on disk,
+	// without touching the trees themselves or the WAL.
+	staleStoreInfos := make([]StoreInfo, len(mtree.lastCommitInfo.StoreInfos))
+	copy(staleStoreInfos, mtree.lastCommitInfo.StoreInfos)
+	staleStoreInfos[0].CommitId.Hash = []byte("bogus-hash-from-torn-write")
+	staleCommitInfo := CommitInfo{
+		Version:    mtree.lastCommitInfo.Version,
+		StoreInfos: staleStoreInfos,
+	}
+	staleMetadata := MultiTreeMetadata{
+		CommitInfo:     &staleCommitInfo,
+		InitialVersion: int64(mtree.initialVersion),
+	}
+	bz, err := staleMetadata.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, WriteFileSync(filepath.Join(snapshotDir, MetadataFileName), bz))
+
+	_, err = LoadMultiTree(snapshotDir, false, 0, TestAppChainID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "snapshot metadata commit info does not match loaded trees")
+}
