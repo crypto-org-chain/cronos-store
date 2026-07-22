@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -917,4 +918,47 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	earliest, err := db.EarliestVersion()
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
+}
+
+// TestGetLatestVersionClosesWAL verifies that GetLatestVersion doesn't leak the
+// WAL's open file descriptor. It lowers the process's open-file limit and calls
+// GetLatestVersion far more times than the limit allows; if the WAL were never
+// closed, the descriptors would accumulate and later calls would start failing
+// with "too many open files".
+func TestGetLatestVersionClosesWAL(t *testing.T) {
+	dir := t.TempDir()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs(fmt.Sprintf("k%d", i), "v")}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+
+	var oldLimit syscall.Rlimit
+	require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_NOFILE, &oldLimit))
+	defer func() {
+		require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &oldLimit))
+	}()
+
+	const lowLimit = 64
+	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: lowLimit, Max: oldLimit.Max}))
+
+	// Well beyond the lowered limit: a single leaked fd per call would exhaust
+	// it and start returning "too many open files" long before this many
+	// iterations complete.
+	const iterations = lowLimit * 4
+	for i := 0; i < iterations; i++ {
+		version, err := GetLatestVersion(dir)
+		require.NoError(t, err)
+		require.EqualValues(t, 3, version)
+	}
 }
