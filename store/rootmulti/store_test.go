@@ -269,8 +269,6 @@ func TestQueryFutureHeight(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestQueryUnknownStore verifies that querying a store name that isn't
-// mounted returns a clean error instead of panicking on a nil tree.
 func TestQueryUnknownStore(t *testing.T) {
 	store, _ := newTestStore(t, 2)
 	t.Cleanup(func() { store.Close() })
@@ -281,8 +279,6 @@ func TestQueryUnknownStore(t *testing.T) {
 	require.Contains(t, err.Error(), "doesnotexist")
 }
 
-// TestQueryEmptyStoreName verifies that a path with no store name segment
-// (e.g. "/" or "//key") is rejected cleanly rather than panicking.
 func TestQueryEmptyStoreName(t *testing.T) {
 	store, _ := newTestStore(t, 2)
 	t.Cleanup(func() { store.Close() })
