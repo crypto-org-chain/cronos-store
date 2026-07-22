@@ -46,8 +46,6 @@ func TestFsyncDir(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, fsyncDir(dir))
 
-	// fsyncDir should observe a rename performed just before it's called,
-	// mirroring how it's used after the snapshot/current-symlink renames.
 	oldPath := filepath.Join(dir, "old-name")
 	newPath := filepath.Join(dir, "new-name")
 	require.NoError(t, os.WriteFile(oldPath, []byte("data"), 0o600))
@@ -57,7 +55,6 @@ func TestFsyncDir(t *testing.T) {
 	_, err := os.Stat(newPath)
 	require.NoError(t, err)
 
-	// a non-existent directory should fail to open rather than silently succeed.
 	require.Error(t, fsyncDir(filepath.Join(dir, "does-not-exist")))
 }
 
@@ -71,7 +68,6 @@ func TestUpdateCurrentSymlinkFsync(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "snapshot-a", target)
 
-	// swap "current" again to exercise the rename+fsync path a second time.
 	require.NoError(t, updateCurrentSymlink(dir, "snapshot-b"))
 	target, err = os.Readlink(currentPath(dir))
 	require.NoError(t, err)

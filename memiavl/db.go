@@ -773,10 +773,8 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
 		return err
 	}
-	// fsync the directory before updating "current": WAL pruning that follows
-	// this rewrite truncates entries covering the new snapshot, so the rename
-	// must be durable first or a crash could leave neither the WAL entries nor
-	// a durable snapshot to reconstruct that range.
+	// Must be durable before WAL pruning removes the entries this snapshot
+	// replaces, or a crash could leave neither available to reconstruct state.
 	if err := fsyncDir(db.dir); err != nil {
 		return err
 	}
@@ -1298,11 +1296,8 @@ func traverseSnapshots(dir string, ascending bool, callback func(int64) (bool, e
 	return nil
 }
 
-// fsyncDir fsyncs a directory so that prior renames/symlink swaps of its
-// entries are durable, not just visible. Without this, a crash can lose the
-// directory entry update while later, independent operations (like WAL
-// truncation) that happened afterwards in program order are still durable,
-// leaving the db unable to find the snapshot it needs on restart.
+// fsyncDir makes prior renames/symlink swaps within it durable, not just
+// visible, so a crash can't lose them while later operations persist.
 func fsyncDir(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
