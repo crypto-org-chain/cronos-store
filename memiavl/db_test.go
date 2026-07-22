@@ -919,14 +919,6 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
 
-// TestAsyncCommitWalWriterErrorDoesNotDeadlock reproduces the scenario where
-// the async wal writer goroutine has already died after reporting an error:
-// walChan has no reader left (as if the writer quit without looping back to
-// drain it) and walQuit already holds the reported error. On the old,
-// unbuffered-walQuit implementation, Commit() would block forever trying to
-// send on walChan since nothing drains it anymore. The fix must make Commit
-// race the send against the writer's quit signal so it returns the error
-// instead of hanging.
 func TestAsyncCommitWalWriterErrorDoesNotDeadlock(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
@@ -941,9 +933,8 @@ func TestAsyncCommitWalWriterErrorDoesNotDeadlock(t *testing.T) {
 		Pairs: []*KVPair{{Key: []byte("k"), Value: []byte("v")}},
 	}))
 
-	// Simulate a dead async writer: an unbuffered walChan with nobody left to
-	// drain it, and walQuit already carrying the error the writer reported
-	// right before it returned.
+	// simulate a dead async writer: unbuffered walChan nobody drains, and
+	// walQuit already holding the error the writer reported before exiting.
 	simulatedErr := errors.New("simulated async wal write failure")
 	db.walChan = make(chan *walEntry)
 	db.walQuit = make(chan error, 1)

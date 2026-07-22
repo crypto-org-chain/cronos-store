@@ -26,9 +26,8 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
-// errAsyncWalWriterQuit is used when the async wal writer goroutine exits
-// without reporting an error (e.g. its quit channel is observed closed by a
-// second reader after the first already drained the real error).
+// errAsyncWalWriterQuit covers the closed-channel case: a second reader
+// observes walQuit closed after the first already drained the real error.
 var errAsyncWalWriterQuit = errors.New("async wal writing goroutine already quit")
 
 // DB implements DB-like functionalities on top of MultiTree:
@@ -488,7 +487,7 @@ func (db *DB) checkAsyncTasks() error {
 // checkAsyncCommit check the quit signal of async wal writing
 func (db *DB) checkAsyncCommit() error {
 	if db.walWriterErr != nil {
-		// already reported, keep failing fast without touching the channel again
+		// walQuit is already drained; selecting on it again would just hit default.
 		return fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", db.walWriterErr)
 	}
 
@@ -658,9 +657,8 @@ func (db *DB) Commit() (int64, error) {
 				return 0, fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", db.walWriterErr)
 			}
 
-			// async wal writing; race the send against the writer's quit
-			// signal so a dead writer surfaces as an error instead of
-			// blocking forever on walChan (which nobody drains anymore).
+			// race the send against walQuit: a dead writer no longer drains
+			// walChan, so a plain send would block forever.
 			select {
 			case db.walChan <- &entry:
 			case werr, ok := <-db.walQuit:
@@ -702,10 +700,8 @@ func (db *DB) Commit() (int64, error) {
 
 func (db *DB) initAsyncCommit() {
 	walChan := make(chan *walEntry, db.walChanSize)
-	// buffered so the writer goroutine can always report its error and
-	// return, even if nobody has called checkAsyncCommit/Commit yet to
-	// receive it; otherwise the writer would block forever on this send,
-	// never going back to drain walChan, wedging future Commit calls.
+	// buffered so the writer can report its error and exit even if nobody
+	// is reading walQuit yet; otherwise it would block and never drain walChan.
 	walQuit := make(chan error, 1)
 
 	go func() {
@@ -761,9 +757,8 @@ func (db *DB) waitAsyncCommit() error {
 	close(db.walChan)
 	err := <-db.walQuit
 	if err == nil {
-		// the writer may have already reported its error earlier (e.g. via
-		// Commit's send-select or checkAsyncCommit), in which case walQuit
-		// is already drained and closed, and it reads back as nil here.
+		// walQuit may already be drained and closed if the error was caught
+		// earlier by Commit's send-select or checkAsyncCommit.
 		err = db.walWriterErr
 	}
 
