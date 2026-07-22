@@ -26,7 +26,7 @@ func TestCorruptedTail(t *testing.T) {
 		{"failure-3", []byte(`{"index":"1"}` + "\n"), 0},
 		{"failure-4", []byte(`{"index":"1","data":"?"}`), 0},
 		{"failure-5", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1},
-		// tail is 23 bytes to match the consumed prefix length, the pos == len(data) case.
+		// entry is 23 bytes (including newline); tail is also 23 bytes to exercise pos == len(tail) parity.
 		{"failure-6-equal-length-tail", []byte(`{"index":1,"data":"?"}` + "\n" + strings.Repeat("?", 23)), 1},
 	}
 
