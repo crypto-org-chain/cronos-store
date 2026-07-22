@@ -919,8 +919,6 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
 
-// TestCommitAbortsOnAsyncWALWriteError ensures a failed async wal write surfaces
-// as a Commit error instead of deadlocking on the walChan send while holding db.mtx.
 func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
@@ -963,8 +961,6 @@ func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	require.Error(t, cerr, "Commit must stay failed after an async wal error")
 }
 
-// TestCommitAbortsOnAsyncWALWriteErrorBuffered covers the buffered channel case:
-// once the writer dies, no Commit may report success (that would drop a version).
 func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
@@ -998,9 +994,6 @@ func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	require.True(t, sawError, "async wal writer death never surfaced as a Commit error")
 }
 
-// TestSnapshotRewriteWaitAbortsOnAsyncWALError ensures the snapshot-completion
-// WAL catch-up loop bails out when the async wal writer has died, instead of
-// spinning forever because the WAL can never reach lastCommitInfo.Version.
 func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
