@@ -773,6 +773,13 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
 		return err
 	}
+	// fsync the directory before updating "current": WAL pruning that follows
+	// this rewrite truncates entries covering the new snapshot, so the rename
+	// must be durable first or a crash could leave neither the WAL entries nor
+	// a durable snapshot to reconstruct that range.
+	if err := fsyncDir(db.dir); err != nil {
+		return err
+	}
 	return updateCurrentSymlink(db.dir, snapshotDir)
 }
 
@@ -1244,7 +1251,12 @@ func updateCurrentSymlink(dir, snapshot string) error {
 		return err
 	}
 	// assuming file renaming operation is atomic
-	return os.Rename(tmpPath, currentPath(dir))
+	if err := os.Rename(tmpPath, currentPath(dir)); err != nil {
+		return err
+	}
+	// fsync so the symlink swap survives a crash; otherwise "current" can
+	// revert to the old (possibly pruned) snapshot on restart.
+	return fsyncDir(dir)
 }
 
 // traverseSnapshots traverse the snapshot list in specified order.
@@ -1284,6 +1296,19 @@ func traverseSnapshots(dir string, ascending bool, callback func(int64) (bool, e
 	}
 
 	return nil
+}
+
+// fsyncDir fsyncs a directory so that prior renames/symlink swaps of its
+// entries are durable, not just visible. Without this, a crash can lose the
+// directory entry update while later, independent operations (like WAL
+// truncation) that happened afterwards in program order are still durable,
+// leaving the db unable to find the snapshot it needs on restart.
+func fsyncDir(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
 }
 
 // atomicRemoveDir is equavalent to `mv snapshot snapshot-tmp && rm -r snapshot-tmp`
