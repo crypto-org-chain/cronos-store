@@ -637,8 +637,35 @@ func (db *DB) Commit() (int64, error) {
 				db.initAsyncCommit()
 			}
 
-			// async wal writing
-			db.walChan <- &entry
+			// Hand off to the async wal writer, but block until this entry's write
+			// outcome is known. The app hash computed above must not be acknowledged
+			// to the caller (and ultimately to consensus) while the durability of its
+			// WAL entry is still unresolved: a crash in that window would silently
+			// lose the WAL entry for a version whose hash was already reported.
+			// Since Commit holds db.mtx for its whole duration, only one entry is
+			// ever outstanding, so this trades away the writer's cross-commit
+			// batching for correctness; that's an accepted latency cost, not a
+			// throughput regression, since commits were already serialized.
+			//
+			// Both selects also race against walQuit: if the writer goroutine has
+			// already died (e.g. from a previous entry's write failure), it can
+			// never receive our entry nor signal done, so without this fallback
+			// Commit would block forever instead of surfacing the writer's error.
+			done := make(chan error, 1)
+			entry.done = done
+			select {
+			case db.walChan <- &entry:
+			case err := <-db.walQuit:
+				return 0, fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					return 0, err
+				}
+			case err := <-db.walQuit:
+				return 0, fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+			}
 		} else {
 			lastIndex, err := db.wal.LastIndex()
 			if err != nil {
@@ -686,19 +713,26 @@ func (db *DB) initAsyncCommit() {
 
 			lastIndex, err := db.wal.LastIndex()
 			if err != nil {
+				notifyDone(entries, err)
 				walQuit <- err
 				return
 			}
 
+			var writeErr error
 			for _, entry := range entries {
-				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					walQuit <- err
-					return
+				if writeErr = writeEntry(&batch, db.logger, lastIndex, entry); writeErr != nil {
+					break
 				}
 			}
 
-			if err := db.wal.WriteBatch(&batch); err != nil {
-				walQuit <- err
+			if writeErr == nil {
+				writeErr = db.wal.WriteBatch(&batch)
+			}
+
+			notifyDone(entries, writeErr)
+
+			if writeErr != nil {
+				walQuit <- writeErr
 				return
 			}
 			batch.Clear()
@@ -1308,6 +1342,20 @@ func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error
 type walEntry struct {
 	index uint64
 	data  WALEntry
+	// done, if non-nil, receives the write outcome (see Commit).
+	done chan error
+}
+
+// notifyDone reports the outcome of a batch write to every entry in the
+// batch that's waiting for it. Entries earlier in a failed batch may not
+// have actually reached the WAL, but their outcome is unknown, so they're
+// reported as failed too rather than silently treated as durable.
+func notifyDone(entries []*walEntry, err error) {
+	for _, entry := range entries {
+		if entry.done != nil {
+			entry.done <- err
+		}
+	}
 }
 
 func isSnapshotName(name string) bool {

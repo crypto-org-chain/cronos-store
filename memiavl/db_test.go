@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/wal"
 )
 
 const TestAppChainID = "test_chain"
@@ -674,6 +675,96 @@ func TestFastCommit(t *testing.T) {
 
 	<-db.snapshotRewriteChan
 	require.NoError(t, db.Close())
+}
+
+// TestCommitFailsSynchronouslyOnAsyncWALWriteError guards the durability
+// ordering fix: Commit must not report a version successfully (acknowledging
+// its app hash) while the async WAL write for that same version failed.
+// Before the fix, the failure would only surface on the *next* Commit call
+// (via the non-blocking walQuit check), so this same Commit call would have
+// returned (v, nil) despite the WAL entry never having been persisted.
+func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
+	dir := t.TempDir()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 10,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello"), Value: []byte("world")}},
+		}},
+	}))
+
+	// Simulate a crash-adjacent I/O failure hitting the async WAL writer:
+	// close the underlying WAL out from under it, so its next write fails.
+	require.NoError(t, db.wal.Close())
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, wal.ErrClosed)
+	require.Zero(t, v)
+
+	// unblock the writer goroutine (stuck delivering the error on walQuit)
+	// and the file lock, without re-touching the now-closed wal.
+	<-db.walQuit
+	db.walChan = nil
+	db.walQuit = nil
+	db.wal = nil
+	require.NoError(t, db.fileLock.Unlock())
+	require.NoError(t, db.fileLock.Destroy())
+}
+
+// TestCommitAfterDeadAsyncWriterDoesNotHang guards against a regression the
+// durability-ordering fix could otherwise introduce: once the async WAL
+// writer goroutine has died (e.g. after a write error), it can never drain
+// db.walChan or signal a `done` channel again. If Commit only waited on
+// `done` after handing an entry to a buffered walChan, a *later* Commit call
+// would enqueue successfully (buffer has room) and then block forever
+// waiting for a `done` that will never arrive. Commit must instead notice
+// the dead writer (via the same walQuit signal checkAsyncCommit already
+// treats as terminal) and fail fast.
+func TestCommitAfterDeadAsyncWriterDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 10,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello"), Value: []byte("world")}},
+		}},
+	}))
+
+	require.NoError(t, db.wal.Close())
+
+	_, err = db.Commit()
+	require.ErrorIs(t, err, wal.ErrClosed)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
+		}},
+	}))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := db.Commit()
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Commit call deadlocked waiting on a dead async wal writer")
+	}
 }
 
 func TestRepeatedApplyChangeSet(t *testing.T) {
