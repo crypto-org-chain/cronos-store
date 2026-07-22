@@ -269,6 +269,31 @@ func TestQueryFutureHeight(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestQueryUnknownStore verifies that querying a store name that isn't
+// mounted returns a clean error instead of panicking on a nil tree.
+func TestQueryUnknownStore(t *testing.T) {
+	store, _ := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+
+	res, err := store.Query(&types.RequestQuery{Path: "/doesnotexist/key", Data: []byte("k")})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.Contains(t, err.Error(), "doesnotexist")
+}
+
+// TestQueryEmptyStoreName verifies that a path with no store name segment
+// (e.g. "/" or "//key") is rejected cleanly rather than panicking.
+func TestQueryEmptyStoreName(t *testing.T) {
+	store, _ := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+
+	for _, path := range []string{"/", "//key"} {
+		res, err := store.Query(&types.RequestQuery{Path: path, Data: []byte("k")})
+		require.Error(t, err, "path %q", path)
+		require.Nil(t, res, "path %q", path)
+	}
+}
+
 func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 

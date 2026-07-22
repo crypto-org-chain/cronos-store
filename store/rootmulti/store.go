@@ -750,7 +750,16 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, err
 	}
 
-	store := types.Queryable(memiavlstore.New(db.TreeByName(storeName), rs.logger))
+	if _, ok := rs.keysByName[storeName]; !ok {
+		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "no such store: %s", storeName)
+	}
+
+	tree := db.TreeByName(storeName)
+	if tree == nil {
+		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "no such store: %s", storeName)
+	}
+
+	store := types.Queryable(memiavlstore.New(tree, rs.logger))
 
 	// trim the path and make the query
 	req.Path = subpath
