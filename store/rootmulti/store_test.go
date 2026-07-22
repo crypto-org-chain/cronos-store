@@ -17,11 +17,213 @@ import (
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
-const TestAppChainID = "test_chain"
+const (
+	TestAppChainID   = "test_chain"
+	testStoreName    = "test"
+	orphanStoreName  = "orphan"
+	oldStoreName     = "old"
+	newStoreName     = "new"
+	addedStoreName   = "added"
+	deletedStoreName = "deleted"
+)
 
 func TestLastCommitID(t *testing.T) {
 	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	require.Equal(t, types.CommitID{}, store.LastCommitID())
+}
+
+func TestLoadLatestVersionRejectsUnexpectedMemiAVLTree(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{orphanStoreName, testStoreName},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+
+	err = store.LoadLatestVersion()
+	require.ErrorContains(t, err, "memiavl tree membership mismatch")
+	require.ErrorContains(t, err, "unexpected=[orphan]")
+}
+
+func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{oldStoreName, testStoreName},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+
+	require.NoError(t, store.LoadVersion(1))
+	require.NotNil(t, store.db.TreeByName(oldStoreName))
+	require.NoError(t, store.Close())
+}
+
+func TestLoadVersionAndUpgradeAllowsHistoricalMemiAVLTreeMembershipWithEmptyUpgrades(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{oldStoreName, testStoreName},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+
+	// A non-nil but empty StoreUpgrades must not force the exact-membership
+	// check used for latest/upgrade loads onto a historical load.
+	require.NoError(t, store.LoadVersionAndUpgrade(1, &types.StoreUpgrades{}))
+	require.NotNil(t, store.db.TreeByName(oldStoreName))
+	require.NoError(t, store.Close())
+}
+
+func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialStores []string
+		mountedStores []string
+		upgrades      *types.StoreUpgrades
+		dataStore     string
+		loadedStore   string
+	}{
+		{
+			name:          "add",
+			initialStores: []string{testStoreName},
+			mountedStores: []string{addedStoreName, testStoreName},
+			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
+		},
+		{
+			name:          "delete",
+			initialStores: []string{deletedStoreName, testStoreName},
+			mountedStores: []string{testStoreName},
+			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
+		},
+		{
+			name:          "rename",
+			initialStores: []string{oldStoreName, testStoreName},
+			mountedStores: []string{newStoreName, testStoreName},
+			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
+				OldKey: oldStoreName,
+				NewKey: newStoreName,
+			}}},
+			dataStore:   oldStoreName,
+			loadedStore: newStoreName,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := memiavl.Load(dir, memiavl.Options{
+				CreateIfMissing:   true,
+				InitialStores:     tc.initialStores,
+				AsyncCommitBuffer: -1,
+			}, TestAppChainID)
+			require.NoError(t, err)
+			if tc.dataStore != "" {
+				require.NoError(t, db.ApplyChangeSet(tc.dataStore, memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte("v")}}}))
+			}
+			_, err = db.Commit()
+			require.NoError(t, err)
+			require.NoError(t, db.Close())
+
+			store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+			keys := make(map[string]*types.KVStoreKey, len(tc.mountedStores))
+			for _, name := range tc.mountedStores {
+				key := types.NewKVStoreKey(name)
+				keys[name] = key
+				store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			}
+
+			require.NoError(t, store.LoadLatestVersionAndUpgrade(tc.upgrades))
+			require.Len(t, store.db.Trees(), len(tc.mountedStores))
+			for _, name := range tc.mountedStores {
+				require.NotNil(t, store.db.TreeByName(name))
+			}
+			if tc.loadedStore != "" {
+				require.Equal(t, []byte("v"), store.GetKVStore(keys[tc.loadedStore]).Get([]byte("k")))
+			}
+			require.NoError(t, store.Close())
+		})
+	}
+}
+
+func TestLoadLatestVersionAndUpgradeRejectsUnexpectedMemiAVLTree(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialStores []string
+		mountedStores []string
+		upgrades      *types.StoreUpgrades
+	}{
+		{
+			name:          "add",
+			initialStores: []string{orphanStoreName, testStoreName},
+			mountedStores: []string{addedStoreName, testStoreName},
+			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
+		},
+		{
+			name:          "delete",
+			initialStores: []string{deletedStoreName, orphanStoreName, testStoreName},
+			mountedStores: []string{testStoreName},
+			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
+		},
+		{
+			name:          "rename",
+			initialStores: []string{oldStoreName, orphanStoreName, testStoreName},
+			mountedStores: []string{newStoreName, testStoreName},
+			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
+				OldKey: oldStoreName,
+				NewKey: newStoreName,
+			}}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := memiavl.Load(dir, memiavl.Options{
+				CreateIfMissing:   true,
+				InitialStores:     tc.initialStores,
+				AsyncCommitBuffer: -1,
+			}, TestAppChainID)
+			require.NoError(t, err)
+			_, err = db.Commit()
+			require.NoError(t, err)
+			require.NoError(t, db.Close())
+
+			store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+			for _, name := range tc.mountedStores {
+				store.MountStoreWithDB(types.NewKVStoreKey(name), types.StoreTypeIAVL, nil)
+			}
+
+			err = store.LoadLatestVersionAndUpgrade(tc.upgrades)
+			require.ErrorContains(t, err, "memiavl tree membership mismatch")
+			require.ErrorContains(t, err, "unexpected=[orphan]")
+		})
+	}
 }
 
 // newTestStore creates a rootmulti Store with one IAVL sub-store ("test") mounted,
