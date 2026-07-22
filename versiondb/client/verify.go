@@ -216,6 +216,12 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 					return true, nil
 				}
 
+				// changesets only cover versions this store touched; bump through the gap so it
+				// stays in lockstep with the live path, which advances every store every block.
+				if err := advanceTreeVersion(tree, version-1); err != nil {
+					return false, err
+				}
+
 				// no need to update hashes for intermediate versions.
 				tree.ApplyChangeSet(convertChangeSet(changeSet))
 				_, v, err := tree.SaveVersion(false)
@@ -243,6 +249,13 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 		return nil, err
 	}
 
+	// no more changesets for this store; catch up to targetVersion like the live path would.
+	if targetVersion > 0 {
+		if err := advanceTreeVersion(tree, targetVersion); err != nil {
+			return nil, err
+		}
+	}
+
 	if len(saveSnapshot) > 0 {
 		snapshotDir := filepath.Join(saveSnapshot, store)
 		if err := os.MkdirAll(snapshotDir, os.ModePerm); err != nil {
@@ -257,6 +270,18 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 		Name:     store,
 		CommitId: lastCommitID(tree),
 	}, nil
+}
+
+// advanceTreeVersion bumps `tree` with no-op saves up to `target`, without applying any
+// changeset. Used to keep a store's version in lockstep with the live path, which advances
+// every store's tree version every block regardless of whether it changed.
+func advanceTreeVersion(tree *memiavl.Tree, target int64) error {
+	for tree.Version() < target {
+		if _, _, err := tree.SaveVersion(false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // lastCommitID build `CommitID` from a memiavl tree.
