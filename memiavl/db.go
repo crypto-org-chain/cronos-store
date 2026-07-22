@@ -532,9 +532,10 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 			time.Sleep(time.Nanosecond)
 		}
 
-		// catchup the remaining wal
+		// catchup the remaining wal; on failure close the freshly loaded tree to
+		// release its mmap'd snapshot files before propagating the error.
 		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return fmt.Errorf("catchup failed: %w", err)
+			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
 		}
 
 		// do the switch
@@ -873,7 +874,9 @@ func (db *DB) rewriteSnapshotBackground() error {
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
 		if err := mtree.CatchupWAL(wal, 0); err != nil {
-			ch <- snapshotResult{err: err}
+			// close the freshly loaded tree to release its mmap'd snapshot files
+			// before propagating the error, otherwise fds/mmaps leak.
+			ch <- snapshotResult{err: errors.Join(err, mtree.Close())}
 			return
 		}
 

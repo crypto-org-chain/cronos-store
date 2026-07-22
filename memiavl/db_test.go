@@ -519,6 +519,96 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
+// corruptTrailingWALEntry appends a garbage WAL entry right after the wal's current
+// last index, so any CatchupWAL call that reaches it fails to unmarshal. It returns
+// the version the corrupt entry pretends to be, so callers can keep lastCommitInfo
+// consistent with the wal's reported committed version.
+func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
+	t.Helper()
+
+	lastIndex, err := db.wal.LastIndex()
+	require.NoError(t, err)
+
+	corruptIndex := lastIndex + 1
+	require.NoError(t, db.wal.Write(corruptIndex, []byte("not a valid WALEntry")))
+
+	return walVersion(corruptIndex, db.initialVersion)
+}
+
+// TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure verifies that when the
+// wal catch-up step in checkBackgroundSnapshotRewrite fails, the freshly loaded MultiTree
+// (which just mmap'd a whole snapshot's worth of files) is closed rather than leaked.
+func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	corruptVersion := corruptTrailingWALEntry(t, db)
+	// bypass the wal-catchup wait loop: we appended the corrupt entry directly to the
+	// wal, not through Commit, so db.lastCommitInfo.Version must be nudged to match the
+	// wal's reported committed version or checkBackgroundSnapshotRewrite would spin forever.
+	db.lastCommitInfo.Version = corruptVersion
+
+	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
+	require.NoError(t, err)
+
+	ch := make(chan snapshotResult, 1)
+	ch <- snapshotResult{mtree: mtree}
+	db.snapshotRewriteChan = ch
+	db.snapshotRewriteCancel = func() {}
+
+	err = db.checkBackgroundSnapshotRewrite()
+	require.Error(t, err, "catchup failure must be propagated")
+
+	// MultiTree.Close nils out t.trees unconditionally, so this is a reliable witness
+	// that Close was actually invoked on the leaked-then-fixed mtree.
+	require.Nil(t, mtree.trees, "mtree must be closed on catchup failure, not leaked")
+}
+
+// TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure exercises the background
+// rewrite goroutine's own best-effort CatchupWAL call and checks that a failure there
+// is reported cleanly (no panic, no hang) via the result channel.
+func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	corruptTrailingWALEntry(t, db)
+
+	require.NoError(t, db.RewriteSnapshotBackground())
+
+	select {
+	case result := <-db.snapshotRewriteChan:
+		require.Error(t, result.err, "background catchup failure must be reported")
+		require.Nil(t, result.mtree, "no tree handed back on failure, so no way to leak it via the result")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background snapshot rewrite result: goroutine likely hung")
+	}
+	db.snapshotRewriteChan = nil
+	db.snapshotRewriteCancel = nil
+}
+
 func TestZeroCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{InitialStores: []string{testStoreName, test2StoreName}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)
