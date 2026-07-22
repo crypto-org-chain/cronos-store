@@ -6,10 +6,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIteratorDomainNilBounds verifies Domain() returns (nil, nil) when the
-// caller passed nil start/end, mirroring cosmos-sdk's prefix.prefixIterator
-// convention (see store/v2/prefix.Domain) rather than leaking the internal
-// prefix-derived bounds used to scope the underlying rocksdb iterator.
 func TestIteratorDomainNilBounds(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
@@ -25,9 +21,6 @@ func TestIteratorDomainNilBounds(t *testing.T) {
 	require.Nil(t, end)
 }
 
-// TestIteratorDomainExplicitBounds verifies Domain() returns the caller's
-// original, unprefixed start/end -- exactly what Key() strips its results
-// down to -- rather than the store-prefixed bounds used internally.
 func TestIteratorDomainExplicitBounds(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
@@ -44,10 +37,6 @@ func TestIteratorDomainExplicitBounds(t *testing.T) {
 	require.Equal(t, explicitEnd, end)
 }
 
-// TestIteratorDomainMixedBounds verifies a nil start with an explicit end
-// (and vice versa) round-trip correctly, since iterateWithPrefix computes a
-// prefix-derived end bound when the caller passes end=nil, which must not be
-// mistaken for an explicit bound when reconstructing Domain().
 func TestIteratorDomainMixedBounds(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)

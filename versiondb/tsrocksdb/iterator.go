@@ -11,11 +11,8 @@ import (
 type rocksDBIterator struct {
 	source             *grocksdb.Iterator
 	prefix, start, end []byte
-	// domainStart, domainEnd are the caller-provided bounds before the store
-	// prefix was applied, i.e. what Domain() must return to stay consistent
-	// with the unprefixed keys returned by Key(). Kept separate from
-	// start/end (which are prefixed and used for Valid()'s bound checks),
-	// matching cosmos-sdk's store/v2/prefix.prefixIterator convention.
+	// domainStart, domainEnd are the caller's unprefixed bounds; start/end
+	// get rewritten to the prefixed range used for Valid()'s checks.
 	domainStart, domainEnd []byte
 	isReverse              bool
 	isInvalid              bool
@@ -75,9 +72,8 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end, domainSta
 	return it
 }
 
-// Domain implements Iterator. It returns the caller-provided bounds in the
-// unprefixed keyspace, matching Key()'s stripped-prefix output (see
-// cosmos-sdk store/v2/prefix.prefixIterator.Domain for the same convention).
+// Domain implements Iterator. Returns the unprefixed bounds to match Key()'s
+// stripped-prefix output, not the internal prefixed start/end.
 func (itr *rocksDBIterator) Domain() ([]byte, []byte) {
 	return itr.domainStart, itr.domainEnd
 }
