@@ -26,6 +26,15 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// walSync fsyncs the wal, guaranteeing entries written to it are durable
+// (the wal is opened with NoSync:true, so wal.Log.WriteBatch alone only
+// lands entries in the OS page cache). It's a package-level var so tests
+// can observe or fail this call without reaching into the vendored wal
+// library's internals.
+var walSync = func(w *wal.Log) error {
+	return w.Sync()
+}
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -680,6 +689,14 @@ func (db *DB) Commit() (int64, error) {
 			if err := db.wal.WriteBatch(&db.wbatch); err != nil {
 				return 0, err
 			}
+
+			// The wal is opened with NoSync:true, so WriteBatch above only lands
+			// the entry in the OS page cache. Fsync explicitly before returning
+			// the app hash: otherwise a crash before the OS flushes the page
+			// cache would lose an entry whose hash was already acknowledged.
+			if err := walSync(db.wal); err != nil {
+				return 0, err
+			}
 		}
 	}
 
@@ -727,6 +744,14 @@ func (db *DB) initAsyncCommit() {
 
 			if writeErr == nil {
 				writeErr = db.wal.WriteBatch(&batch)
+			}
+
+			if writeErr == nil {
+				// The wal is opened with NoSync:true, so WriteBatch above only
+				// landed the batch in the OS page cache. Fsync before notifying
+				// done: entries must not be reported durable while a crash could
+				// still lose them from the page cache.
+				writeErr = walSync(db.wal)
 			}
 
 			notifyDone(entries, writeErr)

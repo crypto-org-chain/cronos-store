@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -675,6 +676,113 @@ func TestFastCommit(t *testing.T) {
 
 	<-db.snapshotRewriteChan
 	require.NoError(t, db.Close())
+}
+
+// TestCommitFsyncsWALBeforeReturning confirms Commit actually fsyncs the wal
+// (via walSync) for every successful commit, on both the synchronous and
+// async wal-write paths. The wal is opened with NoSync:true, so without an
+// explicit Sync call, wal.Log.WriteBatch alone only lands entries in the OS
+// page cache: a crash before the OS flushes that cache would then lose an
+// entry whose app hash was already acknowledged to the caller.
+func TestCommitFsyncsWALBeforeReturning(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFsyncsWALBeforeReturning(t, asyncCommit)
+		})
+	}
+}
+
+func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	asyncCommitBuffer := -1
+	if asyncCommit {
+		asyncCommitBuffer = 10
+	}
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBuffer,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	original := walSync
+	var syncCalls atomic.Int32
+	walSync = func(w *wal.Log) error {
+		syncCalls.Add(1)
+		return original(w)
+	}
+	defer func() { walSync = original }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello"), Value: []byte("world")}},
+		}},
+	}))
+
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+}
+
+// TestCommitFailsWhenWALSyncFails confirms Commit does not report success
+// (acknowledging the app hash) when the WAL write lands in the OS page cache
+// (WriteBatch succeeds) but the fsync of that write fails. On both the
+// synchronous and async wal-write paths, a sync failure must surface as a
+// Commit error, not a silently-acknowledged version.
+func TestCommitFailsWhenWALSyncFails(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFailsWhenWALSyncFails(t, asyncCommit)
+		})
+	}
+}
+
+func testCommitFailsWhenWALSyncFails(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	asyncCommitBuffer := -1
+	if asyncCommit {
+		asyncCommitBuffer = 10
+	}
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBuffer,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	original := walSync
+	syncErr := errors.New("simulated fsync failure")
+	walSync = func(*wal.Log) error {
+		return syncErr
+	}
+	defer func() { walSync = original }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello"), Value: []byte("world")}},
+		}},
+	}))
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, syncErr)
+	require.Zero(t, v)
+
+	// Close drains the async writer's terminal walQuit signal, which still
+	// carries the same sync failure (the writer goroutine reports it there
+	// too before exiting) - so Close is expected to surface it as well.
+	closeErr := db.Close()
+	if asyncCommit {
+		require.ErrorIs(t, closeErr, syncErr)
+	} else {
+		require.NoError(t, closeErr)
+	}
 }
 
 // TestCommitFailsSynchronouslyOnAsyncWALWriteError guards the durability
