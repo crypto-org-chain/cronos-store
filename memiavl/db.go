@@ -773,8 +773,6 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
 		return err
 	}
-	// Must be durable before WAL pruning removes the entries this snapshot
-	// replaces, or a crash could leave neither available to reconstruct state.
 	if err := fsyncDir(db.dir); err != nil {
 		return err
 	}
@@ -1252,8 +1250,7 @@ func updateCurrentSymlink(dir, snapshot string) error {
 	if err := os.Rename(tmpPath, currentPath(dir)); err != nil {
 		return err
 	}
-	// fsync so the symlink swap survives a crash; otherwise "current" can
-	// revert to the old (possibly pruned) snapshot on restart.
+
 	return fsyncDir(dir)
 }
 
