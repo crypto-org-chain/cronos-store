@@ -7,6 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestProofsEmptyTree(t *testing.T) {
+	tree := New(0)
+
+	proof, err := tree.GetMembershipProof([]byte("hello"))
+	require.Error(t, err)
+	require.Nil(t, proof)
+}
+
 func TestProofs(t *testing.T) {
 	// do a round test for each version in ChangeSets
 	testCases := []struct {

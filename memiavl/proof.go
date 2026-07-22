@@ -84,6 +84,11 @@ func (t *Tree) VerifyNonMembership(proof *ics23.CommitmentProof, key []byte) boo
 // createExistenceProof will get the proof from the tree and convert the proof into a valid
 // existence proof, if that's what it is.
 func (t *Tree) createExistenceProof(key []byte) (*ics23.ExistenceProof, error) {
+	if t.root == nil {
+		// an empty tree has no keys, so no membership proof can exist for any key.
+		return nil, errors.New("key does not exist")
+	}
+
 	path, node, err := pathToLeaf(t.root, key)
 	return &ics23.ExistenceProof{
 		Key:   node.Key(),
