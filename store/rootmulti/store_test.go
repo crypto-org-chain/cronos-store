@@ -75,6 +75,31 @@ func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
 	require.NoError(t, store.Close())
 }
 
+func TestLoadVersionAndUpgradeAllowsHistoricalMemiAVLTreeMembershipWithEmptyUpgrades(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{oldStoreName, testStoreName},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+
+	// A non-nil but empty StoreUpgrades must not force the exact-membership
+	// check used for latest/upgrade loads onto a historical load.
+	require.NoError(t, store.LoadVersionAndUpgrade(1, &types.StoreUpgrades{}))
+	require.NotNil(t, store.db.TreeByName(oldStoreName))
+	require.NoError(t, store.Close())
+}
+
 func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T) {
 	tests := []struct {
 		name          string

@@ -556,7 +556,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 
 	// Validate latest and post-upgrade membership. Historical loads may
 	// legitimately contain stores that were deleted or renamed later.
-	if version == 0 || upgrades != nil {
+	if version == 0 || len(treeUpgrades) > 0 {
 		if err := validateMemiAVLTreeMembership(db, initialStores); err != nil {
 			return err
 		}
