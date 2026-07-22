@@ -11,7 +11,7 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 		Use:   "to-versiondb versiondb-path plain-1 [plain-2] ...",
 		Short: "Feed change set files into versiondb",
 		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			store, err := cmd.Flags().GetString(flagStore)
 			if err != nil {
 				return err
@@ -21,6 +21,14 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Close the store on every exit path (including early errors from
+			// FeedChangeSet/Flush) so the RocksDB handle and its exclusive LOCK
+			// file are never leaked.
+			defer func() {
+				if cerr := versionDB.Close(); cerr != nil && err == nil {
+					err = cerr
+				}
+			}()
 
 			for _, plainFile := range args[1:] {
 				if err := withChangeSetFile(plainFile, func(reader Reader) error {
@@ -37,14 +45,12 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 				}
 			}
 
-			// Flush the memtable to disk and close the store before reporting
-			// success, otherwise a power loss right after this command prints
-			// "success" can silently lose the tail of the migrated changesets,
-			// with no way for a re-run to detect the loss.
-			if err := versionDB.Flush(); err != nil {
-				return err
-			}
-			return versionDB.Close()
+			// Flush the memtable to disk before reporting success, otherwise a
+			// power loss right after this command prints "success" can silently
+			// lose the tail of the migrated changesets, with no way for a re-run
+			// to detect the loss. The deferred Close above releases the store
+			// afterwards on this and every other exit path.
+			return versionDB.Flush()
 		},
 	}
 

@@ -57,10 +57,14 @@ func TestChangeSetToVersionDBCmdDurablyPersists(t *testing.T) {
 	require.Equal(t, []byte("v2"), v2)
 }
 
-// TestChangeSetToVersionDBCmdErrorDoesNotFlushOrClose verifies that a
-// mid-migration failure surfaces the underlying error and does not reach
-// the flush/close success path.
-func TestChangeSetToVersionDBCmdErrorDoesNotFlushOrClose(t *testing.T) {
+// TestChangeSetToVersionDBCmdErrorReleasesStore verifies that a mid-migration
+// failure both surfaces the underlying error and still releases the RocksDB
+// handle/lock on the store it opened. It mirrors
+// TestChangeSetToVersionDBCmdDurablyPersists by reopening a fresh Store
+// against the same directory: RocksDB's exclusive file lock means that only
+// succeeds if the command's own handle was actually closed on the error
+// path, not just left open with the error silently eaten.
+func TestChangeSetToVersionDBCmdErrorReleasesStore(t *testing.T) {
 	dir := t.TempDir()
 	dbDir := filepath.Join(dir, "versiondb")
 
@@ -73,4 +77,11 @@ func TestChangeSetToVersionDBCmdErrorDoesNotFlushOrClose(t *testing.T) {
 	cmd := ChangeSetToVersionDBCmd()
 	cmd.SetArgs([]string{dbDir, badFile, "--" + flagStore, testStoreKey})
 	require.Error(t, cmd.Execute())
+
+	// Reopening the same directory only succeeds if the command closed its
+	// own RocksDB handle on the error path; otherwise this fails with a
+	// "lock hold by current process" IO error.
+	reopened, err := tsrocksdb.NewStore(dbDir)
+	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
 }
