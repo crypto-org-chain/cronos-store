@@ -152,6 +152,8 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 		require.NoError(t, db.checkAsyncTasks())
 	}
 
+	// checkAsyncTasks above already joined the background rewrite goroutine,
+	// so no concurrent writer remains and db.mtx isn't needed here.
 	require.Equal(t, cacheSize, db.cacheSize)
 	for _, entry := range db.trees {
 		require.NotNil(t, entry.cache, "tree %q lost its cache after background snapshot rewrite", entry.Name)
