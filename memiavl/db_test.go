@@ -918,3 +918,51 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
+
+// TestAsyncCommitWalWriterErrorDoesNotDeadlock reproduces the scenario where
+// the async wal writer goroutine has already died after reporting an error:
+// walChan has no reader left (as if the writer quit without looping back to
+// drain it) and walQuit already holds the reported error. On the old,
+// unbuffered-walQuit implementation, Commit() would block forever trying to
+// send on walChan since nothing drains it anymore. The fix must make Commit
+// race the send against the writer's quit signal so it returns the error
+// instead of hanging.
+func TestAsyncCommitWalWriterErrorDoesNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 0,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.wal.Close() })
+
+	require.NoError(t, db.ApplyChangeSet(testStoreName, ChangeSet{
+		Pairs: []*KVPair{{Key: []byte("k"), Value: []byte("v")}},
+	}))
+
+	// Simulate a dead async writer: an unbuffered walChan with nobody left to
+	// drain it, and walQuit already carrying the error the writer reported
+	// right before it returned.
+	simulatedErr := errors.New("simulated async wal write failure")
+	db.walChan = make(chan *walEntry)
+	db.walQuit = make(chan error, 1)
+	db.walQuit <- simulatedErr
+
+	type commitResult struct {
+		err error
+	}
+	done := make(chan commitResult, 1)
+	go func() {
+		_, err := db.Commit()
+		done <- commitResult{err: err}
+	}()
+
+	select {
+	case res := <-done:
+		require.Error(t, res.err)
+		require.ErrorIs(t, res.err, simulatedErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Commit() did not return within bounded time: async wal writer error handling deadlocked")
+	}
+}

@@ -26,6 +26,11 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// errAsyncWalWriterQuit is used when the async wal writer goroutine exits
+// without reporting an error (e.g. its quit channel is observed closed by a
+// second reader after the first already drained the real error).
+var errAsyncWalWriterQuit = errors.New("async wal writing goroutine already quit")
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -71,6 +76,9 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
+	// cached error once the async wal writer goroutine has quit, so Commit
+	// keeps failing fast instead of enqueueing into a channel nobody drains.
+	walWriterErr error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -479,9 +487,18 @@ func (db *DB) checkAsyncTasks() error {
 
 // checkAsyncCommit check the quit signal of async wal writing
 func (db *DB) checkAsyncCommit() error {
+	if db.walWriterErr != nil {
+		// already reported, keep failing fast without touching the channel again
+		return fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", db.walWriterErr)
+	}
+
 	select {
-	case err := <-db.walQuit:
+	case err, ok := <-db.walQuit:
+		if !ok {
+			err = errAsyncWalWriterQuit
+		}
 		// async wal writing failed, we need to abort the state machine
+		db.walWriterErr = err
 		return fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
 	default:
 	}
@@ -637,8 +654,22 @@ func (db *DB) Commit() (int64, error) {
 				db.initAsyncCommit()
 			}
 
-			// async wal writing
-			db.walChan <- &entry
+			if db.walWriterErr != nil {
+				return 0, fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", db.walWriterErr)
+			}
+
+			// async wal writing; race the send against the writer's quit
+			// signal so a dead writer surfaces as an error instead of
+			// blocking forever on walChan (which nobody drains anymore).
+			select {
+			case db.walChan <- &entry:
+			case werr, ok := <-db.walQuit:
+				if !ok {
+					werr = errAsyncWalWriterQuit
+				}
+				db.walWriterErr = werr
+				return 0, fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", werr)
+			}
 		} else {
 			lastIndex, err := db.wal.LastIndex()
 			if err != nil {
@@ -671,7 +702,11 @@ func (db *DB) Commit() (int64, error) {
 
 func (db *DB) initAsyncCommit() {
 	walChan := make(chan *walEntry, db.walChanSize)
-	walQuit := make(chan error)
+	// buffered so the writer goroutine can always report its error and
+	// return, even if nobody has called checkAsyncCommit/Commit yet to
+	// receive it; otherwise the writer would block forever on this send,
+	// never going back to drain walChan, wedging future Commit calls.
+	walQuit := make(chan error, 1)
 
 	go func() {
 		defer close(walQuit)
@@ -707,6 +742,7 @@ func (db *DB) initAsyncCommit() {
 
 	db.walChan = walChan
 	db.walQuit = walQuit
+	db.walWriterErr = nil
 }
 
 // WaitAsyncCommit waits for the completion of async commit
@@ -724,9 +760,16 @@ func (db *DB) waitAsyncCommit() error {
 
 	close(db.walChan)
 	err := <-db.walQuit
+	if err == nil {
+		// the writer may have already reported its error earlier (e.g. via
+		// Commit's send-select or checkAsyncCommit), in which case walQuit
+		// is already drained and closed, and it reads back as nil here.
+		err = db.walWriterErr
+	}
 
 	db.walChan = nil
 	db.walQuit = nil
+	db.walWriterErr = nil
 	return err
 }
 
