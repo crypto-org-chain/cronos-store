@@ -1,5 +1,6 @@
 # Changelog
 
+- [#90](https://github.com/crypto-org-chain/cronos-store/pull/90) fix(versiondb): bump every store's tree version in verifyOneStore, not just changed ones
 - [#76](https://github.com/crypto-org-chain/cronos-store/pull/76) fix(store): validate memiavl tree membership on load.
 - [#73](https://github.com/crypto-org-chain/cronos-store/pull/73) fix(memiavl): treat `endVersion == 0` as "to latest" (consistently in `TraverseStateChanges` and `CatchupWAL`) and reject a negative `endVersion` with an error instead of silently traversing nothing.
 - [#74](https://github.com/crypto-org-chain/cronos-store/pull/74) fix(memiavl): honor the early-stop return value in `ScanPostOrder` so the scan stops when the callback returns true, instead of always walking the whole tree.
