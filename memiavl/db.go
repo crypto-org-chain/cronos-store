@@ -515,7 +515,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 		if err != nil {
 			return fmt.Errorf("get wal version failed: %w", err)
 		}
-		if targetVersion == committedVersion {
+		if committedVersion >= targetVersion {
 			return nil
 		}
 		if time.Now().After(deadline) {
