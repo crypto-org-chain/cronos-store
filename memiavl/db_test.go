@@ -126,10 +126,6 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
-// TestRewriteSnapshotBackgroundPreservesCacheSize guards against a regression where
-// rewriteSnapshotBackground reloaded the post-rewrite MultiTree with a hardcoded cache
-// size of 0, silently dropping the configured CacheSize (and every tree's read cache)
-// for the rest of the process once db.MultiTree got replaced.
 func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 	const cacheSize = 100
 
