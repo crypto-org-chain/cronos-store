@@ -10,9 +10,20 @@ func TestIteratorDomainNilBounds(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
 
-	require.NoError(t, store.PutAtVersion(1, nil))
-
 	itr, err := store.IteratorAtVersion(testStoreKey, nil, nil, nil)
+	require.NoError(t, err)
+	defer itr.Close()
+
+	start, end := itr.Domain()
+	require.Nil(t, start)
+	require.Nil(t, end)
+}
+
+func TestReverseIteratorDomainNilBounds(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	itr, err := store.ReverseIteratorAtVersion(testStoreKey, nil, nil, nil)
 	require.NoError(t, err)
 	defer itr.Close()
 
