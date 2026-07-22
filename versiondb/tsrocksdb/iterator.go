@@ -73,7 +73,7 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end, domainSta
 }
 
 // Domain implements Iterator. Returns the unprefixed bounds to match Key()'s
-// stripped-prefix output, not the internal prefixed start/end.
+// stripped-prefix output.
 func (itr *rocksDBIterator) Domain() ([]byte, []byte) {
 	return itr.domainStart, itr.domainEnd
 }
