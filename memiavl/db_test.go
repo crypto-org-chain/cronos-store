@@ -58,7 +58,7 @@ func TestFsyncDir(t *testing.T) {
 	require.Error(t, fsyncDir(filepath.Join(dir, "does-not-exist")))
 }
 
-func TestUpdateCurrentSymlinkFsync(t *testing.T) {
+func TestUpdateCurrentSymlink(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-a"), os.ModePerm))
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-b"), os.ModePerm))
