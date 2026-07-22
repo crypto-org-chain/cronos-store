@@ -23,10 +23,8 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	// walCatchupTimeout bounds how long checkBackgroundSnapshotRewrite waits for
-	// pending wal writes to catch up before giving up. It's held under db.mtx, so
-	// an unbounded wait here would deadlock the whole DB if the wal writer goroutine
-	// died or got stuck.
+	// Held under db.mtx; unbounded here would deadlock the DB if the wal writer
+	// goroutine died or got stuck.
 	walCatchupTimeout      = 5 * time.Second
 	walCatchupPollInterval = time.Millisecond
 )
@@ -508,10 +506,8 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return walVersion(lastIndex, db.initialVersion), nil
 }
 
-// waitCommittedVersion blocks until the wal's committed version reaches targetVersion,
-// or returns an error once timeout elapses. It's used to let in-flight async wal writes
-// catch up before switching to a rewritten snapshot; if the wal writer goroutine died or
-// got stuck, CommittedVersion would never reach targetVersion, so we must not wait forever.
+// waitCommittedVersion polls CommittedVersion until it reaches targetVersion, bounded
+// by timeout so a stuck wal writer can't block the caller forever.
 func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -549,8 +545,6 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		// bounded by walCatchupTimeout so a stuck/dead wal writer goroutine can't spin this
-		// forever while holding db.mtx.
 		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, walCatchupTimeout); err != nil {
 			return err
 		}

@@ -126,10 +126,6 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
-// TestWaitCommittedVersionTimesOut guards against the wal catch-up wait in
-// checkBackgroundSnapshotRewrite spinning forever when the wal writer can
-// never reach the target version (e.g. it died or got stuck). It must return
-// an error within the bounded timeout instead of blocking indefinitely.
 func TestWaitCommittedVersionTimesOut(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -160,9 +156,6 @@ func TestWaitCommittedVersionTimesOut(t *testing.T) {
 	}
 }
 
-// TestWaitCommittedVersionSucceedsWhenCaughtUp verifies the healthy path is
-// unchanged: waiting for a version that's already committed returns immediately
-// without error.
 func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
