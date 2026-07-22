@@ -37,7 +37,14 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 				}
 			}
 
-			return nil
+			// Flush the memtable to disk and close the store before reporting
+			// success, otherwise a power loss right after this command prints
+			// "success" can silently lose the tail of the migrated changesets,
+			// with no way for a re-run to detect the loss.
+			if err := versionDB.Flush(); err != nil {
+				return err
+			}
+			return versionDB.Close()
 		},
 	}
 

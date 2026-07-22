@@ -239,6 +239,15 @@ func (s Store) Flush() error {
 	)
 }
 
+// Close releases the underlying RocksDB handles. Callers that need the
+// writes to be durable on disk before closing should call Flush first;
+// Close itself does not flush the memtable.
+func (s Store) Close() error {
+	s.cfHandle.Destroy()
+	s.db.Close()
+	return nil
+}
+
 // FixData fixes wrong data written in versiondb due to rocksdb upgrade, the operation is idempotent.
 // see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 // call this before `SetSkipVersionZero(true)`.
