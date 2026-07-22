@@ -949,11 +949,6 @@ func waitPrune(db *DB) {
 	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
 }
 
-// TestPruneSnapshotsFirstSnapshotVersionError verifies that when
-// firstSnapshotVersion fails (e.g. no snapshot directories present),
-// pruneSnapshots bails out instead of truncating the WAL using the zero
-// value earliestVersion defaults to, and leaves the earliest-snapshot cache
-// untouched.
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	logger := &recordingLogger{}
 	db, err := Load(t.TempDir(), Options{
@@ -964,9 +959,8 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
 
-	// initialVersion > 1 so that, on the old buggy code, falling through with
-	// earliestVersion's zero value would drive walIndex(1, 100) into
-	// underflow instead of harmlessly resolving to a no-op truncation.
+	// initialVersion > 1 so the old buggy code would drive walIndex(1, 100)
+	// into underflow instead of a harmless no-op.
 	require.NoError(t, db.SetInitialVersion(100))
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
 		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("k", "v")}},
@@ -997,17 +991,9 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 		"cache must not be overwritten with the zero value on error")
 }
 
-// TestPruneSnapshotsInitialVersionUnderflowGuard verifies that when the
-// earliest remaining snapshot is still the genesis placeholder (version 0)
-// and initialVersion > 1, pruneSnapshots skips truncation instead of
-// computing walIndex(earliestVersion+1, initialVersion), which would
-// underflow to a huge uint64 and make TruncateFront fail with
-// ErrOutOfRange on every prune cycle.
 func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
-	// sanity-check the underflow this guard prevents: without it,
-	// walIndex(earliestVersion+1, initialVersion) wraps to a huge uint64
-	// instead of erroring, matching the earliestVersion=0, initialVersion=100
-	// scenario exercised below.
+	// sanity-check that walIndex(1, 100) itself underflows, confirming the
+	// guard in pruneSnapshots is actually needed for this scenario.
 	require.Greater(t, walIndex(1, 100), uint64(1<<62),
 		"walIndex(1, 100) is expected to underflow without the guard")
 
