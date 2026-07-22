@@ -609,8 +609,8 @@ func (db *DB) pruneSnapshots() {
 		}
 		db.earliestSnapshotCache.Store(earliestVersion)
 
-		// the genesis placeholder snapshot (version 0 or below initialVersion) has no
-		// corresponding wal entries yet, walIndex would underflow computing its index.
+		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
+		// the genesis placeholder snapshot has no corresponding wal entries yet.
 		if earliestVersion+1 < int64(initialVersion) {
 			return
 		}
