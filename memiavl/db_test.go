@@ -920,11 +920,7 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
 }
 
-// TestGetLatestVersionClosesWAL verifies that GetLatestVersion doesn't leak the
-// WAL's open file descriptor. It lowers the process's open-file limit and calls
-// GetLatestVersion far more times than the limit allows; if the WAL were never
-// closed, the descriptors would accumulate and later calls would start failing
-// with "too many open files".
+// Lowers RLIMIT_NOFILE so a leaked fd per call would exhaust it quickly.
 func TestGetLatestVersionClosesWAL(t *testing.T) {
 	dir := t.TempDir()
 
@@ -952,9 +948,7 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	const lowLimit = 64
 	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: lowLimit, Max: oldLimit.Max}))
 
-	// Well beyond the lowered limit: a single leaked fd per call would exhaust
-	// it and start returning "too many open files" long before this many
-	// iterations complete.
+	// Well beyond lowLimit, so a leaked fd would surface as failures.
 	const iterations = lowLimit * 4
 	for i := 0; i < iterations; i++ {
 		version, err := GetLatestVersion(dir)
