@@ -367,6 +367,13 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	rs.mtx.RLock()
 	defer rs.mtx.RUnlock()
 
+	return rs.cacheMultiStoreLocked()
+}
+
+// cacheMultiStoreLocked builds the cache multi-store assuming rs.mtx is already
+// held (read or write lock), so callers that must check state such as
+// lastCommitInfo and build the store atomically can avoid a TOCTOU gap.
+func (rs *Store) cacheMultiStoreLocked() types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 	for k, v := range rs.stores {
 		store := types.CacheWrapper(v)
@@ -387,11 +394,11 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	rs.mtx.RLock()
 	lastCommitInfo := rs.lastCommitInfo
-	rs.mtx.RUnlock()
-
 	if version == 0 || (lastCommitInfo != nil && version == lastCommitInfo.Version) {
-		return rs.CacheMultiStore(), nil
+		defer rs.mtx.RUnlock()
+		return rs.cacheMultiStoreLocked(), nil
 	}
+	rs.mtx.RUnlock()
 	// guard int64 → uint32 cast.
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)

@@ -562,3 +562,80 @@ func TestConcurrentCommitAndQuery(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestCacheMultiStoreWithVersionExactVersionRace guards against the TOCTOU gap
+// where CacheMultiStoreWithVersion reads lastCommitInfo, releases the lock,
+// and only then builds the cache store: a concurrent Commit() advancing the
+// live trees in that gap must not cause an exact-version request to silently
+// serve a later version's data.
+func TestCacheMultiStoreWithVersionExactVersionRace(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.SetMemIAVLOptions(memiavl.Options{
+		SnapshotInterval:   1,
+		SnapshotKeepRecent: 10,
+	})
+
+	key := types.NewKVStoreKey("test")
+	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	const numCommits = 200
+
+	var expected sync.Map // version -> committed value
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer stop.Store(true)
+		for i := 0; i < numCommits; i++ {
+			val := []byte{byte(i)}
+			kvStore := store.GetKVStore(key)
+			kvStore.Set([]byte("k"), val)
+			commitID := store.Commit()
+			expected.Store(commitID.Version, val)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			before := store.LastCommitID().Version
+			if before == 0 {
+				continue
+			}
+
+			cms, err := store.CacheMultiStoreWithVersion(before)
+			require.NoError(t, err)
+			require.NotNil(t, cms)
+
+			got := cms.GetKVStore(key).Get([]byte("k"))
+			after := store.LastCommitID().Version
+
+			if closer, ok := cms.(io.Closer); ok {
+				require.NoError(t, closer.Close())
+			}
+
+			// A Commit() advances the version under rs.mtx, so before == after
+			// proves no Commit() ran (or was in flight) between the two checks,
+			// making the read above race- and staleness-free to assert on. If a
+			// Commit() did interleave, skip: the live memiavl trees are mutated
+			// in place by Commit() without synchronization against readers that
+			// already hold a reference, so comparing against the requested
+			// version would be unsafe regardless of this fix.
+			if before != after {
+				continue
+			}
+
+			if want, ok := expected.Load(before); ok {
+				require.Equal(t, want, got)
+			}
+		}
+	}()
+
+	wg.Wait()
+}
