@@ -195,6 +195,11 @@ type Store struct {
 	logger  log.Logger
 	chainId string
 
+	// mtx guards lastCommitInfo and the per-store tree pointer swap in Commit
+	// against concurrent readers (e.g. the ABCI Query path running alongside
+	// block commit).
+	mtx sync.RWMutex
+
 	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
 	lastCommitInfo *types.CommitInfo
 
@@ -257,6 +262,11 @@ func (rs *Store) flush() error {
 //
 // Implements interface Committer.
 func (rs *Store) WorkingHash() []byte {
+	// flush() mutates the live memiavl trees in place, the same trees Query()
+	// reads directly for the latest height; guard it the same way as Commit.
+	rs.mtx.Lock()
+	defer rs.mtx.Unlock()
+
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
@@ -269,6 +279,14 @@ func (rs *Store) WorkingHash() []byte {
 
 // Commit Implements interface Committer
 func (rs *Store) Commit() types.CommitID {
+	// Lock for the whole commit, not just the tree-pointer swap: flush() and
+	// db.Commit() mutate the live memiavl trees in place, and Query() reads
+	// those same trees directly (via rs.db.TreeByName) for the latest height.
+	// Without holding the lock across the mutation, a concurrent Query could
+	// still race on the live tree even though lastCommitInfo itself is safe.
+	rs.mtx.Lock()
+	defer rs.mtx.Unlock()
+
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
@@ -305,7 +323,11 @@ func (rs *Store) Close() error {
 
 // LastCommitID Implements interface Committer
 func (rs *Store) LastCommitID() types.CommitID {
-	if rs.lastCommitInfo == nil {
+	rs.mtx.RLock()
+	lastCommitInfo := rs.lastCommitInfo
+	rs.mtx.RUnlock()
+
+	if lastCommitInfo == nil {
 		v, err := memiavl.GetLatestVersion(rs.dir)
 		if err != nil {
 			panic(fmt.Errorf("failed to get latest version: %w", err))
@@ -313,7 +335,7 @@ func (rs *Store) LastCommitID() types.CommitID {
 		return types.CommitID{Version: v}
 	}
 
-	return rs.lastCommitInfo.CommitID()
+	return lastCommitInfo.CommitID()
 }
 
 // SetPruning Implements interface Committer
@@ -346,6 +368,9 @@ func (rs *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap 
 
 // CacheMultiStore Implements interface MultiStore
 func (rs *Store) CacheMultiStore() types.CacheMultiStore {
+	rs.mtx.RLock()
+	defer rs.mtx.RUnlock()
+
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 	for k, v := range rs.stores {
 		store := types.CacheWrapper(v)
@@ -364,7 +389,11 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	if version == 0 || (rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version) {
+	rs.mtx.RLock()
+	lastCommitInfo := rs.lastCommitInfo
+	rs.mtx.RUnlock()
+
+	if version == 0 || (lastCommitInfo != nil && version == lastCommitInfo.Version) {
 		return rs.CacheMultiStore(), nil
 	}
 	// guard int64 → uint32 cast.
@@ -431,6 +460,8 @@ func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
 
 // LatestVersion Implements interface MultiStore
 func (rs *Store) LatestVersion() int64 {
+	rs.mtx.RLock()
+	defer rs.mtx.RUnlock()
 	return rs.db.Version()
 }
 
@@ -438,6 +469,8 @@ func (rs *Store) LatestVersion() int64 {
 func (rs *Store) EarliestVersion() int64 {
 	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
 	// earliest queryable version is the version of that snapshot.
+	rs.mtx.RLock()
+	defer rs.mtx.RUnlock()
 	v, err := rs.db.EarliestVersion()
 	if err != nil {
 		rs.logger.Error("failed to get earliest version", "err", err)
@@ -718,23 +751,36 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 
 // Query Implements interface Queryable
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
+	// Held through the version resolution and, for the latest-height path
+	// below, through the whole query: that path reads the live memiavl trees
+	// directly (via rs.db), which Commit() mutates in place under its write
+	// lock. Historical reads use an independent, read-only *memiavl.DB that
+	// Commit() never touches, so the lock is released before that (possibly
+	// slow) load to avoid stalling block commits on archive queries.
+	rs.mtx.RLock()
+
 	version := req.Height
 	if version == 0 {
 		version = rs.db.Version()
 	}
 	// guard int64 → uint32 cast.
 	if version < 0 || version > math.MaxUint32 {
+		rs.mtx.RUnlock()
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 
 	// If the request's height is the latest height we've committed, then utilize
 	// the store's lastCommitInfo as this commit info may not be flushed to disk.
 	// Otherwise, we query for the commit info from disk.
+	useLatest := rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version
 	db := rs.db
-	var borrowedEntry *historicalDBEntry
-	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
+	if useLatest {
+		defer rs.mtx.RUnlock()
+	} else {
+		rs.mtx.RUnlock()
+
 		var err error
-		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
+		borrowedEntry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
 			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 		})
 		if err != nil {

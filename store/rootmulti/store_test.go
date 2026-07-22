@@ -313,3 +313,54 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 	_, err := rs.restore(1, 1, r)
 	require.ErrorContains(t, err, "invalid node structure")
 }
+
+// TestConcurrentCommitAndQuery drives Commit() in a loop on one goroutine
+// while another goroutine concurrently hammers the reader paths that touch
+// lastCommitInfo (Query, LastCommitID, CacheMultiStoreWithVersion). Before
+// the mtx fix, `go test -race` flags this as a data race on lastCommitInfo.
+func TestConcurrentCommitAndQuery(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.SetMemIAVLOptions(memiavl.Options{
+		SnapshotInterval:   1,
+		SnapshotKeepRecent: 10,
+	})
+
+	key := types.NewKVStoreKey("test")
+	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	const numCommits = 200
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer stop.Store(true)
+		for i := 0; i < numCommits; i++ {
+			kvStore := store.GetKVStore(key)
+			kvStore.Set([]byte("k"), []byte{byte(i)})
+			store.Commit()
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			_ = store.LastCommitID()
+
+			_, err := store.Query(&types.RequestQuery{Path: "/test/key", Data: []byte("k")})
+			require.NoError(t, err)
+
+			cms, err := store.CacheMultiStoreWithVersion(0)
+			require.NoError(t, err)
+			require.NotNil(t, cms)
+		}
+	}()
+
+	wg.Wait()
+}
