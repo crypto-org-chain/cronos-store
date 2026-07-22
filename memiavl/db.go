@@ -534,7 +534,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// on failure, close the tree to release its mmap'd snapshot files before returning.
 		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
+			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
 		}
 
 		// do the switch
