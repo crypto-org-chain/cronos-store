@@ -69,8 +69,8 @@ func truncateCorruptedTail(path string, format wal.LogFormat) error {
 		data = data[n:]
 		pos += n
 	}
-	// data shrinks as pos grows, so compare pos against the original size, not
-	// len(data): pos == len(data) mid-loop is a valid coincidence, not "fully consumed".
+	// len(data) shrinks as pos grows, so pos == len(data) can hold mid-loop;
+	// compare against originalFileSize to detect a truly incomplete parse.
 	if pos < originalFileSize {
 		return os.Truncate(path, int64(pos))
 	}

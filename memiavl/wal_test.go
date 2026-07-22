@@ -26,10 +26,7 @@ func TestCorruptedTail(t *testing.T) {
 		{"failure-3", []byte(`{"index":"1"}` + "\n"), 0},
 		{"failure-4", []byte(`{"index":"1","data":"?"}`), 0},
 		{"failure-5", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1},
-		// Regression: the corrupt tail here is deliberately made the same length as
-		// the valid prefix consumed so far (23 bytes each), which used to make
-		// truncateCorruptedTail compare pos against len(data) instead of the
-		// original file size and skip truncation entirely.
+		// tail is 23 bytes to match the consumed prefix length, the pos == len(data) case.
 		{"failure-6-equal-length-tail", []byte(`{"index":1,"data":"?"}` + "\n" + strings.Repeat("?", 23)), 1},
 	}
 
