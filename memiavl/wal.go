@@ -51,6 +51,7 @@ func truncateCorruptedTail(path string, format wal.LogFormat) error {
 	if err != nil {
 		return err
 	}
+	originalFileSize := len(data)
 	var pos int
 	for len(data) > 0 {
 		var n int
@@ -68,7 +69,9 @@ func truncateCorruptedTail(path string, format wal.LogFormat) error {
 		data = data[n:]
 		pos += n
 	}
-	if pos != len(data) {
+	// data shrinks as pos grows, so compare pos against the original size, not
+	// len(data): pos == len(data) mid-loop is a valid coincidence, not "fully consumed".
+	if pos < originalFileSize {
 		return os.Truncate(path, int64(pos))
 	}
 	return nil
