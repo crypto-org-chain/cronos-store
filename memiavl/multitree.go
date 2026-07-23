@@ -113,14 +113,15 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 	// overflow checked in `readMetadata`.
 	mtree.setInitialVersion(uint32(metadata.InitialVersion))
 
-	// The on-disk metadata is trusted blindly here, but `trees` were just
-	// rebuilt independently from `os.ReadDir`. If there's no pending WAL to
-	// replay, `CatchupWAL` returns early and never calls `UpdateCommitInfo`,
-	// so a stale or corrupted metadata file (e.g. from a torn write or a
-	// stray snapshot directory) would otherwise go undetected and get
-	// trusted as the app hash. Verify it matches what the loaded trees
-	// actually hash to before trusting it.
-	actual := mtree.buildCommitInfo(metadata.CommitInfo.Version)
+	// Verify metadata commit info matches the trees we actually loaded. Use
+	// each tree's own loaded version as ground truth, not the metadata's -
+	// otherwise a corrupted metadata.CommitInfo.Version would be fed back
+	// into buildCommitInfo and trivially match itself.
+	actualVersion := metadata.CommitInfo.Version
+	if len(trees) > 0 {
+		actualVersion = trees[0].Tree.Version()
+	}
+	actual := mtree.buildCommitInfo(actualVersion)
 	if err := commitInfoEqual(metadata.CommitInfo, actual); err != nil {
 		return nil, fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err)
 	}
@@ -338,7 +339,8 @@ func (t *MultiTree) UpdateCommitInfo() {
 // `actual` are expected to have their `StoreInfos` ordered by store name,
 // which holds for both the on-disk metadata (written from a `buildCommitInfo`
 // result) and freshly rebuilt commit infos, since trees are always kept
-// sorted by name.
+// sorted by name (see `slices.Sort(treeNames)` in `LoadMultiTree`). If that
+// invariant ever breaks, this comparison would produce false mismatches.
 func commitInfoEqual(trusted, actual *CommitInfo) error {
 	if trusted.Version != actual.Version {
 		return fmt.Errorf("version mismatch: trusted=%d actual=%d", trusted.Version, actual.Version)
