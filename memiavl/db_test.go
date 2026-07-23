@@ -126,6 +126,96 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
+func TestWaitCommittedVersionTimesOut(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+
+	// target a version that the wal will never reach, simulating a stuck/dead wal writer.
+	unreachableTarget := committedVersion + 1000
+
+	const testTimeout = 200 * time.Millisecond
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.waitCommittedVersion(unreachableTarget, testTimeout)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "timed out waiting for wal to catch up")
+	case <-time.After(testTimeout * 10):
+		t.Fatal("waitCommittedVersion did not return within the bounded timeout; it is spinning forever")
+	}
+}
+
+func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.waitCommittedVersion(committedVersion, 5*time.Second)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitCommittedVersion did not return for an already-caught-up version")
+	}
+}
+
+func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+
+	// target a version the wal has already passed, simulating a concurrent commit
+	// that advanced the wal beyond the target between polls. An exact "==" check would
+	// never match again and spin until timeout; ">=" must succeed immediately.
+	pastTarget := committedVersion - 1
+	require.GreaterOrEqual(t, pastTarget, int64(0))
+
+	const testTimeout = 200 * time.Millisecond
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- db.waitCommittedVersion(pastTarget, testTimeout)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(testTimeout * 10):
+		t.Fatal("waitCommittedVersion did not return promptly when wal already advanced past target")
+	}
+}
+
 func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,

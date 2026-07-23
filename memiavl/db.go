@@ -22,6 +22,9 @@ const (
 	LockFileName               = "LOCK"
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
+
+	walCatchupTimeout = 5 * time.Second
+	walPollInterval   = 50 * time.Nanosecond
 )
 
 var errReadOnly = errors.New("db is read-only")
@@ -501,6 +504,23 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return walVersion(lastIndex, db.initialVersion), nil
 }
 
+func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		committedVersion, err := db.CommittedVersion()
+		if err != nil {
+			return fmt.Errorf("get wal version failed: %w", err)
+		}
+		if committedVersion >= targetVersion {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
+		}
+		time.Sleep(walPollInterval)
+	}
+}
+
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
 func (db *DB) checkBackgroundSnapshotRewrite() error {
 	// check the completeness of background snapshot rewriting
@@ -521,15 +541,8 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		for {
-			committedVersion, err := db.CommittedVersion()
-			if err != nil {
-				return fmt.Errorf("get wal version failed: %w", err)
-			}
-			if db.lastCommitInfo.Version == committedVersion {
-				break
-			}
-			time.Sleep(time.Nanosecond)
+		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, walCatchupTimeout); err != nil {
+			return err
 		}
 
 		// catchup the remaining wal
