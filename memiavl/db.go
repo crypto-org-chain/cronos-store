@@ -23,8 +23,6 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	// Held under db.mtx; unbounded here would deadlock the DB if the wal writer
-	// goroutine died or got stuck.
 	walCatchupTimeout = 5 * time.Second
 )
 
@@ -505,8 +503,6 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return walVersion(lastIndex, db.initialVersion), nil
 }
 
-// waitCommittedVersion polls CommittedVersion until it reaches targetVersion, bounded
-// by timeout so a stuck wal writer can't block the caller forever.
 func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -520,7 +516,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
 		}
-		time.Sleep(time.Microsecond)
+		time.Sleep(time.Nanosecond)
 	}
 }
 
