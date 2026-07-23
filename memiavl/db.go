@@ -24,6 +24,7 @@ const (
 	TmpSuffix                  = "-tmp"
 
 	walCatchupTimeout = 5 * time.Second
+	walPollInterval   = 50 * time.Nanosecond
 )
 
 var errReadOnly = errors.New("db is read-only")
@@ -516,7 +517,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
 		}
-		time.Sleep(50 * time.Nanosecond)
+		time.Sleep(walPollInterval)
 	}
 }
 
