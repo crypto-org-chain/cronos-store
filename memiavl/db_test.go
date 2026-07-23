@@ -710,13 +710,12 @@ func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
 		require.NoError(t, db.Close())
 	}()
 
-	original := walSync
+	original := db.walSync
 	var syncCalls atomic.Int32
-	walSync = func(w *wal.Log) error {
+	db.walSync = func(w *wal.Log) error {
 		syncCalls.Add(1)
 		return original(w)
 	}
-	defer func() { walSync = original }()
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
 		{Name: testStoreName, Changeset: ChangeSet{
@@ -757,12 +756,10 @@ func testCommitFailsWhenWALSyncFails(t *testing.T, asyncCommit bool) {
 	}, TestAppChainID)
 	require.NoError(t, err)
 
-	original := walSync
 	syncErr := errors.New("simulated fsync failure")
-	walSync = func(*wal.Log) error {
+	db.walSync = func(*wal.Log) error {
 		return syncErr
 	}
-	defer func() { walSync = original }()
 
 	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
 		{Name: testStoreName, Changeset: ChangeSet{
