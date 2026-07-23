@@ -605,8 +605,14 @@ func (db *DB) pruneSnapshots() {
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
 			db.logger.Error("failed to find first snapshot", "err", err)
-		} else {
-			db.earliestSnapshotCache.Store(earliestVersion)
+			return
+		}
+		db.earliestSnapshotCache.Store(earliestVersion)
+
+		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
+		// the genesis placeholder snapshot has no corresponding wal entries yet.
+		if earliestVersion+1 < int64(initialVersion) {
+			return
 		}
 
 		if err := wal.TruncateFront(walIndex(earliestVersion+1, initialVersion)); err != nil {

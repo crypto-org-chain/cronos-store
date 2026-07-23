@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -917,4 +918,117 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	earliest, err := db.EarliestVersion()
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
+}
+
+// recordingLogger captures Error() calls so tests can assert on prune
+// failure/success behavior without depending on log output formatting.
+type recordingLogger struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+func (l *recordingLogger) Debug(string, ...interface{}) {}
+func (l *recordingLogger) Info(string, ...interface{})  {}
+
+func (l *recordingLogger) Error(msg string, _ ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errors = append(l.errors, msg)
+}
+
+func (l *recordingLogger) Errors() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.errors...)
+}
+
+// waitPrune blocks until any in-flight pruneSnapshots goroutine has finished,
+// by acquiring and releasing the lock it holds for its duration.
+func waitPrune(db *DB) {
+	db.pruneSnapshotLock.Lock()
+	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
+}
+
+func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
+	logger := &recordingLogger{}
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		Logger:          logger,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// initialVersion > 1 so the old buggy code would drive walIndex(1, 100)
+	// into underflow instead of a harmless no-op.
+	require.NoError(t, db.SetInitialVersion(100))
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("k", "v")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	// seed a sane cache value so we can verify it's left untouched below.
+	db.earliestSnapshotCache.Store(1)
+
+	// remove every snapshot directory so firstSnapshotVersion errors out.
+	entries, err := os.ReadDir(db.dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() {
+			require.NoError(t, os.RemoveAll(filepath.Join(db.dir, e.Name())))
+		}
+	}
+
+	db.pruneSnapshots()
+	waitPrune(db)
+
+	errs := logger.Errors()
+	require.Contains(t, errs, "failed to find first snapshot")
+	// the truncation path must not have been reached with the bogus zero value.
+	require.NotContains(t, errs, "failed to truncate wal")
+	require.EqualValues(t, 1, db.earliestSnapshotCache.Load(),
+		"cache must not be overwritten with the zero value on error")
+}
+
+func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
+	// sanity-check that walIndex(1, 100) itself underflows, confirming the
+	// guard in pruneSnapshots is actually needed for this scenario.
+	require.Greater(t, walIndex(1, 100), uint64(1<<62),
+		"walIndex(1, 100) is expected to underflow without the guard")
+
+	logger := &recordingLogger{}
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		Logger:          logger,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.SetInitialVersion(100))
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("k", "v")}},
+	}))
+	v, err := db.Commit()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, v)
+
+	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
+	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
+	earliest, err := firstSnapshotVersion(db.dir)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, earliest)
+
+	db.pruneSnapshots()
+	waitPrune(db)
+
+	require.NotContains(t, logger.Errors(), "failed to truncate wal",
+		"guard must skip truncation instead of calling TruncateFront with an underflowed index")
+
+	// the WAL must be untouched: commits made before the guarded prune are
+	// still readable, proving no destructive truncation happened.
+	firstVersion, err := db.FirstVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, firstVersion)
 }
