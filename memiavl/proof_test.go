@@ -13,6 +13,10 @@ func TestProofsEmptyTree(t *testing.T) {
 	proof, err := tree.GetMembershipProof([]byte("hello"))
 	require.Error(t, err)
 	require.Nil(t, proof)
+
+	nonExistProof, err := tree.GetNonMembershipProof([]byte("hello"))
+	require.Error(t, err)
+	require.Nil(t, nonExistProof)
 }
 
 func TestProofs(t *testing.T) {
