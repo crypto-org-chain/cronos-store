@@ -231,6 +231,8 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 				if v != version {
 					return false, fmt.Errorf("version don't match: %d != %d", v, version)
 				}
+				// gap-filling above still runs even when targetVersion == 0 (exhaust all files); this
+				// only controls whether the loop stops early once targetVersion is reached.
 				return targetVersion == 0 || v < targetVersion, nil
 			})
 

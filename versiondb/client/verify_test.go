@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,7 +35,7 @@ func writeStoreChangeSet(t *testing.T, changeSetDir, store string, versions []in
 	storeDir := filepath.Join(changeSetDir, store)
 	require.NoError(t, os.MkdirAll(storeDir, os.ModePerm))
 
-	fp, err := os.Create(filepath.Join(storeDir, "block-0"))
+	fp, err := os.Create(filepath.Join(storeDir, fmt.Sprintf("block-%d", versions[0])))
 	require.NoError(t, err)
 	defer fp.Close()
 
