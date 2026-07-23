@@ -40,7 +40,6 @@ If the key exists in the tree, this will return an error.
 */
 func (t *Tree) GetNonMembershipProof(key []byte) (*ics23.CommitmentProof, error) {
 	if t.root == nil {
-		// an empty tree has no keys to anchor a non-existence proof against ics23.
 		return nil, errors.New("cannot create non-existence proof for an empty tree")
 	}
 
@@ -90,7 +89,6 @@ func (t *Tree) VerifyNonMembership(proof *ics23.CommitmentProof, key []byte) boo
 // existence proof, if that's what it is.
 func (t *Tree) createExistenceProof(key []byte) (*ics23.ExistenceProof, error) {
 	if t.root == nil {
-		// an empty tree has no keys, so no membership proof can exist for any key.
 		return nil, errors.New("key does not exist")
 	}
 
