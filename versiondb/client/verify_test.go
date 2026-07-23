@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/cosmos/iavl"
-	"github.com/stretchr/testify/require"
 
 	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/stretchr/testify/require"
 
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 )
