@@ -25,8 +25,7 @@ const (
 
 	// Held under db.mtx; unbounded here would deadlock the DB if the wal writer
 	// goroutine died or got stuck.
-	walCatchupTimeout      = 5 * time.Second
-	walCatchupPollInterval = time.Millisecond
+	walCatchupTimeout = 5 * time.Second
 )
 
 var errReadOnly = errors.New("db is read-only")
@@ -521,7 +520,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
 		}
-		time.Sleep(walCatchupPollInterval)
+		time.Sleep(time.Microsecond)
 	}
 }
 
