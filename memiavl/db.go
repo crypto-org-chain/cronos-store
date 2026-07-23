@@ -516,7 +516,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
 		}
-		time.Sleep(time.Nanosecond)
+		time.Sleep(50 * time.Nanosecond)
 	}
 }
 
