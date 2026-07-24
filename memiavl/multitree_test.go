@@ -389,12 +389,6 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 	}
 }
 
-// TestLoadMultiTreeRejectsStaleMetadata reproduces a clean restart where the
-// on-disk `__metadata` file's commit info no longer matches what the trees
-// actually loaded from disk would hash to (e.g. a torn write, or a stray/
-// stale snapshot directory). There's no pending WAL entry to replay, so
-// `CatchupWAL`'s `UpdateCommitInfo` call never happens on this path; `Load`
-// itself must catch the mismatch instead of silently trusting the metadata.
 func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 	const wantErrMismatch = "snapshot metadata commit info does not match loaded trees"
 
