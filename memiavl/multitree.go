@@ -119,7 +119,7 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 	// into buildCommitInfo and trivially match itself.
 	actualVersion := metadata.CommitInfo.Version
 	if len(trees) > 0 {
-		actualVersion = trees[0].Tree.Version()
+		actualVersion = trees[0].Version()
 	}
 	actual := mtree.buildCommitInfo(actualVersion)
 	if err := commitInfoEqual(metadata.CommitInfo, actual); err != nil {

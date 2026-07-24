@@ -480,4 +480,3 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 		})
 	}
 }
-
