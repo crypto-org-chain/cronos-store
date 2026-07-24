@@ -25,9 +25,6 @@ func TestBuildCommitInfoUsesVersionParam(t *testing.T) {
 	require.Equal(t, "a", ci.StoreInfos[0].Name, "storeInfos should be sorted by name")
 }
 
-// writeStoreChangeSet writes a single change set file for `store` containing entries only for the
-// given versions (mimicking a real dump, where a store's changeset file only records the versions
-// where that specific store changed).
 func writeStoreChangeSet(t *testing.T, changeSetDir, store string, versions []int64) {
 	t.Helper()
 
@@ -46,10 +43,6 @@ func writeStoreChangeSet(t *testing.T, changeSetDir, store string, versions []in
 	}
 }
 
-// TestVerifyOneStoreBumpsVersionOnGaps reproduces the version skew bug: the live path
-// (memiavl.MultiTree.SaveVersion) bumps every store's tree version on every block, regardless of
-// whether that store had any writes. verifyOneStore must match that behavior instead of only
-// bumping the version on versions where this store's changeset happens to have an entry.
 func TestVerifyOneStoreBumpsVersionOnGaps(t *testing.T) {
 	dir := t.TempDir()
 
@@ -62,15 +55,10 @@ func TestVerifyOneStoreBumpsVersionOnGaps(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, storeInfo)
 
-	// without the fix, the tree would only be bumped to version 2 (one SaveVersion call per
-	// changeset entry) and IterateChangeSets would fail with "version don't match: 2 != 3".
 	require.Equal(t, int64(3), tree.Version())
 	require.Equal(t, int64(3), storeInfo.CommitId.Version)
 }
 
-// TestVerifyOneStoreCatchesUpToTargetVersion checks that a store with no further changesets still
-// gets its tree version bumped up to the target version, matching every other store that keeps
-// advancing on every block in the live path.
 func TestVerifyOneStoreCatchesUpToTargetVersion(t *testing.T) {
 	dir := t.TempDir()
 
