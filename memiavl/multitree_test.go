@@ -396,6 +396,8 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 // `CatchupWAL`'s `UpdateCommitInfo` call never happens on this path; `Load`
 // itself must catch the mismatch instead of silently trusting the metadata.
 func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
+	const wantErrMismatch = "snapshot metadata commit info does not match loaded trees"
+
 	cases := []struct {
 		name    string
 		corrupt func(ci *CommitInfo)
@@ -406,21 +408,21 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			corrupt: func(ci *CommitInfo) {
 				ci.StoreInfos[0].CommitId.Hash = []byte("bogus-hash-from-torn-write")
 			},
-			wantErr: "snapshot metadata commit info does not match loaded trees",
+			wantErr: wantErrMismatch,
 		},
 		{
 			name: "version mismatch",
 			corrupt: func(ci *CommitInfo) {
 				ci.Version++
 			},
-			wantErr: "snapshot metadata commit info does not match loaded trees",
+			wantErr: wantErrMismatch,
 		},
 		{
 			name: "store count mismatch",
 			corrupt: func(ci *CommitInfo) {
 				ci.StoreInfos = ci.StoreInfos[:len(ci.StoreInfos)-1]
 			},
-			wantErr: "snapshot metadata commit info does not match loaded trees",
+			wantErr: wantErrMismatch,
 		},
 	}
 
