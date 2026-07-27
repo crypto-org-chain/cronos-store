@@ -248,6 +248,10 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 // publishQuerySnapshot takes a copy-on-write snapshot of rs.db and publishes
 // it for the lock-free latest-height query paths. Must be called after
 // rs.db and rs.lastCommitInfo have been updated to the state being published.
+// The replaced snapshot needs no explicit Close: it is dropped once no
+// reader still holds the old *querySnapshot, and Go's GC reclaims it then —
+// do not add a "close the old snapshot" step here, it would unmap memory a
+// concurrent reader may still be using.
 func (rs *Store) publishQuerySnapshot() {
 	rs.querySnapshot.Store(&querySnapshot{
 		db:             rs.db.Copy(),
@@ -836,7 +840,16 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	version := req.Height
 	if version == 0 {
-		version = rs.latestDB().Version()
+		// Resolve against the same snap checked below, not a fresh atomic
+		// load: a Commit racing between two separate loads could otherwise
+		// resolve version to N+1 while snap is still at N, missing the
+		// fast path below and forcing a historicalDBCache load for what is
+		// actually the latest height.
+		if snap != nil {
+			version = snap.lastCommitInfo.Version
+		} else {
+			version = rs.db.Version()
+		}
 	}
 	// guard int64 → uint32 cast.
 	if version < 0 || version > math.MaxUint32 {
