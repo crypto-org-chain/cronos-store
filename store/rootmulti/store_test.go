@@ -582,3 +582,67 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 	_, err := rs.restore(1, 1, r)
 	require.ErrorContains(t, err, "invalid node structure")
 }
+
+// TestLatestHeightQueryRaceAgainstCommit drives Commit() on one goroutine
+// while CacheMultiStore, CacheMultiStoreWithVersion, Query, LatestVersion,
+// and EarliestVersion run concurrently at the latest height on others. Before
+// the lock-free query snapshot, these read paths dereferenced the live
+// rs.db/rs.stores that Commit mutates in place via flush()/SetTree, so this
+// test failed under -race.
+func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	defer store.Close()
+
+	const commits = 30
+	done := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		for i := 0; i < commits; i++ {
+			kv := store.GetKVStore(key)
+			kv.Set([]byte("k"), []byte{byte(i)})
+			store.Commit()
+		}
+	}()
+
+	readers := []func(){
+		func() { store.CacheMultiStore() },
+		func() {
+			cms, err := store.CacheMultiStoreWithVersion(0)
+			if err == nil {
+				if closer, ok := cms.(io.Closer); ok {
+					_ = closer.Close()
+				}
+			}
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+		},
+		func() { store.LatestVersion() },
+		func() { store.EarliestVersion() },
+	}
+
+	for _, read := range readers {
+		wg.Add(1)
+		go func(read func()) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					read()
+				}
+			}
+		}(read)
+	}
+
+	wg.Wait()
+}
