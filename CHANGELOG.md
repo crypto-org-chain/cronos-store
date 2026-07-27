@@ -1,6 +1,11 @@
 # Changelog
 
 - [#88](https://github.com/crypto-org-chain/cronos-store/pull/88) fix(versiondb): strip store prefix from iterator Domain() bounds
+- [#90](https://github.com/crypto-org-chain/cronos-store/pull/90) fix(versiondb): bump every store's tree version in verifyOneStore, not just changed ones
+- [#91](https://github.com/crypto-org-chain/cronos-store/pull/91) fix(memiavl): reconcile lastCommitInfo against loaded trees on clean restart
+- [#84](https://github.com/crypto-org-chain/cronos-store/pull/84) fix(memiavl): compare against original file size in truncateCorruptedTail
+- [#81](https://github.com/crypto-org-chain/cronos-store/pull/81) fix(memiavl): return error instead of panicking on empty-tree membership proof
+- [#75](https://github.com/crypto-org-chain/cronos-store/pull/75) fix(memiavl): abort `Commit` on an async WAL write error instead of deadlocking on the `walChan` send under `db.mtx`; also break the snapshot catch-up loop and free the completed snapshot tree when the writer dies.
 - [#76](https://github.com/crypto-org-chain/cronos-store/pull/76) fix(store): validate memiavl tree membership on load.
 - [#73](https://github.com/crypto-org-chain/cronos-store/pull/73) fix(memiavl): treat `endVersion == 0` as "to latest" (consistently in `TraverseStateChanges` and `CatchupWAL`) and reject a negative `endVersion` with an error instead of silently traversing nothing.
 - [#74](https://github.com/crypto-org-chain/cronos-store/pull/74) fix(memiavl): honor the early-stop return value in `ScanPostOrder` so the scan stops when the callback returns true, instead of always walking the whole tree.
