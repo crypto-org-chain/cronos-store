@@ -1,5 +1,6 @@
 # Changelog
 
+- [#88](https://github.com/crypto-org-chain/cronos-store/pull/88) fix(versiondb): strip store prefix from iterator Domain() bounds
 - [#90](https://github.com/crypto-org-chain/cronos-store/pull/90) fix(versiondb): bump every store's tree version in verifyOneStore, not just changed ones
 - [#91](https://github.com/crypto-org-chain/cronos-store/pull/91) fix(memiavl): reconcile lastCommitInfo against loaded trees on clean restart
 - [#84](https://github.com/crypto-org-chain/cronos-store/pull/84) fix(memiavl): compare against original file size in truncateCorruptedTail
