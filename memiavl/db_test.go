@@ -560,9 +560,20 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	require.NoError(t, err)
 
 	corruptIndex := lastIndex + 1
+	// carries an invalid protobuf wire type (field 13, wire type 6, both undefined),
+	// so WALEntry.Unmarshal reliably rejects it as corrupt.
 	require.NoError(t, db.wal.Write(corruptIndex, []byte("not a valid WALEntry")))
 
 	return walVersion(corruptIndex, db.initialVersion)
+}
+
+// injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
+// callers can drive checkBackgroundSnapshotRewrite without a real goroutine.
+func injectSnapshotRewriteResult(db *DB, mtree *MultiTree) {
+	ch := make(chan snapshotResult, 1)
+	ch <- snapshotResult{mtree: mtree}
+	db.snapshotRewriteChan = ch
+	db.snapshotRewriteCancel = func() {}
 }
 
 func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T) {
@@ -589,10 +600,7 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
 	require.NoError(t, err)
 
-	ch := make(chan snapshotResult, 1)
-	ch <- snapshotResult{mtree: mtree}
-	db.snapshotRewriteChan = ch
-	db.snapshotRewriteCancel = func() {}
+	injectSnapshotRewriteResult(db, mtree)
 
 	err = db.checkBackgroundSnapshotRewrite()
 	require.Error(t, err, "catchup failure must be propagated")
@@ -624,11 +632,14 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	case result := <-db.snapshotRewriteChan:
 		require.Error(t, result.err, "background catchup failure must be reported")
 		require.Nil(t, result.mtree, "no tree handed back on failure, so no way to leak it via the result")
+		db.snapshotRewriteChan = nil
+		db.snapshotRewriteCancel = nil
 	case <-time.After(5 * time.Second):
+		// leave snapshotRewriteChan/Cancel set so the deferred db.Close() still
+		// cancels and drains the goroutine instead of orphaning it.
+		db.snapshotRewriteCancel()
 		t.Fatal("timed out waiting for background snapshot rewrite result: goroutine likely hung")
 	}
-	db.snapshotRewriteChan = nil
-	db.snapshotRewriteCancel = nil
 }
 
 func TestZeroCopy(t *testing.T) {
@@ -1124,11 +1135,7 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	db.lastCommitInfo.Version = cv + 1
 	db.walErr = errors.New("simulated async wal writer death")
 
-	mtree := db.MultiTree.Copy(0)
-	ch := make(chan snapshotResult, 1)
-	ch <- snapshotResult{mtree: mtree}
-	db.snapshotRewriteChan = ch
-	db.snapshotRewriteCancel = func() {}
+	injectSnapshotRewriteResult(db, db.MultiTree.Copy(0))
 
 	done := make(chan error, 1)
 	go func() {
