@@ -1,5 +1,6 @@
 # Changelog
 
+- [#91](https://github.com/crypto-org-chain/cronos-store/pull/91) fix(memiavl): reconcile lastCommitInfo against loaded trees on clean restart
 - [#84](https://github.com/crypto-org-chain/cronos-store/pull/84) fix(memiavl): compare against original file size in truncateCorruptedTail
 - [#81](https://github.com/crypto-org-chain/cronos-store/pull/81) fix(memiavl): return error instead of panicking on empty-tree membership proof
 - [#75](https://github.com/crypto-org-chain/cronos-store/pull/75) fix(memiavl): abort `Commit` on an async WAL write error instead of deadlocking on the `walChan` send under `db.mtx`; also break the snapshot catch-up loop and free the completed snapshot tree when the writer dies.
