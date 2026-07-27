@@ -388,9 +388,15 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		}
 	}
 
-	// add all the iavl stores at the target version.
+	// add all the iavl stores at the target version. A historical snapshot may
+	// contain trees for stores later deleted/renamed by a StoreUpgrade; skip
+	// those since there's no current StoreKey to expose them under.
 	for _, tree := range db.Trees() {
-		stores[rs.keysByName[tree.Name]] = memiavlstore.New(tree.Tree, rs.logger)
+		key, ok := rs.keysByName[tree.Name]
+		if !ok {
+			continue
+		}
+		stores[key] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
 	return cachemulti.NewStore(stores, nil, nil, db), nil
@@ -794,12 +800,14 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, err
 	}
 
-	if _, ok := rs.keysByName[storeName]; !ok {
-		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "no such store: %s", storeName)
-	}
-
+	// db may be a historical snapshot whose store set differs from the
+	// currently-mounted keysByName (e.g. stores deleted or renamed by a
+	// later upgrade), so the snapshot's own tree set is authoritative.
 	tree := db.TreeByName(storeName)
 	if tree == nil {
+		if _, ok := rs.keysByName[storeName]; !ok {
+			return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "no such store: %s", storeName)
+		}
 		return nil, errors.Wrapf(sdkerrors.ErrUnknownRequest, "store %s not present in historical snapshot at this version", storeName)
 	}
 
