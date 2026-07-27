@@ -550,7 +550,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// catchup the remaining wal
 		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
+			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
 		}
 
 		// do the switch
@@ -905,7 +905,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
 		if err := mtree.CatchupWAL(wal, 0); err != nil {
-			ch <- snapshotResult{err: err}
+			ch <- snapshotResult{err: errors.Join(err, mtree.Close())}
 			return
 		}
 

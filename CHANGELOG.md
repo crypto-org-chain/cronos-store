@@ -1,5 +1,6 @@
 # Changelog
 
+- [#82](https://github.com/crypto-org-chain/cronos-store/pull/82) fix(memiavl): close loaded MultiTree when CatchupWAL fails during snapshot rewrite
 - [#78](https://github.com/crypto-org-chain/cronos-store/pull/78) fix(store): return error for unknown store name in Query instead of panicking
 - [#89](https://github.com/crypto-org-chain/cronos-store/pull/89) fix(versiondb): close store on all to-versiondb error paths
 - [#87](https://github.com/crypto-org-chain/cronos-store/pull/87) fix(memiavl): fsync directory after snapshot rename and current-symlink swap

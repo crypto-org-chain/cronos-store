@@ -551,6 +551,95 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
+// corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
+// callers can keep lastCommitInfo consistent with the wal's reported committed version.
+func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
+	t.Helper()
+
+	lastIndex, err := db.wal.LastIndex()
+	require.NoError(t, err)
+
+	corruptIndex := lastIndex + 1
+	// carries an invalid protobuf wire type (field 13, wire type 6, both undefined),
+	// so WALEntry.Unmarshal reliably rejects it as corrupt.
+	require.NoError(t, db.wal.Write(corruptIndex, []byte("not a valid WALEntry")))
+
+	return walVersion(corruptIndex, db.initialVersion)
+}
+
+// injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
+// callers can drive checkBackgroundSnapshotRewrite without a real goroutine.
+func injectSnapshotRewriteResult(db *DB, mtree *MultiTree) {
+	ch := make(chan snapshotResult, 1)
+	ch <- snapshotResult{mtree: mtree}
+	db.snapshotRewriteChan = ch
+	db.snapshotRewriteCancel = func() {}
+}
+
+func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	corruptVersion := corruptTrailingWALEntry(t, db)
+	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
+	// reported version or checkBackgroundSnapshotRewrite's wait loop spins forever.
+	db.lastCommitInfo.Version = corruptVersion
+
+	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
+	require.NoError(t, err)
+
+	injectSnapshotRewriteResult(db, mtree)
+
+	err = db.checkBackgroundSnapshotRewrite()
+	require.Error(t, err, "catchup failure must be propagated")
+
+	// MultiTree.Close nils out t.trees unconditionally, so this is a reliable witness that Close ran.
+	require.Nil(t, mtree.trees, "mtree must be closed on catchup failure, not leaked")
+}
+
+func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{Pairs: mockKVPairs("foo", "bar")}},
+	}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	corruptTrailingWALEntry(t, db)
+
+	require.NoError(t, db.RewriteSnapshotBackground())
+
+	select {
+	case result := <-db.snapshotRewriteChan:
+		require.Error(t, result.err, "background catchup failure must be reported")
+		require.Nil(t, result.mtree, "no tree handed back on failure, so no way to leak it via the result")
+		db.snapshotRewriteChan = nil
+		db.snapshotRewriteCancel = nil
+	case <-time.After(5 * time.Second):
+		db.snapshotRewriteCancel()
+		t.Fatal("timed out waiting for background snapshot rewrite result: goroutine likely hung")
+	}
+}
+
 func TestZeroCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{InitialStores: []string{testStoreName, test2StoreName}, CreateIfMissing: true, ZeroCopy: true}, TestAppChainID)
 	require.NoError(t, err)
@@ -1044,11 +1133,7 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	db.lastCommitInfo.Version = cv + 1
 	db.walErr = errors.New("simulated async wal writer death")
 
-	mtree := db.MultiTree.Copy(0)
-	ch := make(chan snapshotResult, 1)
-	ch <- snapshotResult{mtree: mtree}
-	db.snapshotRewriteChan = ch
-	db.snapshotRewriteCancel = func() {}
+	injectSnapshotRewriteResult(db, db.MultiTree.Copy(0))
 
 	done := make(chan error, 1)
 	go func() {
