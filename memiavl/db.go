@@ -71,6 +71,8 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
+	// latched async wal writer error; once set, every Commit fails with it.
+	walErr error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -479,14 +481,25 @@ func (db *DB) checkAsyncTasks() error {
 
 // checkAsyncCommit check the quit signal of async wal writing
 func (db *DB) checkAsyncCommit() error {
+	if db.walErr != nil {
+		return db.walErr
+	}
 	select {
 	case err := <-db.walQuit:
-		// async wal writing failed, we need to abort the state machine
-		return fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+		return db.latchWalErr(err)
 	default:
 	}
 
 	return nil
+}
+
+// latchWalErr records a non-nil async wal writer error the first time it's seen
+// and returns the latched error. Callers hold db.mtx.
+func (db *DB) latchWalErr(err error) error {
+	if err != nil && db.walErr == nil {
+		db.walErr = fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+	}
+	return db.walErr
 }
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
@@ -522,9 +535,12 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
 		for {
+			if err := db.checkAsyncCommit(); err != nil {
+				return errors.Join(err, result.mtree.Close())
+			}
 			committedVersion, err := db.CommittedVersion()
 			if err != nil {
-				return fmt.Errorf("get wal version failed: %w", err)
+				return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
 			}
 			if db.lastCommitInfo.Version == committedVersion {
 				break
@@ -534,7 +550,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// catchup the remaining wal
 		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return fmt.Errorf("catchup failed: %w", err)
+			return errors.Join(fmt.Errorf("catchup failed: %w", err), result.mtree.Close())
 		}
 
 		// do the switch
@@ -624,6 +640,10 @@ func (db *DB) Commit() (int64, error) {
 		return 0, errReadOnly
 	}
 
+	if err := db.checkAsyncCommit(); err != nil {
+		return 0, err
+	}
+
 	v, err := db.MultiTree.SaveVersion(true)
 	if err != nil {
 		return 0, err
@@ -637,8 +657,16 @@ func (db *DB) Commit() (int64, error) {
 				db.initAsyncCommit()
 			}
 
-			// async wal writing
-			db.walChan <- &entry
+			// watch walQuit so a dead writer surfaces its error instead of
+			// blocking the send forever under db.mtx.
+			select {
+			case db.walChan <- &entry:
+			case err := <-db.walQuit:
+				if db.walErr = db.latchWalErr(err); db.walErr == nil {
+					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
+				}
+				return 0, db.walErr
+			}
 		} else {
 			lastIndex, err := db.wal.LastIndex()
 			if err != nil {
@@ -671,7 +699,8 @@ func (db *DB) Commit() (int64, error) {
 
 func (db *DB) initAsyncCommit() {
 	walChan := make(chan *walEntry, db.walChanSize)
-	walQuit := make(chan error)
+	// buffered so an erroring writer can exit instead of parking on the send.
+	walQuit := make(chan error, 1)
 
 	go func() {
 		defer close(walQuit)
@@ -719,7 +748,7 @@ func (db *DB) WaitAsyncCommit() error {
 
 func (db *DB) waitAsyncCommit() error {
 	if db.walChan == nil {
-		return nil
+		return db.walErr
 	}
 
 	close(db.walChan)
@@ -727,7 +756,7 @@ func (db *DB) waitAsyncCommit() error {
 
 	db.walChan = nil
 	db.walQuit = nil
-	return err
+	return db.latchWalErr(err)
 }
 
 func (db *DB) Copy() *DB {
