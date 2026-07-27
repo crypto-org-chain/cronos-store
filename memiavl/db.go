@@ -662,8 +662,7 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case err := <-db.walQuit:
-				_ = db.latchWalErr(err)
-				if db.walErr == nil {
+				if db.walErr = db.latchWalErr(err); db.walErr == nil {
 					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
 				}
 				return 0, db.walErr
