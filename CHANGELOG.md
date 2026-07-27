@@ -1,6 +1,8 @@
 # Changelog
 
 - [#89](https://github.com/crypto-org-chain/cronos-store/pull/89) fix(versiondb): close store on all to-versiondb error paths
+- [#87](https://github.com/crypto-org-chain/cronos-store/pull/87) fix(memiavl): fsync directory after snapshot rename and current-symlink swap
+- [#88](https://github.com/crypto-org-chain/cronos-store/pull/88) fix(versiondb): strip store prefix from iterator Domain() bounds
 - [#90](https://github.com/crypto-org-chain/cronos-store/pull/90) fix(versiondb): bump every store's tree version in verifyOneStore, not just changed ones
 - [#91](https://github.com/crypto-org-chain/cronos-store/pull/91) fix(memiavl): reconcile lastCommitInfo against loaded trees on clean restart
 - [#84](https://github.com/crypto-org-chain/cronos-store/pull/84) fix(memiavl): compare against original file size in truncateCorruptedTail

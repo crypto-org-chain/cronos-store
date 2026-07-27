@@ -11,8 +11,11 @@ import (
 type rocksDBIterator struct {
 	source             *grocksdb.Iterator
 	prefix, start, end []byte
-	isReverse          bool
-	isInvalid          bool
+	// domainStart, domainEnd are the caller's unprefixed bounds; start/end
+	// get rewritten to the prefixed range used for Valid()'s checks.
+	domainStart, domainEnd []byte
+	isReverse              bool
+	isInvalid              bool
 
 	// see: https://github.com/crypto-org-chain/cronos-store/issues/1683
 	skipVersionZero bool
@@ -29,7 +32,7 @@ type rocksDBIterator struct {
 
 var _ versiondb.Iterator = (*rocksDBIterator)(nil)
 
-func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, isReverse, skipVersionZero bool, readOpts *grocksdb.ReadOptions) *rocksDBIterator {
+func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end, domainStart, domainEnd []byte, isReverse, skipVersionZero bool, readOpts *grocksdb.ReadOptions) *rocksDBIterator {
 	if isReverse {
 		if end == nil {
 			source.SeekToLast()
@@ -57,6 +60,8 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, is
 		prefix:          prefix,
 		start:           start,
 		end:             end,
+		domainStart:     domainStart,
+		domainEnd:       domainEnd,
 		isReverse:       isReverse,
 		isInvalid:       false,
 		skipVersionZero: skipVersionZero,
@@ -67,9 +72,10 @@ func newRocksDBIterator(source *grocksdb.Iterator, prefix, start, end []byte, is
 	return it
 }
 
-// Domain implements Iterator.
+// Domain implements Iterator. Returns the unprefixed bounds to match Key()'s
+// stripped-prefix output.
 func (itr *rocksDBIterator) Domain() ([]byte, []byte) {
-	return itr.start, itr.end
+	return itr.domainStart, itr.domainEnd
 }
 
 // Valid implements Iterator.

@@ -42,6 +42,38 @@ func TestRewriteSnapshot(t *testing.T) {
 	}
 }
 
+func TestFsyncDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, fsyncDir(dir))
+
+	oldPath := filepath.Join(dir, "old-name")
+	newPath := filepath.Join(dir, "new-name")
+	require.NoError(t, os.WriteFile(oldPath, []byte("data"), 0o600))
+	require.NoError(t, os.Rename(oldPath, newPath))
+	require.NoError(t, fsyncDir(dir))
+
+	_, err := os.Stat(newPath)
+	require.NoError(t, err)
+
+	require.Error(t, fsyncDir(filepath.Join(dir, "does-not-exist")))
+}
+
+func TestUpdateCurrentSymlink(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-a"), os.ModePerm))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-b"), os.ModePerm))
+
+	require.NoError(t, updateCurrentSymlink(dir, "snapshot-a"))
+	target, err := os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-a", target)
+
+	require.NoError(t, updateCurrentSymlink(dir, "snapshot-b"))
+	target, err = os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-b", target)
+}
+
 func TestRemoveSnapshotDir(t *testing.T) {
 	dbDir := t.TempDir()
 	defer func(path string) {

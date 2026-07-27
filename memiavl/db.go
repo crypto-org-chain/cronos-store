@@ -802,6 +802,9 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
 		return err
 	}
+	if err := fsyncDir(db.dir); err != nil {
+		return err
+	}
 	return updateCurrentSymlink(db.dir, snapshotDir)
 }
 
@@ -1273,7 +1276,11 @@ func updateCurrentSymlink(dir, snapshot string) error {
 		return err
 	}
 	// assuming file renaming operation is atomic
-	return os.Rename(tmpPath, currentPath(dir))
+	if err := os.Rename(tmpPath, currentPath(dir)); err != nil {
+		return err
+	}
+
+	return fsyncDir(dir)
 }
 
 // traverseSnapshots traverse the snapshot list in specified order.
@@ -1313,6 +1320,16 @@ func traverseSnapshots(dir string, ascending bool, callback func(int64) (bool, e
 	}
 
 	return nil
+}
+
+// fsyncDir makes prior renames/symlink swaps within it durable, not just
+// visible, so a crash can't lose them while later operations persist.
+func fsyncDir(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
 }
 
 // atomicRemoveDir is equavalent to `mv snapshot snapshot-tmp && rm -r snapshot-tmp`
