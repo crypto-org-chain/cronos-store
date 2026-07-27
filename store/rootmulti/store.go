@@ -423,6 +423,8 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
+// version == 0 means the latest committed snapshot, not the live working
+// state: once a snapshot has been published, it's read instead of rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	if snap := rs.querySnapshot.Load(); version == 0 || (snap != nil && version == snap.lastCommitInfo.Version) {
 		if snap != nil {
