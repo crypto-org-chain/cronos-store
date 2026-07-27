@@ -183,10 +183,9 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 	return db, nil
 }
 
-// querySnapshot is an immutable, ready-to-read view of the committed state,
-// published once per block via memiavl's copy-on-write DB.Copy(). Query paths
-// at the latest height read this instead of the live rs.db/rs.stores, so they
-// never race against Commit's in-place mutation of those trees.
+// querySnapshot is an immutable copy-on-write view of committed state, read
+// by latest-height query paths instead of the live rs.db/rs.stores to avoid
+// racing Commit's in-place mutation.
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
@@ -222,9 +221,7 @@ type Store struct {
 
 	historicalDBCache *historicalDBCache
 
-	// querySnapshot is published by publishQuerySnapshot after every state
-	// change to rs.db/rs.lastCommitInfo (Commit, LoadVersionAndUpgrade,
-	// RollbackToVersion) and read by the lock-free latest-height query paths.
+	// published by publishQuerySnapshot after each state change.
 	querySnapshot atomic.Pointer[querySnapshot]
 }
 
@@ -245,13 +242,10 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
-// publishQuerySnapshot takes a copy-on-write snapshot of rs.db and publishes
-// it for the lock-free latest-height query paths. Must be called after
-// rs.db and rs.lastCommitInfo have been updated to the state being published.
-// The replaced snapshot needs no explicit Close: it is dropped once no
-// reader still holds the old *querySnapshot, and Go's GC reclaims it then —
-// do not add a "close the old snapshot" step here, it would unmap memory a
-// concurrent reader may still be using.
+// publishQuerySnapshot must be called after rs.db and rs.lastCommitInfo are
+// updated, to publish that state for the lock-free query paths. The replaced
+// snapshot needs no explicit Close: readers hold it until they're done, then
+// GC reclaims it — closing it here would unmap memory a reader still needs.
 func (rs *Store) publishQuerySnapshot() {
 	rs.querySnapshot.Store(&querySnapshot{
 		db:             rs.db.Copy(),
@@ -259,8 +253,7 @@ func (rs *Store) publishQuerySnapshot() {
 	})
 }
 
-// latestDB returns the published query snapshot's db when available, falling
-// back to the live rs.db before the first snapshot is published.
+// latestDB falls back to rs.db before the first snapshot is published.
 func (rs *Store) latestDB() *memiavl.DB {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.db
@@ -400,12 +393,10 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
-// cacheMultiStoreFromDB builds a CacheMultiStore backed by the iavl trees of
-// db instead of rs.stores. closer is passed through to cachemulti.NewStore
-// unchanged: pass db when db is independently owned (e.g. a fresh historical
-// load) so it gets closed with the returned store, or nil when db is a
-// published query snapshot that shares mmap state with rs.db and must never
-// be closed on its own.
+// cacheMultiStoreFromDB builds a CacheMultiStore from db's iavl trees. Pass
+// closer=db for an independently-owned db (closed with the returned store),
+// or nil for a published query snapshot, which shares mmap state with rs.db
+// and must never be closed on its own.
 func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
@@ -744,10 +735,8 @@ func (rs *Store) SetMemIAVLOptions(opts memiavl.Options) {
 }
 
 // RollbackToVersion delete the versions after `target` and update the latest version.
-// it should only be called in standalone cli commands: it closes rs.db outright
-// rather than going through memiavl's normal reload path, which would keep the
-// previous generation alive for one cycle, so any querySnapshot published
-// before this call becomes unsafe to read once this returns.
+// it should only be called in standalone cli commands: it closes rs.db
+// outright, invalidating any querySnapshot published before this call.
 func (rs *Store) RollbackToVersion(target int64) error {
 	if target <= 0 {
 		return fmt.Errorf("invalid rollback height target: %d", target)
@@ -761,6 +750,9 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		if err := rs.db.Close(); err != nil {
 			return err
 		}
+		// Drop the stale snapshot: its db shares the mmap'd data just closed,
+		// so a reader loading it after a failed reload would hit a closed file.
+		rs.querySnapshot.Store(nil)
 	}
 
 	opts := rs.opts
@@ -772,10 +764,8 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	if err != nil {
 		return err
 	}
-	// keep lastCommitInfo in sync with the reloaded db so the published query
-	// snapshot's two fields agree; stale lastCommitInfo would make the
-	// snapshot's version fast-path checks in CacheMultiStoreWithVersion/Query
-	// compare against the version before the rollback.
+	// keep lastCommitInfo in sync with the reloaded db, so the snapshot's
+	// version checks don't compare against the pre-rollback version.
 	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
@@ -840,11 +830,9 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	version := req.Height
 	if version == 0 {
-		// Resolve against the same snap checked below, not a fresh atomic
-		// load: a Commit racing between two separate loads could otherwise
-		// resolve version to N+1 while snap is still at N, missing the
-		// fast path below and forcing a historicalDBCache load for what is
-		// actually the latest height.
+		// Resolve against the same snap checked below, not a fresh load: a
+		// Commit racing between the two could advance past snap and miss
+		// the fast path below for what is actually the latest height.
 		if snap != nil {
 			version = snap.lastCommitInfo.Version
 		} else {
@@ -856,10 +844,8 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 
-	// If the request's height is the latest height we've committed, read the
-	// published query snapshot instead of the live rs.db: rs.db is mutated in
-	// place by Commit, so reading it directly here would race against that.
-	// Otherwise, we query for the commit info from disk.
+	// At the latest height, read the published snapshot instead of the live
+	// rs.db, which Commit mutates in place. Otherwise load from disk.
 	var db *memiavl.DB
 	var borrowedEntry *historicalDBEntry
 	if snap != nil && version == snap.lastCommitInfo.Version {

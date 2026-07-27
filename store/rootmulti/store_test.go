@@ -584,8 +584,9 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 }
 
 // TestLatestHeightQueryRaceAgainstCommit drives Commit() on one goroutine
-// while CacheMultiStore, CacheMultiStoreWithVersion, Query, LatestVersion,
-// and EarliestVersion run concurrently at the latest height on others. Before
+// while CacheMultiStore, CacheMultiStoreWithVersion, Query (both with and
+// without Prove, exercising the proof-building path too), LatestVersion, and
+// EarliestVersion run concurrently at the latest height on others. Before
 // the lock-free query snapshot, these read paths dereferenced the live
 // rs.db/rs.stores that Commit mutates in place via flush()/SetTree, so this
 // test failed under -race.
@@ -624,6 +625,9 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		},
 		func() {
 			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k"), Prove: true})
 		},
 		func() { store.LatestVersion() },
 		func() { store.EarliestVersion() },
