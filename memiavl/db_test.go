@@ -635,8 +635,6 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	case <-time.After(5 * time.Second):
-		// leave snapshotRewriteChan/Cancel set so the deferred db.Close() still
-		// cancels and drains the goroutine instead of orphaning it.
 		db.snapshotRewriteCancel()
 		t.Fatal("timed out waiting for background snapshot rewrite result: goroutine likely hung")
 	}
