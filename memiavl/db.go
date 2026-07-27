@@ -1378,6 +1378,9 @@ func GetLatestVersion(dir string) (int64, error) {
 	}
 	lastIndex, err := wal.LastIndex()
 	if err != nil {
+		return 0, errors.Join(err, wal.Close())
+	}
+	if err := wal.Close(); err != nil {
 		return 0, err
 	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
