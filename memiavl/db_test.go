@@ -42,6 +42,38 @@ func TestRewriteSnapshot(t *testing.T) {
 	}
 }
 
+func TestFsyncDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, fsyncDir(dir))
+
+	oldPath := filepath.Join(dir, "old-name")
+	newPath := filepath.Join(dir, "new-name")
+	require.NoError(t, os.WriteFile(oldPath, []byte("data"), 0o600))
+	require.NoError(t, os.Rename(oldPath, newPath))
+	require.NoError(t, fsyncDir(dir))
+
+	_, err := os.Stat(newPath)
+	require.NoError(t, err)
+
+	require.Error(t, fsyncDir(filepath.Join(dir, "does-not-exist")))
+}
+
+func TestUpdateCurrentSymlink(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-a"), os.ModePerm))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "snapshot-b"), os.ModePerm))
+
+	require.NoError(t, updateCurrentSymlink(dir, "snapshot-a"))
+	target, err := os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-a", target)
+
+	require.NoError(t, updateCurrentSymlink(dir, "snapshot-b"))
+	target, err = os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-b", target)
+}
+
 func TestRemoveSnapshotDir(t *testing.T) {
 	dbDir := t.TempDir()
 	defer func(path string) {
@@ -997,4 +1029,115 @@ func TestEarliestVersionUnpruned(t *testing.T) {
 	earliest, err := db.EarliestVersion()
 	require.NoError(t, err)
 	require.Greater(t, earliest, int64(0), "EarliestVersion must not report height 0 for unpruned store")
+}
+
+func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 0, // unbuffered async writer: the worst case for the deadlock
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	commit := func() (int64, error) {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
+			return 0, err
+		}
+		return db.Commit()
+	}
+
+	// warm up: spin the async writer goroutine with a successful write.
+	_, err = commit()
+	require.NoError(t, err)
+
+	// break the underlying wal so the writer's next write fails.
+	require.NoError(t, db.wal.Close())
+
+	_, _ = commit()
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, cerr := commit()
+		done <- cerr
+	}()
+	select {
+	case cerr := <-done:
+		require.Error(t, cerr, "Commit must surface the async wal write error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Commit deadlocked after async wal writer failure")
+	}
+
+	// the error is latched, so every subsequent commit keeps failing.
+	_, cerr := commit()
+	require.Error(t, cerr, "Commit must stay failed after an async wal error")
+}
+
+func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 16,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	commit := func() (int64, error) {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
+			return 0, err
+		}
+		return db.Commit()
+	}
+
+	_, err = commit()
+	require.NoError(t, err)
+
+	require.NoError(t, db.wal.Close())
+
+	sawError := false
+	for i := 0; i < 20; i++ {
+		_, cerr := commit()
+		if sawError {
+			require.Error(t, cerr, "Commit returned success after a prior async wal failure")
+		} else if cerr != nil {
+			sawError = true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.True(t, sawError, "async wal writer death never surfaced as a Commit error")
+}
+
+func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 0,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.WaitAsyncCommit())
+
+	cv, err := db.CommittedVersion()
+	require.NoError(t, err)
+	db.lastCommitInfo.Version = cv + 1
+	db.walErr = errors.New("simulated async wal writer death")
+
+	mtree := db.MultiTree.Copy(0)
+	ch := make(chan snapshotResult, 1)
+	ch <- snapshotResult{mtree: mtree}
+	db.snapshotRewriteChan = ch
+	db.snapshotRewriteCancel = func() {}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- db.checkBackgroundSnapshotRewrite()
+	}()
+	select {
+	case cerr := <-done:
+		require.Error(t, cerr, "snapshot rewrite catch-up must surface the async wal error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
+	}
 }

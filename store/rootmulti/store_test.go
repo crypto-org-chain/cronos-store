@@ -15,6 +15,7 @@ import (
 
 	snapshottypes "github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
+	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
 const (
@@ -52,20 +53,30 @@ func TestLoadLatestVersionRejectsUnexpectedMemiAVLTree(t *testing.T) {
 	require.ErrorContains(t, err, "unexpected=[orphan]")
 }
 
-func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
-	dir := t.TempDir()
+// setupOldStoreAtVersion2 creates a memiavl db with oldStoreName holding key
+// "k"->"v" and testStoreName at version 1, then applies upgrades and commits
+// version 2, closing the db afterward.
+func setupOldStoreAtVersion2(t *testing.T, dir string, upgrades []*memiavl.TreeNameUpgrade) {
+	t.Helper()
+
 	db, err := memiavl.Load(dir, memiavl.Options{
 		CreateIfMissing:   true,
 		InitialStores:     []string{oldStoreName, testStoreName},
 		AsyncCommitBuffer: -1,
 	}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSet(oldStoreName, memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte("v")}}}))
 	_, err = db.Commit()
 	require.NoError(t, err)
-	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
+	require.NoError(t, db.ApplyUpgrades(upgrades))
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
+}
+
+func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
+	dir := t.TempDir()
+	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
 
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
 	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
@@ -77,18 +88,7 @@ func TestLoadVersionAllowsHistoricalMemiAVLTreeMembership(t *testing.T) {
 
 func TestLoadVersionAndUpgradeAllowsHistoricalMemiAVLTreeMembershipWithEmptyUpgrades(t *testing.T) {
 	dir := t.TempDir()
-	db, err := memiavl.Load(dir, memiavl.Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{oldStoreName, testStoreName},
-		AsyncCommitBuffer: -1,
-	}, TestAppChainID)
-	require.NoError(t, err)
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}}))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
 
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
 	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
@@ -469,6 +469,73 @@ func TestQueryFutureHeight(t *testing.T) {
 
 	_, err := store.Query(&types.RequestQuery{Path: "/test/key", Data: []byte("k"), Height: 100})
 	require.Error(t, err)
+}
+
+func TestQueryUnknownStore(t *testing.T) {
+	store, _ := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+
+	res, err := store.Query(&types.RequestQuery{Path: "/doesnotexist/key", Data: []byte("k")})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.Contains(t, err.Error(), "doesnotexist")
+	require.ErrorIs(t, err, sdkerrors.ErrUnknownRequest)
+}
+
+func TestQueryEmptyStoreName(t *testing.T) {
+	store, _ := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+
+	for _, path := range []string{"/", "//key"} {
+		res, err := store.Query(&types.RequestQuery{Path: path, Data: []byte("k")})
+		require.Error(t, err, "path %q", path)
+		require.Nil(t, res, "path %q", path)
+		require.ErrorIs(t, err, sdkerrors.ErrUnknownRequest, "path %q", path)
+	}
+}
+
+func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {
+	dir := t.TempDir()
+	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	res, err := store.Query(&types.RequestQuery{Path: "/old/key", Data: []byte("k"), Height: 1})
+	require.NoError(t, err)
+	require.Equal(t, []byte("v"), res.Value)
+}
+
+func TestQueryHistoricalHeightAllowsRenamedStore(t *testing.T) {
+	dir := t.TempDir()
+	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: newStoreName, RenameFrom: oldStoreName}})
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(newStoreName), types.StoreTypeIAVL, nil)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	res, err := store.Query(&types.RequestQuery{Path: "/old/key", Data: []byte("k"), Height: 1})
+	require.NoError(t, err)
+	require.Equal(t, []byte("v"), res.Value)
+}
+
+func TestCacheMultiStoreWithVersionHistoricalHeightSkipsDeletedStore(t *testing.T) {
+	dir := t.TempDir()
+	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
+
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	testKey := types.NewKVStoreKey(testStoreName)
+	store.MountStoreWithDB(testKey, types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	cms, err := store.CacheMultiStoreWithVersion(1)
+	require.NoError(t, err)
+	require.NotPanics(t, func() { cms.GetKVStore(testKey) })
 }
 
 func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {

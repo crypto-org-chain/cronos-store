@@ -166,11 +166,12 @@ func (s Store) iteratorAtVersion(storeKey string, start, end []byte, version *in
 	}
 
 	prefix := storePrefix(storeKey)
+	domainStart, domainEnd := start, end
 	start, end = iterateWithPrefix(prefix, start, end)
 
 	readOpts := newTSReadOptions(version)
 	itr := s.db.NewIteratorCF(readOpts, s.cfHandle)
-	return newRocksDBIterator(itr, prefix, start, end, reverse, s.skipVersionZero, readOpts), nil
+	return newRocksDBIterator(itr, prefix, start, end, domainStart, domainEnd, reverse, s.skipVersionZero, readOpts), nil
 }
 
 // FeedChangeSet is used to migrate legacy change sets into versiondb
@@ -237,6 +238,13 @@ func (s Store) Flush() error {
 		s.db.Flush(opts),
 		s.db.FlushCF(s.cfHandle, opts),
 	)
+}
+
+// Close does not flush the memtable; call Flush first if durability is needed.
+func (s Store) Close() error {
+	s.cfHandle.Destroy()
+	s.db.Close()
+	return nil
 }
 
 // FixData fixes wrong data written in versiondb due to rocksdb upgrade, the operation is idempotent.
