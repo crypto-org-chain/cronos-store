@@ -582,6 +582,17 @@ func TestQueryEmptyStoreName(t *testing.T) {
 	}
 }
 
+// A deferred Close alongside an explicit one must not double-close the memiavl
+// db, whose wal is already nil after the first call.
+func TestCloseIsIdempotent(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+
+	require.NoError(t, store.Close())
+	require.NoError(t, store.Close())
+}
+
 // An empty tree can't produce a non-existence proof, so the query must fail
 // with an error rather than panic the node.
 func TestQueryProveAgainstEmptyStore(t *testing.T) {
@@ -595,7 +606,7 @@ func TestQueryProveAgainstEmptyStore(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, res)
 	require.ErrorIs(t, err, sdkerrors.ErrInvalidRequest)
-	require.Contains(t, err.Error(), "failed to build proof")
+	require.Contains(t, err.Error(), "failed to build non-membership proof")
 }
 
 func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {

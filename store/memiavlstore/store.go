@@ -199,8 +199,7 @@ func (st *Store) WorkingHash() []byte {
 }
 
 // getProofFromTree builds the merkle proof for key, either an existence or an
-// absence proof depending on `exists`. An empty tree can produce neither, so the
-// error is returned to the querier instead of taking the node down.
+// absence proof depending on `exists`.
 func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
 	var (
 		commitmentProof *ics23.CommitmentProof
@@ -208,12 +207,19 @@ func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocry
 	)
 
 	if exists {
+		// The value came from this same tree, so a failure here means the tree
+		// itself is inconsistent, not that the request was bad.
 		commitmentProof, err = tree.GetMembershipProof(key)
+		if err != nil {
+			return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build membership proof for key %X: %s", key, err)
+		}
 	} else {
+		// An empty tree has no absence proof to give; report it to the querier
+		// instead of taking the node down.
 		commitmentProof, err = tree.GetNonMembershipProof(key)
-	}
-	if err != nil {
-		return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build proof for key %X: %s", key, err)
+		if err != nil {
+			return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build non-membership proof for key %X: %s", key, err)
+		}
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)

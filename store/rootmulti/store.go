@@ -277,6 +277,12 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 // rs.stores (baseapp's CheckTx state, for one) can still be calling Get on them
 // from another ABCI connection. Copy() bumps the source's copy-on-write version,
 // so the snapshot's trees are never mutated underneath those readers.
+//
+// The publish is not atomic across stores: a concurrent CheckTx reader can see
+// one mounted store already on the new version while another is still on the
+// old one. Consensus state is unaffected — block execution runs on this
+// goroutine, after the publish — and a torn view only costs CheckTx an
+// occasional stale read.
 func (rs *Store) publishQuerySnapshot() {
 	db := rs.db.Copy()
 	rs.querySnapshot.Store(&querySnapshot{
