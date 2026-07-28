@@ -549,8 +549,10 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
-// The snapshot-backed stores are read-only: nothing flushes their change sets,
-// so a caller's Write() is discarded rather than committed.
+// The snapshot-backed iavl stores are read-only: nothing flushes their change
+// sets, so a caller's Write() is discarded rather than committed. The transient
+// and mem stores come from rs.stores, though, so a Write() does reach those —
+// same as before this snapshot path existed.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {

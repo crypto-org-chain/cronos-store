@@ -1069,8 +1069,9 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// Close must be idempotent; wal is the only field here that would panic on
-	// a second Close.
+	// The historical-db cache and rootmulti's cache stores all hold this db as an
+	// io.Closer, so a second Close is reachable; wal is the only field here that
+	// would panic on one.
 	if db.wal != nil {
 		errs = append(errs, db.wal.Close())
 		db.wal = nil
