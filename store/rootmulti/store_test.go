@@ -715,10 +715,14 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		}
 	}()
 
+	// mimics baseapp's CheckTx state: branched off the live rs.stores once, then
+	// read from another connection while commits flush change sets into the trees.
+	checkState := store.CacheMultiStore()
+
 	readers := []func(){
-		// wraps the live rs.stores, not the querySnapshot, so only construction is
-		// safe to exercise here -- not a read through the concurrently-mutated tree.
-		func() { store.CacheMultiStore() },
+		func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
+		func() { checkState.GetKVStore(key).Get([]byte("k")) },
+		func() { store.GetKVStore(key).Get([]byte("k")) },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
 			if err == nil {

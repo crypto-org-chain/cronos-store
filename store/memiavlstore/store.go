@@ -27,9 +27,10 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
-	// SetTree runs from rootmulti.Store.Commit while a query may run concurrently
-	// on another ABCI connection; the atomic pointer only makes the swap itself
-	// race-free, not reads racing an ApplyChangeSet on the same tree's internals.
+	// SetTree runs from rootmulti.Store.publishQuerySnapshot while queries on this
+	// Store may run on another ABCI connection, so the swap has to be atomic. The
+	// tree it publishes is a Copy(), never the live tree rootmulti's flush mutates
+	// in place, so readers holding the old pointer stay on stable nodes.
 	tree   atomic.Pointer[memiavl.Tree]
 	logger log.Logger
 

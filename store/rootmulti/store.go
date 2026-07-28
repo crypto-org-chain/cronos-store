@@ -270,6 +270,14 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot publishes an immutable view of the committed state and
+// repoints the mounted iavl stores at it.
+//
+// The mounted stores must read the snapshot's trees, not rs.db's: rs.flush()
+// applies change sets to the live trees in place, while readers branched off
+// rs.stores (baseapp's CheckTx state, for one) can still be calling Get on them
+// from another ABCI connection. Copy() bumps the source's copy-on-write version,
+// so the snapshot's trees are never mutated underneath those readers.
 func (rs *Store) publishQuerySnapshot() {
 	db := rs.db.Copy()
 	rs.querySnapshot.Store(&querySnapshot{
@@ -277,6 +285,16 @@ func (rs *Store) publishQuerySnapshot() {
 		lastCommitInfo: rs.lastCommitInfo,
 		stores:         rs.wireListeners(rs.storesFromDB(db)),
 	})
+
+	for key, store := range rs.stores {
+		memiavlStore, ok := store.(*memiavlstore.Store)
+		if !ok {
+			continue
+		}
+		if tree := db.TreeByName(key.Name()); tree != nil {
+			memiavlStore.SetTree(tree)
+		}
+	}
 }
 
 func (rs *Store) latestDB() *memiavl.DB {
@@ -369,15 +387,8 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
-
 	rs.lastCommitInfo = rs.refreshLastCommitInfo(rs.db)
+	// also repoints the mounted stores' trees, which db.Commit may have reloaded.
 	rs.publishQuerySnapshot()
 	return rs.lastCommitInfo.CommitID()
 }
