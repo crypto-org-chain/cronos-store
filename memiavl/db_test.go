@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/wal"
 )
 
 const TestAppChainID = "test_chain"
@@ -798,6 +800,144 @@ func TestFastCommit(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestCommitFsyncsWALBeforeReturning(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFsyncsWALBeforeReturning(t, asyncCommit)
+		})
+	}
+}
+
+func asyncCommitBufferFor(asyncCommit bool) int {
+	if asyncCommit {
+		return 10
+	}
+	return -1
+}
+
+func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	original := db.walSync
+	var syncCalls atomic.Int32
+	db.walSync = func(w *wal.Log) error {
+		syncCalls.Add(1)
+		return original(w)
+	}
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+}
+
+func TestCommitFailsWhenWALSyncFails(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFailsWhenWALSyncFails(t, asyncCommit)
+		})
+	}
+}
+
+func testCommitFailsWhenWALSyncFails(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	syncErr := errors.New("simulated fsync failure")
+	db.walSync = func(*wal.Log) error {
+		return syncErr
+	}
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, syncErr)
+	require.Zero(t, v)
+
+	// Both paths must latch the error so Close still surfaces it: the async path
+	// from the writer's terminal walQuit signal, the sync path from Commit itself.
+	require.ErrorIs(t, db.Close(), syncErr)
+}
+
+// newDBWithDeadAsyncWALWriter kills the async wal writer by closing the wal out
+// from under it and driving one Commit through the resulting error.
+func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
+	t.Helper()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 10,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	// close the wal out from under the writer so its next write fails.
+	require.NoError(t, db.wal.Close())
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, wal.ErrClosed)
+	require.Zero(t, v)
+
+	return db
+}
+
+func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
+	dir := t.TempDir()
+	db := newDBWithDeadAsyncWALWriter(t, dir)
+
+	// release the writer (parked delivering its error on walQuit) and the file
+	// lock, without touching the now-closed wal.
+	<-db.walQuit
+	db.walChan = nil
+	db.walQuit = nil
+	db.wal = nil
+	require.NoError(t, db.fileLock.Unlock())
+	require.NoError(t, db.fileLock.Destroy())
+}
+
+func TestCommitAfterDeadAsyncWriterDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+	db := newDBWithDeadAsyncWALWriter(t, dir)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
+		}},
+	}))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := db.Commit()
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Commit call deadlocked waiting on a dead async wal writer")
+	}
+}
+
 func TestRepeatedApplyChangeSet(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{test1StoreName, test2StoreName}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
 	require.NoError(t, err)
@@ -900,10 +1040,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	t.Helper()
 	dir := t.TempDir()
 
-	asyncCommitBuffer := -1
-	if asyncCommit {
-		asyncCommitBuffer = 10
-	}
+	asyncCommitBuffer := asyncCommitBufferFor(asyncCommit)
 
 	db, err := Load(dir, Options{
 		CreateIfMissing:   true,

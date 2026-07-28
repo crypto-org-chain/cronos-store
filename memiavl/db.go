@@ -26,6 +26,9 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// method expression, not a call: `wal` is shadowed by a local variable at the assignment site.
+var defaultWalSync = (*wal.Log).Sync
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -46,6 +49,9 @@ type DB struct {
 	MultiTree
 
 	// previous MultiTree generation, retained for one reload cycle (see reloadMultiTree).
+	// Copy() shares its source's mmap, so this is only safe while reload happens
+	// at most once per Commit -- true today since the only reload path is the
+	// serialized, much slower background snapshot rewrite.
 	retiredMultiTree *MultiTree
 
 	dir      string
@@ -71,8 +77,12 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
-	// latched async wal writer error; once set, every Commit fails with it.
+	// once set, every Commit fails with it.
 	walErr error
+	// walSync fsyncs db.wal; overridable per-instance in tests. The wal opens
+	// with NoSync, so WriteBatch alone leaves entries only in the page cache --
+	// a crash could then lose one already acknowledged by Commit.
+	walSync func(*wal.Log) error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -262,6 +272,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
+		walSync:                defaultWalSync,
 	}
 	db.attachTraverseStateChanges()
 
@@ -479,7 +490,8 @@ func (db *DB) checkAsyncTasks() error {
 	)
 }
 
-// checkAsyncCommit check the quit signal of async wal writing
+// checkAsyncCommit returns any latched wal error, draining a pending
+// async-writer quit signal first.
 func (db *DB) checkAsyncCommit() error {
 	if db.walErr != nil {
 		return db.walErr
@@ -496,8 +508,17 @@ func (db *DB) checkAsyncCommit() error {
 // latchWalErr records a non-nil async wal writer error the first time it's seen
 // and returns the latched error. Callers hold db.mtx.
 func (db *DB) latchWalErr(err error) error {
+	if err == nil {
+		return db.walErr
+	}
+	return db.latchFatalErr(fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err))
+}
+
+// latchFatalErr records the first fatal wal error so later commits are rejected
+// rather than proceeding on a tree now desynced from the wal. Callers hold db.mtx.
+func (db *DB) latchFatalErr(err error) error {
 	if err != nil && db.walErr == nil {
-		db.walErr = fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+		db.walErr = err
 	}
 	return db.walErr
 }
@@ -532,20 +553,20 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 			return nil
 		}
 
-		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
-		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		for {
-			if err := db.checkAsyncCommit(); err != nil {
-				return errors.Join(err, result.mtree.Close())
-			}
-			committedVersion, err := db.CommittedVersion()
-			if err != nil {
-				return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
-			}
-			if db.lastCommitInfo.Version == committedVersion {
-				break
-			}
-			time.Sleep(time.Nanosecond)
+		// Commit waits for its own wal entry, so the wal is already caught up to
+		// lastCommitInfo.Version; a mismatch is a bug, not something to retry for.
+		if err := db.checkAsyncCommit(); err != nil {
+			return errors.Join(err, result.mtree.Close())
+		}
+		committedVersion, err := db.CommittedVersion()
+		if err != nil {
+			return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
+		}
+		if db.lastCommitInfo.Version != committedVersion {
+			return errors.Join(
+				fmt.Errorf("wal version %d does not match last commit version %d", committedVersion, db.lastCommitInfo.Version),
+				result.mtree.Close(),
+			)
 		}
 
 		// catchup the remaining wal
@@ -631,7 +652,11 @@ func (db *DB) pruneSnapshots() {
 	}()
 }
 
-// Commit wraps SaveVersion to bump the version and writes the pending changes into log files to persist on disk
+// Commit wraps SaveVersion to bump the version and writes the pending changes into log files to persist on disk.
+//
+// Any error returned is fatal: SaveVersion already advanced the in-memory tree
+// version, so a failed wal write leaves tree and wal disagreeing about the
+// latest version. Callers must crash rather than retry.
 func (db *DB) Commit() (int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -657,29 +682,33 @@ func (db *DB) Commit() (int64, error) {
 				db.initAsyncCommit()
 			}
 
-			// watch walQuit so a dead writer surfaces its error instead of
-			// blocking the send forever under db.mtx.
+			// entry.done carries the write outcome, so Commit can't return an app
+			// hash before its wal entry is synced. Also watch walQuit: a dead
+			// writer can never receive the entry nor signal done, so Commit would
+			// block forever instead of surfacing the writer's error.
+			done := make(chan error, 1)
+			entry.done = done
 			select {
 			case db.walChan <- &entry:
 			case err := <-db.walQuit:
-				if db.walErr = db.latchWalErr(err); db.walErr == nil {
-					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
+				if err == nil {
+					// closed without an exit reason, which shouldn't happen mid-Commit;
+					// force a non-nil error so this isn't reported as success.
+					err = errors.New("async wal writing goroutine quit unexpectedly")
 				}
-				return 0, db.walErr
+				return 0, db.latchWalErr(err)
+			}
+
+			// The writer accepted the entry, so done is guaranteed to fire (see
+			// notifyDone). This is the write's own error, not a writer crash, so
+			// skip latchWalErr's "goroutine quit" wrapping.
+			if err := <-done; err != nil {
+				return 0, db.latchFatalErr(err)
 			}
 		} else {
-			lastIndex, err := db.wal.LastIndex()
-			if err != nil {
-				return 0, err
-			}
-
 			db.wbatch.Clear()
-			if err := writeEntry(&db.wbatch, db.logger, lastIndex, &entry); err != nil {
-				return 0, err
-			}
-
-			if err := db.wal.WriteBatch(&db.wbatch); err != nil {
-				return 0, err
+			if err := db.writeAndSyncWAL(&db.wbatch, []*walEntry{&entry}); err != nil {
+				return 0, db.latchFatalErr(err)
 			}
 		}
 	}
@@ -713,21 +742,11 @@ func (db *DB) initAsyncCommit() {
 				break
 			}
 
-			lastIndex, err := db.wal.LastIndex()
-			if err != nil {
-				walQuit <- err
-				return
-			}
+			writeErr := db.writeAndSyncWAL(&batch, entries)
+			notifyDone(entries, writeErr)
 
-			for _, entry := range entries {
-				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					walQuit <- err
-					return
-				}
-			}
-
-			if err := db.wal.WriteBatch(&batch); err != nil {
-				walQuit <- err
+			if writeErr != nil {
+				walQuit <- writeErr
 				return
 			}
 			batch.Clear()
@@ -775,6 +794,8 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 	}
+	// avoids rescanning the snapshot dir on every EarliestVersion call.
+	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
 	cloned.attachTraverseStateChanges()
 	return cloned
 }
@@ -1354,6 +1375,19 @@ func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error
 type walEntry struct {
 	index uint64
 	data  WALEntry
+	// done, if non-nil, receives this entry's write outcome (see Commit).
+	done chan error
+}
+
+// notifyDone reports a batch write's outcome to every waiting entry. Entries
+// earlier in a failed batch may have reached the wal, but their outcome is
+// unknown, so they're reported as failed rather than assumed durable.
+func notifyDone(entries []*walEntry, err error) {
+	for _, entry := range entries {
+		if entry.done != nil {
+			entry.done <- err
+		}
+	}
 }
 
 func isSnapshotName(name string) bool {
@@ -1404,12 +1438,38 @@ func channelBatchRecv[T any](ch <-chan *T) []*T {
 	return result
 }
 
+func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
+	lastIndex, err := db.wal.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := writeEntry(batch, db.logger, lastIndex, entry); err != nil {
+			return err
+		}
+	}
+
+	if err := db.wal.WriteBatch(batch); err != nil {
+		return err
+	}
+	if err := db.walSync(db.wal); err != nil {
+		return err
+	}
+	// walSync only fsyncs the current segment file; a freshly cycled segment has
+	// no durable directory entry yet, so a crash could lose an entry whose app
+	// hash Commit already returned. Near-free when no metadata changed.
+	return fsyncDir(walPath(db.dir))
+}
+
 func writeEntry(batch *wal.Batch, logger Logger, lastIndex uint64, entry *walEntry) error {
 	bz, err := entry.data.Marshal()
 	if err != nil {
 		return err
 	}
 
+	// A version at or below lastIndex is already durable in the wal, so skipping
+	// it and reporting success is correct -- happens on replay after a restart.
 	if entry.index <= lastIndex {
 		logger.Error("commit old version idempotently", "lastIndex", lastIndex, "version", entry.index)
 	} else {
