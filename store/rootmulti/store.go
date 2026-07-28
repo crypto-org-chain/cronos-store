@@ -891,8 +891,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	}
 
 	// Rebuild rs.stores before swapping rs.db in: the old entries hold trees from
-	// the just-closed, unmapped db, and on failure rs.db must stay untouched
-	// rather than point at a db whose stores were never rebuilt.
+	// the just-closed, unmapped db.
 	keys := make([]types.StoreKey, 0, len(rs.storesParams))
 	for key := range rs.storesParams {
 		keys = append(keys, key)

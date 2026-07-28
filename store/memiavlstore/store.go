@@ -1,7 +1,6 @@
 package memiavlstore
 
 import (
-	"fmt"
 	"io"
 	"sync/atomic"
 
@@ -159,7 +158,10 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		}
 
 		// get proof from tree and convert to merkle.Proof before adding to result
-		res.ProofOps = getProofFromTree(tree, req.Data, res.Value != nil)
+		res.ProofOps, err = getProofFromTree(tree, req.Data, res.Value != nil)
+		if err != nil {
+			return nil, err
+		}
 	case "/subspace":
 		pairs := memiavl.Pairs{
 			Pairs: make([]memiavl.Pair, 0),
@@ -168,7 +170,9 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		subspace := req.Data
 		res.Key = subspace
 
-		iterator := types.KVStorePrefixIterator(st, subspace)
+		// iterate the tree loaded above, not st: a concurrent SetTree would
+		// otherwise return pairs from a newer version than res.Height reports.
+		iterator := tree.Iterator(subspace, types.PrefixEndBytes(subspace), true)
 		for ; iterator.Valid(); iterator.Next() {
 			pairs.Pairs = append(pairs.Pairs, memiavl.Pair{Key: iterator.Key(), Value: iterator.Value()})
 		}
@@ -194,31 +198,24 @@ func (st *Store) WorkingHash() []byte {
 	return st.tree.Load().RootHash()
 }
 
-// Takes a MutableTree, a key, and a flag for creating existence or absence proof and returns the
-// appropriate merkle.Proof. Since this must be called after querying for the value, this function should never error
-// Thus, it will panic on error rather than returning it
-func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) *cmtprotocrypto.ProofOps {
+// getProofFromTree builds the merkle proof for key, either an existence or an
+// absence proof depending on `exists`. An empty tree can produce neither, so the
+// error is returned to the querier instead of taking the node down.
+func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
 	)
 
 	if exists {
-		// value was found
 		commitmentProof, err = tree.GetMembershipProof(key)
-		if err != nil {
-			// sanity check: If value was found, membership proof must be creatable
-			panic(fmt.Sprintf("unexpected value for empty proof: %s", err.Error()))
-		}
 	} else {
-		// value wasn't found
 		commitmentProof, err = tree.GetNonMembershipProof(key)
-		if err != nil {
-			// sanity check: If value wasn't found, nonmembership proof must be creatable
-			panic(fmt.Sprintf("unexpected error for nonexistence proof: %s", err.Error()))
-		}
+	}
+	if err != nil {
+		return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build proof for key %X: %s", key, err)
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)
-	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}
+	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}, nil
 }
