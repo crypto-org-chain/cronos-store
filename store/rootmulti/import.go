@@ -20,6 +20,7 @@ func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
 	if rs.db != nil {
+		rs.dropQuerySnapshot()
 		if err := rs.db.Close(); err != nil {
 			return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
 		}

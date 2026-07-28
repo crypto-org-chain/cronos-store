@@ -1,5 +1,6 @@
 # Changelog
 
+- [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): replace query-path mutex with lock-free snapshot
 - [#86](https://github.com/crypto-org-chain/cronos-store/pull/86) fix(memiavl): close WAL after reading latest version in GetLatestVersion
 - [#82](https://github.com/crypto-org-chain/cronos-store/pull/82) fix(memiavl): close loaded MultiTree when CatchupWAL fails during snapshot rewrite
 - [#78](https://github.com/crypto-org-chain/cronos-store/pull/78) fix(store): return error for unknown store name in Query instead of panicking
