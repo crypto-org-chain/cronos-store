@@ -327,10 +327,15 @@ func (rs *Store) Commit() types.CommitID {
 }
 
 func (rs *Store) Close() error {
-	// Drop the snapshot first: it shares rs.db's mmap'd state, so closing rs.db
-	// first leaves a window where a reader loads a snapshot backed by unmapped memory.
-	rs.querySnapshot.Store(nil)
+	rs.dropQuerySnapshot()
 	return stderrors.Join(rs.db.Close(), rs.historicalDBCache.close())
+}
+
+// dropQuerySnapshot clears the published snapshot before rs.db is closed: it
+// shares rs.db's mmap'd state, so closing rs.db first leaves a window where a
+// reader loads a snapshot backed by unmapped memory.
+func (rs *Store) dropQuerySnapshot() {
+	rs.querySnapshot.Store(nil)
 }
 
 // LastCommitID Implements interface Committer
@@ -745,8 +750,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		if err := rs.db.Close(); err != nil {
 			return err
 		}
-		// Drop the stale snapshot.
-		rs.querySnapshot.Store(nil)
+		rs.dropQuerySnapshot()
 	}
 
 	opts := rs.opts
