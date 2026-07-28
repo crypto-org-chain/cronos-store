@@ -293,6 +293,7 @@ func (rs *Store) publishQuerySnapshot() {
 	for key, store := range rs.stores {
 		memiavlStore, ok := store.(*memiavlstore.Store)
 		if !ok {
+			// transient/mem stores aren't backed by a memiavl tree, nothing to republish.
 			continue
 		}
 		tree := db.TreeByName(key.Name())
