@@ -327,6 +327,9 @@ func (rs *Store) Commit() types.CommitID {
 }
 
 func (rs *Store) Close() error {
+	// Drop the snapshot first: it shares rs.db's mmap'd state, so closing rs.db
+	// first leaves a window where a reader loads a snapshot backed by unmapped memory.
+	rs.querySnapshot.Store(nil)
 	return stderrors.Join(rs.db.Close(), rs.historicalDBCache.close())
 }
 

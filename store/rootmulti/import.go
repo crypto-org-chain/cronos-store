@@ -20,6 +20,9 @@ func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
 	if rs.db != nil {
+		// Drop the snapshot first: it shares rs.db's mmap'd state, so closing rs.db
+		// first leaves a window where a reader loads a snapshot backed by unmapped memory.
+		rs.querySnapshot.Store(nil)
 		if err := rs.db.Close(); err != nil {
 			return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
 		}
