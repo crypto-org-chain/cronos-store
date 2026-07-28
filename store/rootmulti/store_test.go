@@ -583,13 +583,6 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 	require.ErrorContains(t, err, "invalid node structure")
 }
 
-// TestLatestHeightQueryRaceAgainstCommit drives Commit() on one goroutine
-// while CacheMultiStore, CacheMultiStoreWithVersion, Query (both with and
-// without Prove, exercising the proof-building path too), LatestVersion, and
-// EarliestVersion run concurrently at the latest height on others. Before
-// the lock-free query snapshot, these read paths dereferenced the live
-// rs.db/rs.stores that Commit mutates in place via flush()/SetTree, so this
-// test failed under -race.
 func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)

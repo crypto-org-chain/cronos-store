@@ -242,10 +242,6 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
-// publishQuerySnapshot must be called after rs.db and rs.lastCommitInfo are
-// updated, to publish that state for the lock-free query paths. The replaced
-// snapshot needs no explicit Close: readers hold it until they're done, then
-// GC reclaims it — closing it here would unmap memory a reader still needs.
 func (rs *Store) publishQuerySnapshot() {
 	rs.querySnapshot.Store(&querySnapshot{
 		db:             rs.db.Copy(),
@@ -253,7 +249,6 @@ func (rs *Store) publishQuerySnapshot() {
 	})
 }
 
-// latestDB falls back to rs.db before the first snapshot is published.
 func (rs *Store) latestDB() *memiavl.DB {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.db
@@ -393,10 +388,7 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
-// cacheMultiStoreFromDB builds a CacheMultiStore from db's iavl trees. Pass
-// closer=db for an independently-owned db (closed with the returned store),
-// or nil for a published query snapshot, which shares mmap state with rs.db
-// and must never be closed on its own.
+// cacheMultiStoreFromDB builds a CacheMultiStore from db's iavl trees.
 func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
@@ -423,8 +415,6 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
-// version == 0 means the latest committed snapshot, not the live working
-// state: once a snapshot has been published, it's read instead of rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	if snap := rs.querySnapshot.Load(); version == 0 || (snap != nil && version == snap.lastCommitInfo.Version) {
 		if snap != nil {
@@ -432,7 +422,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		}
 		return rs.CacheMultiStore(), nil
 	}
-	// guard int64 → uint32 cast.
+
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
@@ -752,8 +742,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		if err := rs.db.Close(); err != nil {
 			return err
 		}
-		// Drop the stale snapshot: its db shares the mmap'd data just closed,
-		// so a reader loading it after a failed reload would hit a closed file.
+		// Drop the stale snapshot.
 		rs.querySnapshot.Store(nil)
 	}
 
@@ -832,16 +821,13 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	version := req.Height
 	if version == 0 {
-		// Resolve against the same snap checked below, not a fresh load: a
-		// Commit racing between the two could advance past snap and miss
-		// the fast path below for what is actually the latest height.
 		if snap != nil {
 			version = snap.lastCommitInfo.Version
 		} else {
 			version = rs.db.Version()
 		}
 	}
-	// guard int64 → uint32 cast.
+
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
