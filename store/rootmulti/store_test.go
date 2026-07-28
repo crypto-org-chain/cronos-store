@@ -458,7 +458,7 @@ func TestRollbackToVersionRebuildsStores(t *testing.T) {
 	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
+func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
 	key := types.NewKVStoreKey(testStoreName)
@@ -467,15 +467,19 @@ func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
 	t.Cleanup(func() { rs.Close() })
 	rs.AddListeners([]types.StoreKey{key})
 
-	rs.Commit() // publishes the querySnapshot whose cached stores map this test targets.
+	rs.Commit() // publishes the querySnapshot this test queries against.
 
 	cms, err := rs.CacheMultiStoreWithVersion(0)
 	require.NoError(t, err)
 	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
 	cms.Write()
 
-	require.NotEmpty(t, rs.listeners[key].PopStateCache(),
-		"CacheMultiStoreWithVersion(0) must wire listenkv for listening-enabled stores")
+	// Nothing flushes a snapshot-backed store's change set, so the write is
+	// dropped; it must not reach the listener stream either, or the next block
+	// would emit a state change that was never committed.
+	require.Empty(t, rs.listeners[key].PopStateCache())
+	rs.Commit()
+	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
 }
 
 func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {

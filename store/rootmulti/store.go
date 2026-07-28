@@ -216,7 +216,6 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
-	stores         map[types.StoreKey]types.CacheWrapper
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -283,7 +282,6 @@ func (rs *Store) publishQuerySnapshot() {
 	rs.querySnapshot.Store(&querySnapshot{
 		db:             db,
 		lastCommitInfo: rs.lastCommitInfo,
-		stores:         rs.wireListeners(rs.storesFromDB(db)),
 	})
 
 	for key, store := range rs.stores {
@@ -291,9 +289,11 @@ func (rs *Store) publishQuerySnapshot() {
 		if !ok {
 			continue
 		}
-		if tree := db.TreeByName(key.Name()); tree != nil {
-			memiavlStore.SetTree(tree)
+		tree := db.TreeByName(key.Name())
+		if tree == nil {
+			panic(fmt.Sprintf("no memiavl tree for mounted store: %s", key.Name()))
 		}
+		memiavlStore.SetTree(tree)
 	}
 }
 
@@ -539,18 +539,19 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 	return cachemulti.NewStore(rs.storesFromDB(db), nil, nil, closer)
 }
 
-// CacheMultiStoreWithVersion Implements interface MultiStore.
+// CacheMultiStoreWithVersion Implements interface MultiStore
+// used to createQueryContext, abci_query or grpc query service.
+//
 // version == 0 means the latest committed snapshot, not the live working state.
+// The snapshot-backed stores are read-only: nothing flushes their change sets,
+// so a caller's Write() is discarded rather than committed.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		// snap.stores is already wireListeners-wrapped from publishQuerySnapshot,
-		// so use it directly instead of rebuilding (and dropping listener wiring)
-		// via cacheMultiStoreFromDB.
-		return cachemulti.NewStore(snap.stores, nil, nil, nil), nil
+		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
 	}
 
 	if version < 0 || version > math.MaxUint32 {
