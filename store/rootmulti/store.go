@@ -298,8 +298,6 @@ func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	return rs.lastCommitInfo
 }
 
-// refreshLastCommitInfo derives commit info from db, amending it for
-// cosmos-sdk 0.46 hash-compatibility if configured.
 func (rs *Store) refreshLastCommitInfo(db *memiavl.DB) *types.CommitInfo {
 	info := convertCommitInfo(db.LastCommitInfo())
 	if rs.sdk46Compact {
@@ -308,9 +306,8 @@ func (rs *Store) refreshLastCommitInfo(db *memiavl.DB) *types.CommitInfo {
 	return info
 }
 
-// rebuildStores loads a CommitStore for every key in keys, which must be
-// pre-sorted for deterministic iteration order. Returns on the first error,
-// leaving rs.stores untouched for the caller to decide.
+// rebuildStores loads a CommitStore for every key in keys; keys must be
+// pre-sorted for deterministic iteration order.
 func (rs *Store) rebuildStores(db *memiavl.DB, keys []types.StoreKey) (map[types.StoreKey]types.CommitStore, error) {
 	newStores := make(map[types.StoreKey]types.CommitStore, len(keys))
 	for _, key := range keys {
