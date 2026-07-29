@@ -26,7 +26,6 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
-// method expression, not a call: `wal` is shadowed by a local variable at the assignment site.
 var defaultWalSync = (*wal.Log).Sync
 
 // DB implements DB-like functionalities on top of MultiTree:
@@ -49,9 +48,6 @@ type DB struct {
 	MultiTree
 
 	// previous MultiTree generation, retained for one reload cycle (see reloadMultiTree).
-	// Copy() shares its source's mmap, so this is only safe while reload happens
-	// at most once per Commit -- true today since the only reload path is the
-	// serialized, much slower background snapshot rewrite.
 	retiredMultiTree *MultiTree
 
 	dir      string
@@ -79,9 +75,7 @@ type DB struct {
 	walQuit     chan error
 	// once set, every Commit fails with it.
 	walErr error
-	// walSync fsyncs db.wal; overridable per-instance in tests. The wal opens
-	// with NoSync, so WriteBatch alone leaves entries only in the page cache --
-	// a crash could then lose one already acknowledged by Commit.
+	// walSync fsyncs db.wal; overridable per-instance in tests.
 	walSync func(*wal.Log) error
 
 	// pending changes, will be written into WAL in next Commit call

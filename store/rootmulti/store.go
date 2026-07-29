@@ -216,9 +216,7 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
-	// built once per publish, so the latest-height path doesn't rebuild a
-	// memiavlstore.Store (and rewire listeners) per query.
-	stores map[types.StoreKey]types.CacheWrapper
+	stores         map[types.StoreKey]types.CacheWrapper
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -288,9 +286,6 @@ func (rs *Store) latestDB() *memiavl.DB {
 	return rs.db
 }
 
-// latestCommitInfo keeps callers that run concurrently with Commit (e.g.
-// LastCommitID, served on the ABCI Info connection) off the unsynchronized
-// rs.lastCommitInfo field.
 func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.lastCommitInfo
@@ -493,8 +488,7 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 }
 
 // wireListeners wraps listening-enabled stores in a listenkv.Store so listeners
-// observe writes made through the cache store; the listeners already set on the
-// underlying store would otherwise observe them twice.
+// observe writes made through the cache store.
 func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map[types.StoreKey]types.CacheWrapper {
 	for k, store := range stores {
 		if kv, ok := store.(types.KVStore); ok && rs.ListeningEnabled(k) {
