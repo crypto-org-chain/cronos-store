@@ -897,7 +897,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 			return
 		}
 		cloned.logger.Info("finished rewriting snapshot", "version", cloned.Version())
-		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, 0, cloned.chainId)
+		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, cloned.cacheSize, cloned.chainId)
 		if err != nil {
 			ch <- snapshotResult{err: err}
 			return

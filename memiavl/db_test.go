@@ -159,6 +159,40 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 	require.Equal(t, 4, len(entries))
 }
 
+func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
+	const cacheSize = 100
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotKeepRecent: 0,
+		CacheSize:          cacheSize,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	cs := []*NamedChangeSet{
+		{
+			Name:      testStoreName,
+			Changeset: ChangeSets[0],
+		},
+	}
+	require.NoError(t, db.ApplyChangeSets(cs))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	require.NoError(t, db.RewriteSnapshotBackground())
+	for db.snapshotRewriteChan != nil {
+		require.NoError(t, db.checkAsyncTasks())
+	}
+
+	// checkAsyncTasks above already joined the background rewrite goroutine,
+	// so no concurrent writer remains and db.mtx isn't needed here.
+	require.Equal(t, cacheSize, db.cacheSize)
+	for _, entry := range db.trees {
+		require.NotNil(t, entry.cache, "tree %q lost its cache after background snapshot rewrite", entry.Name)
+	}
+}
+
 func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
