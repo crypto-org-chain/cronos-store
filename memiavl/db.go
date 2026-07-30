@@ -944,7 +944,7 @@ func (db *DB) rewriteIfApplicable(height int64) {
 	// would write a snapshot and replay the rest of the wal into a second tree,
 	// only to be discarded for overshooting the committed version — repeated once
 	// per interval for the whole replay. Wait for the replay to finish.
-	committedVersion, err := db.CommittedVersion()
+	committedVersion, err := db.committedVersion()
 	if err != nil {
 		db.logger.Error("failed to read wal version", "err", err)
 		return
