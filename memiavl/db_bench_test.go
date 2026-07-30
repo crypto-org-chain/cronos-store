@@ -5,6 +5,47 @@ import (
 	"testing"
 )
 
+func BenchmarkCommit(b *testing.B) {
+	for _, asyncCommit := range []bool{false, true} {
+		b.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(b *testing.B) {
+			benchmarkCommit(b, asyncCommit)
+		})
+	}
+}
+
+func benchmarkCommit(b *testing.B, asyncCommit bool) {
+	b.Helper()
+
+	db, err := Load(b.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{"store"},
+		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+	}, "bench_chain")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}()
+
+	cs := []*NamedChangeSet{{
+		Name:      "store",
+		Changeset: ChangeSet{Pairs: []*KVPair{{Key: []byte("key"), Value: []byte("value")}}},
+	}}
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		if err := db.ApplyChangeSets(cs); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := db.Commit(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkApplyChangeSet100(b *testing.B) {
 	benchmarkApplyChangeSet(b, 100)
 }

@@ -210,12 +210,13 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 	return db, nil
 }
 
-// querySnapshot is an immutable copy-on-write view of committed state, read
-// by latest-height query paths instead of the live rs.db/rs.stores to avoid
-// racing Commit's in-place mutation.
+// querySnapshot is an immutable copy-on-write view of committed state, read by
+// latest-height query paths instead of the live rs.db/rs.stores that Commit
+// mutates in place.
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
+	stores         map[types.StoreKey]types.CacheWrapper
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -270,9 +271,11 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 }
 
 func (rs *Store) publishQuerySnapshot() {
+	db := rs.db.Copy()
 	rs.querySnapshot.Store(&querySnapshot{
-		db:             rs.db.Copy(),
+		db:             db,
 		lastCommitInfo: rs.lastCommitInfo,
+		stores:         rs.wireListeners(rs.storesFromDB(db)),
 	})
 }
 
@@ -281,6 +284,35 @@ func (rs *Store) latestDB() *memiavl.DB {
 		return snap.db
 	}
 	return rs.db
+}
+
+func (rs *Store) latestCommitInfo() *types.CommitInfo {
+	if snap := rs.querySnapshot.Load(); snap != nil {
+		return snap.lastCommitInfo
+	}
+	return rs.lastCommitInfo
+}
+
+func (rs *Store) refreshLastCommitInfo(db *memiavl.DB) *types.CommitInfo {
+	info := convertCommitInfo(db.LastCommitInfo())
+	if rs.sdk46Compact {
+		info = amendCommitInfo(info, rs.storesParams)
+	}
+	return info
+}
+
+// rebuildStores loads a CommitStore for every key in keys; keys must be
+// pre-sorted for deterministic iteration order.
+func (rs *Store) rebuildStores(db *memiavl.DB, keys []types.StoreKey) (map[types.StoreKey]types.CommitStore, error) {
+	newStores := make(map[types.StoreKey]types.CommitStore, len(keys))
+	for _, key := range keys {
+		store, err := rs.loadCommitStoreFromParams(db, key, rs.storesParams[key])
+		if err != nil {
+			return nil, err
+		}
+		newStores[key] = store
+	}
+	return newStores, nil
 }
 
 // flush writes all the pending change sets to memiavl tree.
@@ -345,10 +377,7 @@ func (rs *Store) Commit() types.CommitID {
 		}
 	}
 
-	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
-	if rs.sdk46Compact {
-		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-	}
+	rs.lastCommitInfo = rs.refreshLastCommitInfo(rs.db)
 	rs.publishQuerySnapshot()
 	return rs.lastCommitInfo.CommitID()
 }
@@ -406,7 +435,8 @@ func (rs *Store) closeDBForReload() {
 // reload - the version is read back from disk and the returned CommitID carries no
 // hash. Reporting version 0 instead would tell CometBFT to replay from genesis.
 func (rs *Store) LastCommitID() types.CommitID {
-	if rs.lastCommitInfo == nil {
+	lastCommitInfo := rs.latestCommitInfo()
+	if lastCommitInfo == nil {
 		v, err := memiavl.GetLatestVersion(rs.dir)
 		if err != nil {
 			panic(fmt.Errorf("failed to get latest version: %w", err))
@@ -414,7 +444,7 @@ func (rs *Store) LastCommitID() types.CommitID {
 		return types.CommitID{Version: v}
 	}
 
-	return rs.lastCommitInfo.CommitID()
+	return lastCommitInfo.CommitID()
 }
 
 // SetPruning Implements interface Committer
@@ -445,25 +475,30 @@ func (rs *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap 
 	return rs.CacheWrap()
 }
 
-// CacheMultiStore Implements interface MultiStore
+// CacheMultiStore Implements interface MultiStore.
+//
+// Must wrap the live rs.stores, not a querySnapshot: writes flow back through
+// cachemulti's Write(), which a snapshot-backed store would silently discard.
 func (rs *Store) CacheMultiStore() types.CacheMultiStore {
-	stores := make(map[types.StoreKey]types.CacheWrapper)
+	stores := make(map[types.StoreKey]types.CacheWrapper, len(rs.stores))
 	for k, v := range rs.stores {
-		store := types.CacheWrapper(v)
-		if kv, ok := store.(types.KVStore); ok {
-			// Wire the listenkv.Store to allow listeners to observe the writes from the cache store,
-			// set same listeners on cache store will observe duplicated writes.
-			if rs.ListeningEnabled(k) {
-				store = listenkv.NewStore(kv, k, rs.listeners[k])
-			}
-		}
-		stores[k] = store
+		stores[k] = v
 	}
-	return cachemulti.NewStore(stores, nil, nil, nil)
+	return cachemulti.NewStore(rs.wireListeners(stores), nil, nil, nil)
 }
 
-// cacheMultiStoreFromDB builds a CacheMultiStore from db's iavl trees.
-func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
+// wireListeners wraps listening-enabled stores in a listenkv.Store so listeners
+// observe writes made through the cache store.
+func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map[types.StoreKey]types.CacheWrapper {
+	for k, store := range stores {
+		if kv, ok := store.(types.KVStore); ok && rs.ListeningEnabled(k) {
+			stores[k] = listenkv.NewStore(kv, k, rs.listeners[k])
+		}
+	}
+	return stores
+}
+
+func (rs *Store) storesFromDB(db *memiavl.DB) map[types.StoreKey]types.CacheWrapper {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
 	// add the transient/mem stores registered in current app.
@@ -473,9 +508,8 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 		}
 	}
 
-	// add all the iavl stores from db. A historical snapshot may contain trees
-	// for stores later deleted/renamed by a StoreUpgrade; skip those since
-	// there's no current StoreKey to expose them under.
+	// A historical snapshot may hold trees for stores a later StoreUpgrade
+	// deleted or renamed; skip those, there's no current StoreKey for them.
 	for _, tree := range db.Trees() {
 		key, ok := rs.keysByName[tree.Name]
 		if !ok {
@@ -484,26 +518,35 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 		stores[key] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
-	return cachemulti.NewStore(stores, nil, nil, closer)
+	return stores
 }
 
-// CacheMultiStoreWithVersion Implements interface MultiStore
-// used to createQueryContext, abci_query or grpc query service.
+// cacheMultiStoreFromDB builds a CacheMultiStore from db's iavl trees. Pass
+// closer=db for an independently-owned db, or nil for a query snapshot, which
+// shares mmap state with rs.db and must never be closed on its own.
+func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
+	return cachemulti.NewStore(rs.storesFromDB(db), nil, nil, closer)
+}
+
+// CacheMultiStoreWithVersion Implements interface MultiStore.
+// version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
+		// snap.stores is already wireListeners-wrapped from publishQuerySnapshot,
+		// so use it directly instead of rebuilding (and dropping listener wiring)
+		// via cacheMultiStoreFromDB.
+		return cachemulti.NewStore(snap.stores, nil, nil, nil), nil
 	}
 
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
-	// historicalDBCache isn't used here: the returned store's lifetime is owned
-	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
-	// not scoped to this call, so the cache's borrow/release model doesn't fit.
+	// historicalDBCache isn't used here: the caller owns the returned store's
+	// lifetime (closed via the closer arg), so the cache's borrow/release model doesn't fit.
 	db, err := loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 	if err != nil {
 		return nil, err
@@ -547,14 +590,23 @@ func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
 
 // LatestVersion Implements interface MultiStore
 func (rs *Store) LatestVersion() int64 {
-	return rs.latestDB().Version()
+	db := rs.latestDB()
+	if db == nil {
+		// Restore closed the db and LoadLatestVersion hasn't run yet.
+		return 0
+	}
+	return db.Version()
 }
 
 // EarliestVersion Implements interface CommitMultiStore
 func (rs *Store) EarliestVersion() int64 {
+	db := rs.latestDB()
+	if db == nil {
+		return 0
+	}
 	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
 	// earliest queryable version is the version of that snapshot.
-	v, err := rs.latestDB().EarliestVersion()
+	v, err := db.EarliestVersion()
 	if err != nil {
 		rs.logger.Error("failed to get earliest version", "err", err)
 		return 0
@@ -681,12 +733,9 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
-	newStores := make(map[types.StoreKey]types.CommitStore, len(storesKeys))
-	for _, key := range storesKeys {
-		newStores[key], err = rs.loadCommitStoreFromParams(db, key, rs.storesParams[key])
-		if err != nil {
-			return err
-		}
+	newStores, err := rs.rebuildStores(db, storesKeys)
+	if err != nil {
+		return err
 	}
 
 	rs.db = db
@@ -694,10 +743,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	rs.stores = newStores
 	// to keep the root hash compatible with cosmos-sdk 0.46
 	if db.Version() != 0 {
-		rs.lastCommitInfo = convertCommitInfo(db.LastCommitInfo())
-		if rs.sdk46Compact {
-			rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-		}
+		rs.lastCommitInfo = rs.refreshLastCommitInfo(db)
 	} else {
 		rs.lastCommitInfo = &types.CommitInfo{}
 	}
@@ -778,7 +824,12 @@ func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 // SetInitialVersion Implements interface CommitMultiStore
 // used by InitChain when the initial height is bigger than 1
 func (rs *Store) SetInitialVersion(version int64) error {
-	return rs.db.SetInitialVersion(version)
+	if err := rs.db.SetInitialVersion(version); err != nil {
+		return err
+	}
+	// keep the published snapshot from going stale against the mutated rs.db.
+	rs.publishQuerySnapshot()
+	return nil
 }
 
 // SetIAVLCacheSize Implements interface CommitMultiStore
@@ -805,8 +856,8 @@ func (rs *Store) SetMemIAVLOptions(opts memiavl.Options) {
 }
 
 // RollbackToVersion delete the versions after `target` and update the latest version.
-// it should only be called in standalone cli commands: it closes rs.db
-// outright, invalidating any querySnapshot published before this call.
+// it should only be called in standalone cli commands: it closes rs.db outright,
+// invalidating any querySnapshot published before this call.
 func (rs *Store) RollbackToVersion(target int64) error {
 	if target <= 0 {
 		return fmt.Errorf("invalid rollback height target: %d", target)
@@ -822,17 +873,31 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	opts.TargetVersion = uint32(target)
 	opts.LoadForOverwriting = true
 
-	var err error
-	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
+	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return err
 	}
-	// keep lastCommitInfo in sync with the reloaded db, so the snapshot's
-	// version checks don't compare against the pre-rollback version.
-	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
-	if rs.sdk46Compact {
-		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
+
+	// Rebuild rs.stores before swapping rs.db in: the old entries hold trees from
+	// the just-closed, unmapped db, and on failure rs.db must stay untouched
+	// rather than point at a db whose stores were never rebuilt.
+	keys := make([]types.StoreKey, 0, len(rs.storesParams))
+	for key := range rs.storesParams {
+		keys = append(keys, key)
 	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Name() < keys[j].Name() })
+
+	newStores, err := rs.rebuildStores(db, keys)
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	rs.db = db
+	rs.stores = newStores
+
+	// resync lastCommitInfo, so the snapshot's version checks don't compare
+	// against the pre-rollback version.
+	rs.lastCommitInfo = rs.refreshLastCommitInfo(rs.db)
 	rs.publishQuerySnapshot()
 
 	return nil
@@ -893,19 +958,22 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	version := req.Height
 	if version == 0 {
+		db := rs.db
 		if snap != nil {
-			version = snap.lastCommitInfo.Version
-		} else {
-			version = rs.db.Version()
+			db = snap.db
 		}
+		if db == nil {
+			return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+		}
+		version = db.Version()
 	}
 
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 
-	// At the latest height, read the published snapshot instead of the live
-	// rs.db, which Commit mutates in place. Otherwise load from disk.
+	// At the latest height, read the snapshot instead of the live rs.db that
+	// Commit mutates in place. Otherwise load from disk.
 	var db *memiavl.DB
 	var borrowedEntry *historicalDBEntry
 	if snap != nil && version == snap.lastCommitInfo.Version {
@@ -956,9 +1024,13 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "proof is unexpectedly empty; ensure height has not been pruned")
 	}
 
-	commitInfo := convertCommitInfo(db.LastCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
+	// reuse the snapshot's commit info instead of paying refreshLastCommitInfo's
+	// per-store conversion on every proved query.
+	var commitInfo *types.CommitInfo
+	if snap != nil && db == snap.db {
+		commitInfo = snap.lastCommitInfo
+	} else {
+		commitInfo = rs.refreshLastCommitInfo(db)
 	}
 
 	// Restore origin path and append proof op.

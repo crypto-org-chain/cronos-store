@@ -26,6 +26,11 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// errWALAhead signals that the wal is still ahead of the committed tree, an
+// expected condition while replaying after a restart at a lower target
+// version rather than an actual failure.
+var errWALAhead = errors.New("wal is ahead of the committed tree")
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -71,8 +76,10 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
-	// latched async wal writer error; once set, every Commit fails with it.
+	// once set, every Commit fails with it.
 	walErr error
+	// walSync fsyncs db.wal; overridable per-instance in tests.
+	walSync func(*wal.Log) error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -88,6 +95,9 @@ type DB struct {
 	mtx sync.Mutex
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
+	// ownsWriterPool is set only on DBs created by Load, which must stop the pool
+	// on Close; copies share the pool and must leave it running.
+	ownsWriterPool bool
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
@@ -96,6 +106,10 @@ type DB struct {
 
 	// reusable write batch
 	wbatch wal.Batch
+
+	// Test-only hook, nil in production: exposes the post-rewrite multitree, which
+	// is otherwise local to the rewrite goroutine, before its WAL catchup runs.
+	onCatchupMTreeLoaded func(*MultiTree)
 }
 
 type Options struct {
@@ -156,7 +170,7 @@ const (
 	SnapshotDirLen = len(SnapshotPrefix) + 20
 )
 
-func Load(dir string, opts Options, chainId string) (*DB, error) {
+func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	if err := opts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid options: %w", err)
 	}
@@ -171,7 +185,27 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	var (
 		err      error
 		fileLock FileLock
+		mtree    *MultiTree
+		walLog   *wal.Log
 	)
+	// The lock file, the trees' mmaps and the wal's fds transfer to the returned DB
+	// only once it's constructed; until then a bare `return nil, err` would hold all
+	// three for the process's lifetime, so a retried Load could never re-lock the dir.
+	ownershipMoved := false
+	defer func() {
+		if ownershipMoved {
+			return
+		}
+		if mtree != nil {
+			retErr = errors.Join(retErr, mtree.Close())
+		}
+		if walLog != nil {
+			retErr = errors.Join(retErr, walLog.Close())
+		}
+		if fileLock != nil {
+			retErr = errors.Join(retErr, fileLock.Unlock(), fileLock.Destroy())
+		}
+	}()
 	if !opts.ReadOnly {
 		fileLock, err = LockFile(filepath.Join(dir, LockFileName))
 		if err != nil {
@@ -195,19 +229,19 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	path := filepath.Join(dir, snapshot)
-	mtree, err := LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
 	if err != nil {
 		return nil, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	walLog, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
 	if err != nil {
 		return nil, err
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.CatchupWAL(wal, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wal.Close())
+		if err := mtree.CatchupWAL(walLog, int64(opts.TargetVersion)); err != nil {
+			return nil, err
 		}
 	}
 
@@ -227,7 +261,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 
 		// truncate the WAL
 		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := wal.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
+		if err := walLog.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
 			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 
@@ -256,13 +290,16 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wal,
+		wal:                    walLog,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
+		ownsWriterPool:         true,
+		walSync:                (*wal.Log).Sync,
 	}
+	ownershipMoved = true
 	db.attachTraverseStateChanges()
 
 	if !db.readOnly && db.Version() == 0 && len(opts.InitialStores) > 0 {
@@ -479,7 +516,8 @@ func (db *DB) checkAsyncTasks() error {
 	)
 }
 
-// checkAsyncCommit check the quit signal of async wal writing
+// checkAsyncCommit returns any latched wal error, draining a pending
+// async-writer quit signal first.
 func (db *DB) checkAsyncCommit() error {
 	if db.walErr != nil {
 		return db.walErr
@@ -496,14 +534,34 @@ func (db *DB) checkAsyncCommit() error {
 // latchWalErr records a non-nil async wal writer error the first time it's seen
 // and returns the latched error. Callers hold db.mtx.
 func (db *DB) latchWalErr(err error) error {
+	if err == nil {
+		return db.walErr
+	}
+	return db.latchFatalErr(fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err))
+}
+
+// latchFatalErr records the first fatal wal error so later commits are rejected
+// rather than proceeding on a tree now desynced from the wal. Callers hold db.mtx.
+func (db *DB) latchFatalErr(err error) error {
 	if err != nil && db.walErr == nil {
-		db.walErr = fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+		db.walErr = err
 	}
 	return db.walErr
 }
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
 func (db *DB) CommittedVersion() (int64, error) {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	return db.committedVersion()
+}
+
+// committedVersion is CommittedVersion without the lock. Callers hold db.mtx.
+func (db *DB) committedVersion() (int64, error) {
+	if db.wal == nil {
+		return 0, fmt.Errorf("wal is not initialized")
+	}
 	lastIndex, err := db.wal.LastIndex()
 	if err != nil {
 		return 0, err
@@ -532,42 +590,72 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 			return nil
 		}
 
-		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
-		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		for {
-			if err := db.checkAsyncCommit(); err != nil {
-				return errors.Join(err, result.mtree.Close())
-			}
-			committedVersion, err := db.CommittedVersion()
-			if err != nil {
-				return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
-			}
-			if db.lastCommitInfo.Version == committedVersion {
-				break
-			}
-			time.Sleep(time.Nanosecond)
-		}
-
-		// catchup the remaining wal
-		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
-			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
-		}
-
-		// do the switch
-		if err := db.reloadMultiTree(result.mtree); err != nil {
-			return fmt.Errorf("switch multitree failed: %w", err)
-		}
-		db.logger.Info("switched to new snapshot", "version", db.MultiTree.Version())
-
-		db.pruneSnapshots()
-
-		// trigger state-sync snapshot export
-		if db.triggerStateSyncExport != nil {
-			db.triggerStateSyncExport(db.SnapshotVersion())
-		}
+		return db.adoptSnapshotRewrite(result.mtree)
 	default:
 	}
 
+	return nil
+}
+
+// adoptSnapshotRewrite installs a completed background snapshot rewrite, catching
+// it up to the last committed version first. It takes ownership of mtree: every
+// exit that doesn't reach reloadMultiTree releases the rewritten tree's mmap'd
+// snapshot, and reloadMultiTree takes over that responsibility once reached.
+func (db *DB) adoptSnapshotRewrite(mtree *MultiTree) (err error) {
+	reloadCalled := false
+	defer func() {
+		if !reloadCalled {
+			err = errors.Join(err, mtree.Close())
+		}
+	}()
+
+	// Commit waits for its own wal entry, so the wal can only be at or ahead of
+	// lastCommitInfo.Version by now; falling behind would be a bug.
+	if err := db.checkAsyncCommit(); err != nil {
+		return err
+	}
+	committedVersion, cerr := db.committedVersion()
+	if cerr != nil {
+		return fmt.Errorf("get wal version failed: %w", cerr)
+	}
+	if committedVersion < db.lastCommitInfo.Version {
+		return fmt.Errorf("wal version %d is behind last commit version %d", committedVersion, db.lastCommitInfo.Version)
+	}
+
+	// rewriteSnapshotBackground refuses to start while the wal is ahead of the
+	// tree, and a new commit advances the wal and lastCommitInfo together
+	// under db.mtx, so this branch should be unreachable in normal operation.
+	// It's a pure backstop against an overshoot that can't be rolled back:
+	// discard it rather than catch up (CatchupWAL would target a pruned index
+	// and error).
+	if mtree.Version() > db.lastCommitInfo.Version {
+		db.logger.Info("discarding snapshot rewrite ahead of committed version",
+			"rewrite", mtree.Version(), "committed", db.lastCommitInfo.Version)
+		return nil
+	}
+
+	if mtree.Version() < db.lastCommitInfo.Version {
+		if err := mtree.CatchupWAL(db.wal, db.lastCommitInfo.Version); err != nil {
+			return fmt.Errorf("final catchup failed: %w", err)
+		}
+	}
+	if mtree.Version() != db.lastCommitInfo.Version {
+		return fmt.Errorf("catchup landed on version %d, want %d", mtree.Version(), db.lastCommitInfo.Version)
+	}
+
+	// do the switch
+	reloadCalled = true
+	if err := db.reloadMultiTree(mtree); err != nil {
+		return fmt.Errorf("switch multitree failed: %w", err)
+	}
+	db.logger.Info("switched to new snapshot", "version", db.MultiTree.Version())
+
+	db.pruneSnapshots()
+
+	// trigger state-sync snapshot export
+	if db.triggerStateSyncExport != nil {
+		db.triggerStateSyncExport(db.SnapshotVersion())
+	}
 	return nil
 }
 
@@ -631,7 +719,11 @@ func (db *DB) pruneSnapshots() {
 	}()
 }
 
-// Commit wraps SaveVersion to bump the version and writes the pending changes into log files to persist on disk
+// Commit wraps SaveVersion to bump the version and writes the pending changes into log files to persist on disk.
+//
+// Any error returned is fatal: SaveVersion already advanced the in-memory tree
+// version, so a failed wal write leaves tree and wal disagreeing about the
+// latest version. Callers must crash rather than retry.
 func (db *DB) Commit() (int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -657,29 +749,33 @@ func (db *DB) Commit() (int64, error) {
 				db.initAsyncCommit()
 			}
 
-			// watch walQuit so a dead writer surfaces its error instead of
-			// blocking the send forever under db.mtx.
+			// entry.done carries the write outcome, so Commit can't return an app
+			// hash before its wal entry is synced. Also watch walQuit: a dead
+			// writer can never receive the entry nor signal done, so Commit would
+			// block forever instead of surfacing the writer's error.
+			done := make(chan error, 1)
+			entry.done = done
 			select {
 			case db.walChan <- &entry:
 			case err := <-db.walQuit:
-				if db.walErr = db.latchWalErr(err); db.walErr == nil {
-					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
+				if err == nil {
+					// closed without an exit reason, which shouldn't happen mid-Commit;
+					// force a non-nil error so this isn't reported as success.
+					err = errors.New("async wal writing goroutine quit unexpectedly")
 				}
-				return 0, db.walErr
+				return 0, db.latchWalErr(err)
+			}
+
+			// The writer accepted the entry, so done is guaranteed to fire (see
+			// notifyDone). This is the write's own error, not a writer crash, so
+			// skip latchWalErr's "goroutine quit" wrapping.
+			if err := <-done; err != nil {
+				return 0, db.latchFatalErr(err)
 			}
 		} else {
-			lastIndex, err := db.wal.LastIndex()
-			if err != nil {
-				return 0, err
-			}
-
 			db.wbatch.Clear()
-			if err := writeEntry(&db.wbatch, db.logger, lastIndex, &entry); err != nil {
-				return 0, err
-			}
-
-			if err := db.wal.WriteBatch(&db.wbatch); err != nil {
-				return 0, err
+			if err := db.writeAndSyncWAL(&db.wbatch, []*walEntry{&entry}); err != nil {
+				return 0, db.latchFatalErr(err)
 			}
 		}
 	}
@@ -713,21 +809,11 @@ func (db *DB) initAsyncCommit() {
 				break
 			}
 
-			lastIndex, err := db.wal.LastIndex()
-			if err != nil {
-				walQuit <- err
-				return
-			}
+			writeErr := db.writeAndSyncWAL(&batch, entries)
+			notifyDone(entries, writeErr)
 
-			for _, entry := range entries {
-				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					walQuit <- err
-					return
-				}
-			}
-
-			if err := db.wal.WriteBatch(&batch); err != nil {
-				walQuit <- err
+			if writeErr != nil {
+				walQuit <- writeErr
 				return
 			}
 			batch.Clear()
@@ -775,6 +861,8 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 	}
+	// avoids rescanning the snapshot dir on every EarliestVersion call.
+	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
 	cloned.attachTraverseStateChanges()
 	return cloned
 }
@@ -852,6 +940,10 @@ func (db *DB) rewriteIfApplicable(height int64) {
 	}
 
 	if err := db.rewriteSnapshotBackground(); err != nil {
+		if errors.Is(err, errWALAhead) {
+			db.logger.Info("skipping snapshot rewrite while replaying the wal", "err", err)
+			return
+		}
 		db.logger.Error("failed to rewrite snapshot in background", "err", err)
 	}
 }
@@ -879,6 +971,19 @@ func (db *DB) rewriteSnapshotBackground() error {
 		return errors.New("there's another ongoing snapshot rewriting process")
 	}
 
+	// A wal ahead of the tree means the app is still replaying versions it had
+	// committed before a restart at a lower target version. Starting a rewrite now
+	// would write a snapshot and replay the rest of the wal into a second tree, only
+	// to be discarded by checkBackgroundSnapshotRewrite for overshooting the
+	// committed version. Wait for the replay to finish instead.
+	walTargetVersion, err := db.committedVersion()
+	if err != nil {
+		return fmt.Errorf("failed to read wal version: %w", err)
+	}
+	if walTargetVersion > db.lastCommitInfo.Version {
+		return fmt.Errorf("%w (wal=%d, committed=%d)", errWALAhead, walTargetVersion, db.lastCommitInfo.Version)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := make(chan snapshotResult)
@@ -887,6 +992,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 
 	cloned := db.copy(0)
 	wal := db.wal
+	onCatchupMTreeLoaded := db.onCatchupMTreeLoaded
 	go func() {
 		defer close(ch)
 
@@ -901,6 +1007,9 @@ func (db *DB) rewriteSnapshotBackground() error {
 		if err != nil {
 			ch <- snapshotResult{err: err}
 			return
+		}
+		if onCatchupMTreeLoaded != nil {
+			onCatchupMTreeLoaded(mtree)
 		}
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
@@ -930,16 +1039,26 @@ func (db *DB) Close() error {
 		db.snapshotRewriteCancel = nil
 	}
 
+	// The rewrite goroutine is joined above, so nothing can submit to the pool
+	// any more. Without this, pond's purger goroutine outlives every Load/Close
+	// cycle - unbounded for the read-only DBs opened per historical query.
+	if db.ownsWriterPool && db.snapshotWriterPool != nil {
+		db.snapshotWriterPool.StopAndWait()
+		db.snapshotWriterPool = nil
+	}
+
 	// wait for any in-flight prune goroutine to finish before closing the WAL.
 	db.pruneSnapshotLock.Lock()
 	defer db.pruneSnapshotLock.Unlock()
 
-	errs = append(errs,
-		db.MultiTree.Close(),
-		db.wal.Close(),
-	)
+	errs = append(errs, db.MultiTree.Close())
 
-	db.wal = nil
+	// Close must be idempotent; wal is the only field here that would panic on
+	// a second Close.
+	if db.wal != nil {
+		errs = append(errs, db.wal.Close())
+		db.wal = nil
+	}
 
 	if db.retiredMultiTree != nil {
 		errs = append(errs, db.retiredMultiTree.Close())
@@ -1354,6 +1473,20 @@ func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error
 type walEntry struct {
 	index uint64
 	data  WALEntry
+	// Receives exactly one write outcome for every entry the writer accepts, so a
+	// waiter can block on it alone without also racing walQuit. Nil if unwaited.
+	done chan error
+}
+
+// notifyDone reports a batch write's outcome to every waiting entry. Entries
+// earlier in a failed batch may have reached the wal, but their outcome is
+// unknown, so they're reported as failed rather than assumed durable.
+func notifyDone(entries []*walEntry, err error) {
+	for _, entry := range entries {
+		if entry.done != nil {
+			entry.done <- err
+		}
+	}
 }
 
 func isSnapshotName(name string) bool {
@@ -1404,14 +1537,40 @@ func channelBatchRecv[T any](ch <-chan *T) []*T {
 	return result
 }
 
+func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
+	lastIndex, err := db.wal.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := writeEntry(batch, db.logger, lastIndex, entry); err != nil {
+			return err
+		}
+	}
+
+	if err := db.wal.WriteBatch(batch); err != nil {
+		return err
+	}
+	if err := db.walSync(db.wal); err != nil {
+		return err
+	}
+	// walSync only fsyncs the current segment file; a freshly cycled segment has
+	// no durable directory entry yet, so a crash could lose an entry whose app
+	// hash Commit already returned. Near-free when no metadata changed.
+	return fsyncDir(walPath(db.dir))
+}
+
 func writeEntry(batch *wal.Batch, logger Logger, lastIndex uint64, entry *walEntry) error {
 	bz, err := entry.data.Marshal()
 	if err != nil {
 		return err
 	}
 
+	// A version at or below lastIndex is already durable in the wal, so skipping
+	// it and reporting success is correct -- happens on replay after a restart.
 	if entry.index <= lastIndex {
-		logger.Error("commit old version idempotently", "lastIndex", lastIndex, "version", entry.index)
+		logger.Info("commit old version idempotently", "lastIndex", lastIndex, "version", entry.index)
 	} else {
 		batch.Write(entry.index, bz)
 	}
