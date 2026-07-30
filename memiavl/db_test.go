@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -1012,6 +1013,61 @@ func TestEarliestVersion(t *testing.T) {
 	earliest2, err := db.EarliestVersion()
 	require.NoError(t, err)
 	require.Equal(t, earliest, earliest2)
+}
+
+func TestEarliestVersionFallbackNotCached(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// Only the genesis placeholder snapshot-0 exists, so EarliestVersion
+	// falls back to initialVersion.
+	fallback, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, fallback)
+
+	// The fallback isn't a real snapshot version. Caching it would make
+	// EarliestVersion keep reporting it forever, since the cache short-circuits
+	// before a directory scan could ever discover a real snapshot later.
+	require.Zero(t, db.earliestSnapshotCache.Load(), "fallback value must not be cached")
+}
+
+func TestPruneSnapshotsInvalidatesCacheOnFirstSnapshotError(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		InitialVersion:  100,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	// Poison the cache, as if pruning had previously found a real snapshot.
+	db.earliestSnapshotCache.Store(100)
+
+	// Remove every snapshot directory so firstSnapshotVersion fails; the
+	// "current" symlink still resolves by name, so pruneSnapshots gets past
+	// the currentVersion() read before hitting the failure.
+	entries, err := os.ReadDir(db.dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), SnapshotPrefix) {
+			require.NoError(t, os.RemoveAll(filepath.Join(db.dir, e.Name())))
+		}
+	}
+
+	db.pruneSnapshots()
+	db.pruneSnapshotLock.Lock()
+	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
+
+	require.EqualValues(t, 0, db.earliestSnapshotCache.Load(),
+		"cache must be invalidated rather than left pointing at an already-deleted snapshot")
 }
 
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report

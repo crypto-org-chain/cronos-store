@@ -474,3 +474,14 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestReadMetadataRejectsMissingCommitInfo(t *testing.T) {
+	// WriteMetadata truncates in place, so a crash mid-write leaves a zero-length
+	// file that unmarshals cleanly into a metadata with no commit info.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, MetadataFileName), nil, 0o600))
+
+	_, err := readMetadata(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing commit info")
+}

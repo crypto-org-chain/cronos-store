@@ -620,10 +620,13 @@ func (db *DB) pruneSnapshots() {
 		// truncate WAL until the earliest remaining snapshot
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
+			// The snapshots are already deleted, so a cached version may name one of
+			// them. Invalidate to force readers back to a directory scan.
+			db.earliestSnapshotCache.Store(0)
 			db.logger.Error("failed to find first snapshot", "err", err)
-		} else {
-			db.earliestSnapshotCache.Store(earliestVersion)
+			return
 		}
+		db.earliestSnapshotCache.Store(earliestVersion)
 
 		if err := wal.TruncateFront(walIndex(earliestVersion+1, initialVersion)); err != nil {
 			db.logger.Error("failed to truncate wal", "err", err, "version", earliestVersion+1)
@@ -1031,11 +1034,13 @@ func (db *DB) EarliestVersion() (int64, error) {
 	}
 	if v == 0 {
 		// snapshot-0 is the genesis placeholder; the first queryable height is
-		// initialVersion (defaults to 1 for standard chains).
-		v = int64(db.initialVersion)
-		if v == 0 {
+		// initialVersion (defaults to 1 for standard chains). Don't cache this
+		// fallback: it isn't a real snapshot version, and caching it would keep
+		// EarliestVersion reporting a stale value once a snapshot actually appears.
+		if v = int64(db.initialVersion); v == 0 {
 			v = 1
 		}
+		return v, nil
 	}
 	db.earliestSnapshotCache.Store(v)
 	return v, nil

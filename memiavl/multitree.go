@@ -502,6 +502,12 @@ func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	if err := metadata.Unmarshal(bz); err != nil {
 		return nil, err
 	}
+	// WriteMetadata truncates in place, so a crash between truncate and write
+	// leaves a zero-length file that unmarshals into a metadata with no commit
+	// info. Reject it here rather than nil-deref below.
+	if metadata.CommitInfo == nil {
+		return nil, fmt.Errorf("metadata file %s is missing commit info", filepath.Join(dir, MetadataFileName))
+	}
 	if metadata.CommitInfo.Version > math.MaxUint32 {
 		return nil, fmt.Errorf("commit info version overflows uint32: %d", metadata.CommitInfo.Version)
 	}
