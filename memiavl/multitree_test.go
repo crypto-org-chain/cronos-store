@@ -2,6 +2,7 @@ package memiavl
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -473,4 +474,57 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestRunWorkerGroupConvertsPanicToError(t *testing.T) {
+	pool := pond.New(2, 10)
+	defer pool.StopAndWait()
+
+	var ran atomic.Int32
+	err := RunWorkerGroup(pool, []string{store1Name, store2Name}, func(i int) error {
+		ran.Add(1)
+		if i == 0 {
+			panic("boom")
+		}
+		return nil
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
+	require.Contains(t, err.Error(), store1Name)
+	// A panicking task must not take down its siblings.
+	require.EqualValues(t, 2, ran.Load())
+}
+
+func TestRunWorkerGroupWaitsForEveryTask(t *testing.T) {
+	// One worker for three tasks, so two are still queued when Wait is entered.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	var finished atomic.Int32
+	labels := []string{store1Name, store2Name, store3Name}
+	err := RunWorkerGroup(pool, labels, func(int) error {
+		time.Sleep(10 * time.Millisecond)
+		finished.Add(1)
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.EqualValues(t, len(labels), finished.Load())
+}
+
+func TestRunWorkerGroupJoinsEveryError(t *testing.T) {
+	pool := pond.New(3, 10)
+	defer pool.StopAndWait()
+
+	err := RunWorkerGroup(pool, []string{store1Name, store2Name, store3Name}, func(i int) error {
+		if i == 1 {
+			return nil
+		}
+		return fmt.Errorf("task %d failed", i)
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "task 0 failed")
+	require.Contains(t, err.Error(), "task 2 failed")
 }
