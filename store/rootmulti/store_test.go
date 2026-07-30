@@ -643,3 +643,38 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
+	dir := t.TempDir()
+	rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
+	rs.Commit()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
+	rs.Commit()
+	// Commit past the queried height so the query below goes through the historical
+	// DB cache rather than the latest-height query snapshot.
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v3"))
+	rs.Commit()
+
+	// Query mutates req.Path, so each call needs its own request.
+	newQuery := func() *types.RequestQuery {
+		return &types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 2, Prove: true}
+	}
+	res, err := rs.Query(newQuery())
+	require.NoError(t, err)
+	require.Equal(t, []byte("v2"), res.Value)
+
+	require.NoError(t, rs.RollbackToVersion(1))
+
+	// The version-2 DB cached by the query above is still mmap'd over files the
+	// rollback discarded; answering from it would hand out state and a proof for a
+	// history this node no longer has.
+	_, err = rs.Query(newQuery())
+	require.Error(t, err)
+}

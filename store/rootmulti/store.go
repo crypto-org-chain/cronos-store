@@ -46,6 +46,9 @@ type historicalDBCache struct {
 	entries []*historicalDBEntry // index 0 is most-recently used
 	closed  bool
 	loadSem chan struct{} // bounds concurrent slow-path loads to maxSize
+	// bumped whenever the underlying directory is replaced, so a load that
+	// started before the swap can't insert a DB mapped over the old files.
+	generation uint64
 }
 
 func newHistoricalDBCache(maxSize int) *historicalDBCache {
@@ -82,6 +85,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		c.mu.Unlock()
 		return e, nil
 	}
+	generation := c.generation
 	c.mu.Unlock()
 
 	// Cap concurrent loads at maxSize so a burst of distinct-version queries
@@ -108,6 +112,13 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 	if c.closed {
 		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
+
+	// The directory was replaced while we were loading, so this DB may be mapped
+	// over files the reload has already unlinked. Make the caller retry against
+	// the new generation rather than caching it.
+	if c.generation != generation {
+		return nil, fmt.Errorf("historicalDBCache: store reloaded while loading version %d", version)
 	}
 
 	// another goroutine may have loaded the same version while we were doing I/O.
@@ -154,6 +165,22 @@ func (c *historicalDBCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	return c.evictAllLocked()
+}
+
+// invalidate drains the cache because the directory its DBs are mapped over is
+// being replaced. The generation bump makes an in-flight load discard its result
+// instead of caching a DB mapped over the files the reload is unlinking.
+func (c *historicalDBCache) invalidate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	return c.evictAllLocked()
+}
+
+// evictAllLocked marks every entry evicted and closes the ones nobody is
+// borrowing. Caller must hold c.mu.
+func (c *historicalDBCache) evictAllLocked() error {
 	var errs []error
 	for _, e := range c.entries {
 		e.evicted = true
@@ -327,8 +354,25 @@ func (rs *Store) Commit() types.CommitID {
 }
 
 func (rs *Store) Close() error {
+	return stderrors.Join(rs.closeDB(), rs.historicalDBCache.close())
+}
+
+// closeDB unpublishes and closes the current db, dropping the commit info that
+// describes it. No-op when there is no db: rs.db is nil on a repeat Close, or
+// after a failed Restore or RollbackToVersion.
+func (rs *Store) closeDB() error {
 	rs.dropQuerySnapshot()
-	return stderrors.Join(rs.db.Close(), rs.historicalDBCache.close())
+	if rs.db == nil {
+		return nil
+	}
+
+	err := rs.db.Close()
+	// nil rs.db right after Close so no later path reuses the closed handle.
+	rs.db = nil
+	// Drop the commit info with the db it describes: otherwise LastCommitID keeps
+	// reporting a version whose data is gone or about to be replaced.
+	rs.lastCommitInfo = nil
+	return err
 }
 
 // dropQuerySnapshot clears the published snapshot before rs.db is closed: it
@@ -338,7 +382,29 @@ func (rs *Store) dropQuerySnapshot() {
 	rs.querySnapshot.Store(nil)
 }
 
+// closeDBForReload closes the current db and drops the cached historical ones so
+// the caller can load a replacement over the same directory.
+//
+// A Close error is logged rather than returned: memiavl.DB.Close runs the rest of its
+// cleanup regardless, and its WAL error latch is sticky, so propagating it would leave
+// rs.db pointing at a closed handle and wedge every later retry on the same error. The
+// unsynced WAL tail such an error implies is exactly what a rollback or restore discards.
+func (rs *Store) closeDBForReload() {
+	if err := rs.closeDB(); err != nil {
+		rs.logger.Error("failed to close memiavl db before reload", "err", err)
+	}
+	// Cached historical DBs stay mmap'd over files the reload unlinks, so they would
+	// keep answering queries - with proofs - out of a history the node no longer has.
+	if err := rs.historicalDBCache.invalidate(); err != nil {
+		rs.logger.Error("failed to close cached historical memiavl dbs before reload", "err", err)
+	}
+}
+
 // LastCommitID Implements interface Committer
+//
+// With no published snapshot - before the first load, or after a Close or a failed
+// reload - the version is read back from disk and the returned CommitID carries no
+// hash. Reporting version 0 instead would tell CometBFT to replay from genesis.
 func (rs *Store) LastCommitID() types.CommitID {
 	if rs.lastCommitInfo == nil {
 		v, err := memiavl.GetLatestVersion(rs.dir)
@@ -424,11 +490,12 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	if snap := rs.querySnapshot.Load(); version == 0 || (snap != nil && version == snap.lastCommitInfo.Version) {
-		if snap != nil {
-			return rs.cacheMultiStoreFromDB(snap.db, nil), nil
-		}
-		return rs.CacheMultiStore(), nil
+	snap := rs.querySnapshot.Load()
+	if snap == nil {
+		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+	}
+	if version == 0 || version == snap.lastCommitInfo.Version {
+		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
 	}
 
 	if version < 0 || version > math.MaxUint32 {
@@ -573,6 +640,9 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
+	// A db already loaded over rs.dir holds the directory lock, so a reload has to
+	// give it up first or memiavl.Load fails on the flock.
+	rs.closeDBForReload()
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return errors.Wrapf(err, "fail to load memiavl at %s", rs.dir)
@@ -746,12 +816,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("rollback height target %d exceeds max uint32", target)
 	}
 
-	if rs.db != nil {
-		if err := rs.db.Close(); err != nil {
-			return err
-		}
-		rs.dropQuerySnapshot()
-	}
+	rs.closeDBForReload()
 
 	opts := rs.opts
 	opts.TargetVersion = uint32(target)
