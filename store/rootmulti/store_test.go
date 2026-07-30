@@ -458,7 +458,7 @@ func TestRollbackToVersionRebuildsStores(t *testing.T) {
 	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
+func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
 	key := types.NewKVStoreKey(testStoreName)
@@ -467,15 +467,19 @@ func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
 	t.Cleanup(func() { rs.Close() })
 	rs.AddListeners([]types.StoreKey{key})
 
-	rs.Commit() // publishes the querySnapshot whose cached stores map this test targets.
+	rs.Commit() // publishes the querySnapshot this test queries against.
 
 	cms, err := rs.CacheMultiStoreWithVersion(0)
 	require.NoError(t, err)
 	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
 	cms.Write()
 
-	require.NotEmpty(t, rs.listeners[key].PopStateCache(),
-		"CacheMultiStoreWithVersion(0) must wire listenkv for listening-enabled stores")
+	// Nothing flushes a snapshot-backed store's change set, so the write is
+	// dropped; it must not reach the listener stream either, or the next block
+	// would emit a state change that was never committed.
+	require.Empty(t, rs.listeners[key].PopStateCache())
+	rs.Commit()
+	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
 }
 
 func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
@@ -576,6 +580,33 @@ func TestQueryEmptyStoreName(t *testing.T) {
 		require.Nil(t, res, "path %q", path)
 		require.ErrorIs(t, err, sdkerrors.ErrUnknownRequest, "path %q", path)
 	}
+}
+
+// A deferred Close alongside an explicit one must not double-close the memiavl
+// db, whose wal is already nil after the first call.
+func TestCloseIsIdempotent(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+
+	require.NoError(t, store.Close())
+	require.NoError(t, store.Close())
+}
+
+// An empty tree can't produce a non-existence proof, so the query must fail
+// with an error rather than panic the node.
+func TestQueryProveAgainstEmptyStore(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+	store.Commit()
+
+	res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.ErrorIs(t, err, sdkerrors.ErrInvalidRequest)
+	require.Contains(t, err.Error(), "failed to build non-membership proof")
 }
 
 func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {
@@ -715,10 +746,14 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		}
 	}()
 
+	// mimics baseapp's CheckTx state: branched off the live rs.stores once, then
+	// read from another connection while commits flush change sets into the trees.
+	checkState := store.CacheMultiStore()
+
 	readers := []func(){
-		// wraps the live rs.stores, not the querySnapshot, so only construction is
-		// safe to exercise here -- not a read through the concurrently-mutated tree.
-		func() { store.CacheMultiStore() },
+		func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
+		func() { checkState.GetKVStore(key).Get([]byte("k")) },
+		func() { store.GetKVStore(key).Get([]byte("k")) },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
 			if err == nil {
@@ -729,10 +764,13 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 			}
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k"), Prove: true})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
 		},
 		func() { store.LatestVersion() },
 		func() { store.EarliestVersion() },

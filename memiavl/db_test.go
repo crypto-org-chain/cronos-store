@@ -1208,6 +1208,8 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	require.Equal(t, commitInfo, *db.LastCommitInfo())
 }
 
+// rootmulti's cache stores and the historical-db cache all hold the db as an
+// io.Closer, so a second Close must not panic on the already-closed wal.
 func TestDBCloseIsIdempotent(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,

@@ -939,6 +939,22 @@ func (db *DB) rewriteIfApplicable(height int64) {
 		return
 	}
 
+	// A wal ahead of the tree means the app is still replaying versions it had
+	// committed before a restart at a lower target version. A rewrite started now
+	// would write a snapshot and replay the rest of the wal into a second tree,
+	// only to be discarded for overshooting the committed version — repeated once
+	// per interval for the whole replay. Wait for the replay to finish.
+	committedVersion, err := db.committedVersion()
+	if err != nil {
+		db.logger.Error("failed to read wal version", "err", err)
+		return
+	}
+	if committedVersion > height {
+		db.logger.Info("skipping snapshot rewrite while replaying the wal",
+			"wal", committedVersion, "committed", height)
+		return
+	}
+
 	if err := db.rewriteSnapshotBackground(); err != nil {
 		if errors.Is(err, errWALAhead) {
 			db.logger.Info("skipping snapshot rewrite while replaying the wal", "err", err)
@@ -1053,8 +1069,9 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// Close must be idempotent; wal is the only field here that would panic on
-	// a second Close.
+	// The historical-db cache and rootmulti's cache stores all hold this db as an
+	// io.Closer, so a second Close is reachable; wal is the only field here that
+	// would panic on one.
 	if db.wal != nil {
 		errs = append(errs, db.wal.Close())
 		db.wal = nil

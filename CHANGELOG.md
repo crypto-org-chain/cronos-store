@@ -1,5 +1,6 @@
 # Changelog
 
+- [#105](https://github.com/crypto-org-chain/cronos-store/pull/105) fix(store): publish copy-on-write trees to the mounted stores
 - [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fix WAL durability-ack race, adopt lock-free query snapshot
 - [#86](https://github.com/crypto-org-chain/cronos-store/pull/86) fix(memiavl): close WAL after reading latest version in GetLatestVersion
 - [#82](https://github.com/crypto-org-chain/cronos-store/pull/82) fix(memiavl): close loaded MultiTree when CatchupWAL fails during snapshot rewrite

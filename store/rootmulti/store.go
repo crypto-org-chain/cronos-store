@@ -216,7 +216,6 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
-	stores         map[types.StoreKey]types.CacheWrapper
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -270,13 +269,39 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot publishes an immutable view of the committed state and
+// repoints the mounted iavl stores at it.
+//
+// The mounted stores must read the snapshot's trees, not rs.db's: rs.flush()
+// applies change sets to the live trees in place, while readers branched off
+// rs.stores (baseapp's CheckTx state, for one) can still be calling Get on them
+// from another ABCI connection. Copy() bumps the source's copy-on-write version,
+// so the snapshot's trees are never mutated underneath those readers.
+//
+// The publish is not atomic across stores: a concurrent CheckTx reader can see
+// one mounted store already on the new version while another is still on the
+// old one. Consensus state is unaffected — block execution runs on this
+// goroutine, after the publish — and a torn view only costs CheckTx an
+// occasional stale read.
 func (rs *Store) publishQuerySnapshot() {
 	db := rs.db.Copy()
 	rs.querySnapshot.Store(&querySnapshot{
 		db:             db,
 		lastCommitInfo: rs.lastCommitInfo,
-		stores:         rs.wireListeners(rs.storesFromDB(db)),
 	})
+
+	for key, store := range rs.stores {
+		memiavlStore, ok := store.(*memiavlstore.Store)
+		if !ok {
+			// transient/mem stores aren't backed by a memiavl tree, nothing to republish.
+			continue
+		}
+		tree := db.TreeByName(key.Name())
+		if tree == nil {
+			panic(fmt.Sprintf("no memiavl tree for mounted store: %s", key.Name()))
+		}
+		memiavlStore.SetTree(tree)
+	}
 }
 
 func (rs *Store) latestDB() *memiavl.DB {
@@ -369,15 +394,8 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
-
 	rs.lastCommitInfo = rs.refreshLastCommitInfo(rs.db)
+	// also repoints the mounted stores' trees, which db.Commit may have reloaded.
 	rs.publishQuerySnapshot()
 	return rs.lastCommitInfo.CommitID()
 }
@@ -528,18 +546,21 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 	return cachemulti.NewStore(rs.storesFromDB(db), nil, nil, closer)
 }
 
-// CacheMultiStoreWithVersion Implements interface MultiStore.
+// CacheMultiStoreWithVersion Implements interface MultiStore
+// used to createQueryContext, abci_query or grpc query service.
+//
 // version == 0 means the latest committed snapshot, not the live working state.
+// The snapshot-backed iavl stores are read-only: nothing flushes their change
+// sets, so a caller's Write() is discarded rather than committed. The transient
+// and mem stores come from rs.stores, though, so a Write() does reach those —
+// same as before this snapshot path existed.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		// snap.stores is already wireListeners-wrapped from publishQuerySnapshot,
-		// so use it directly instead of rebuilding (and dropping listener wiring)
-		// via cacheMultiStoreFromDB.
-		return cachemulti.NewStore(snap.stores, nil, nil, nil), nil
+		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
 	}
 
 	if version < 0 || version > math.MaxUint32 {
@@ -879,8 +900,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	}
 
 	// Rebuild rs.stores before swapping rs.db in: the old entries hold trees from
-	// the just-closed, unmapped db, and on failure rs.db must stay untouched
-	// rather than point at a db whose stores were never rebuilt.
+	// the just-closed, unmapped db.
 	keys := make([]types.StoreKey, 0, len(rs.storesParams))
 	for key := range rs.storesParams {
 		keys = append(keys, key)
