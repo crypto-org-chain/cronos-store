@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -619,6 +620,8 @@ func TestHistoricalQueryResultSurvivesCacheEviction(t *testing.T) {
 	store.historicalDBCache.mu.Unlock()
 	require.True(t, evicted, "version[0]'s entry should have been evicted")
 
+	// a result still aliasing the unmapped snapshot faults; make that a failing panic instead of killing the test binary
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	require.Equal(t, values[0], res0.Value)
 	require.NotEmpty(t, res0.ProofOps.Ops)
 }
