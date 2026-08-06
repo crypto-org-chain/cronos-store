@@ -42,8 +42,7 @@ func TestProofOutlivesSnapshotWhenZeroCopyDisabled(t *testing.T) {
 
 	require.NoError(t, ptree.Close())
 
-	// a proof still aliasing the unmapped snapshot faults instead of comparing,
-	// so turn the fault into a recoverable panic that fails the test
+	// turn a fault from touching the unmapped snapshot into a failing panic instead of a crash
 	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	require.Equal(t, existKey, exist.GetExist().Key)
 	require.Equal(t, []byte("world"), exist.GetExist().Value)
