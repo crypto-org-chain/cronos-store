@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"runtime/debug"
 	"strconv"
 	"testing"
 
@@ -17,6 +18,37 @@ func TestProofsEmptyTree(t *testing.T) {
 	nonExistProof, err := tree.GetNonMembershipProof([]byte("hello"))
 	require.Error(t, err)
 	require.Nil(t, nonExistProof)
+}
+
+func TestProofOutlivesSnapshotWhenZeroCopyDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	tree := New(0)
+	tree.ApplyChangeSet(ChangeSets[0])
+	_, _, err := tree.SaveVersion(true)
+	require.NoError(t, err)
+	require.NoError(t, tree.WriteSnapshot(tmpDir))
+
+	snapshot, err := OpenSnapshot(tmpDir)
+	require.NoError(t, err)
+	ptree := NewFromSnapshot(snapshot, false, 0)
+
+	existKey := []byte("hello")
+	exist, err := ptree.GetMembershipProof(existKey)
+	require.NoError(t, err)
+	nonExist, err := ptree.GetNonMembershipProof([]byte("hello1"))
+	require.NoError(t, err)
+	left := nonExist.GetNonexist().Left
+	require.NotNil(t, left)
+
+	require.NoError(t, ptree.Close())
+
+	// a proof still aliasing the unmapped snapshot faults instead of comparing,
+	// so turn the fault into a recoverable panic that fails the test
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	require.Equal(t, existKey, exist.GetExist().Key)
+	require.Equal(t, []byte("world"), exist.GetExist().Value)
+	require.Equal(t, existKey, left.Key)
+	require.Equal(t, []byte("world"), left.Value)
 }
 
 func TestProofs(t *testing.T) {

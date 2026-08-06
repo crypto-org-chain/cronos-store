@@ -171,6 +171,10 @@ func (c *historicalDBCache) close() error {
 func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
+	// historicalDBCache's LRU can close this DB (unmapping its snapshot) while
+	// a borrower still holds a *ResponseQuery* referencing it, so results must
+	// be copied out of the mmap rather than aliasing it.
+	opts.ZeroCopy = false
 	db, err := memiavl.Load(dir, opts, chainId)
 	if err != nil {
 		return nil, err

@@ -93,9 +93,17 @@ func (t *Tree) createExistenceProof(key []byte) (*ics23.ExistenceProof, error) {
 	}
 
 	path, node, err := pathToLeaf(t.root, key)
+	// node.Key()/Value() on a PersistedNode alias the snapshot's mmap
+	// unconditionally (unlike Tree.Get, they have no zero-copy gate of their
+	// own), so clone them here under the same zeroCopy flag.
+	nodeKey, nodeValue := node.Key(), node.Value()
+	if !t.zeroCopy {
+		nodeKey = bytes.Clone(nodeKey)
+		nodeValue = bytes.Clone(nodeValue)
+	}
 	return &ics23.ExistenceProof{
-		Key:   node.Key(),
-		Value: node.Value(),
+		Key:   nodeKey,
+		Value: nodeValue,
 		Leaf:  convertLeafOp(int64(node.Version())),
 		Path:  convertInnerOps(path),
 	}, err
