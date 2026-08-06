@@ -353,12 +353,10 @@ func (t *Tree) Get(key []byte) []byte {
 
 	if t.cache != nil {
 		cacheKey := key
-		cacheValue := value
 		if !t.zeroCopy {
 			cacheKey = bytes.Clone(key)
-			cacheValue = bytes.Clone(cacheValue)
 		}
-		t.cache.Add(&cacheNode{cacheKey, cacheValue})
+		t.cache.Add(&cacheNode{cacheKey, value})
 	}
 	return value
 }

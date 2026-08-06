@@ -23,31 +23,39 @@ func TestProofsEmptyTree(t *testing.T) {
 func TestProofOutlivesSnapshotWhenZeroCopyDisabled(t *testing.T) {
 	tmpDir := t.TempDir()
 	tree := New(0)
-	tree.ApplyChangeSet(ChangeSets[0])
-	_, _, err := tree.SaveVersion(true)
-	require.NoError(t, err)
+	for _, changes := range ChangeSets[:6] {
+		tree.ApplyChangeSet(changes)
+		_, _, err := tree.SaveVersion(true)
+		require.NoError(t, err)
+	}
 	require.NoError(t, tree.WriteSnapshot(tmpDir))
 
 	snapshot, err := OpenSnapshot(tmpDir)
 	require.NoError(t, err)
 	ptree := NewFromSnapshot(snapshot, false, 0)
 
-	existKey := []byte("hello")
+	existKey := []byte("hello1")
 	exist, err := ptree.GetMembershipProof(existKey)
 	require.NoError(t, err)
-	nonExist, err := ptree.GetNonMembershipProof([]byte("hello1"))
+	require.NotEmpty(t, exist.GetExist().Path, "test key must have a non-trivial inner path")
+
+	nonExist, err := ptree.GetNonMembershipProof([]byte("hello12"))
 	require.NoError(t, err)
 	left := nonExist.GetNonexist().Left
+	right := nonExist.GetNonexist().Right
 	require.NotNil(t, left)
+	require.NotNil(t, right)
 
 	require.NoError(t, ptree.Close())
 
 	// turn a fault from touching the unmapped snapshot into a failing panic instead of a crash
 	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	require.Equal(t, existKey, exist.GetExist().Key)
-	require.Equal(t, []byte("world"), exist.GetExist().Value)
+	require.Equal(t, []byte("world1"), exist.GetExist().Value)
 	require.Equal(t, existKey, left.Key)
-	require.Equal(t, []byte("world"), left.Value)
+	require.Equal(t, []byte("world1"), left.Value)
+	require.Equal(t, []byte("hello2"), right.Key)
+	require.Equal(t, []byte("world1"), right.Value)
 }
 
 func TestProofs(t *testing.T) {
