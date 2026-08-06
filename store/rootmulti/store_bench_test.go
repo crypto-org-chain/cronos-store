@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	log "cosmossdk.io/log/v2"
-	"github.com/cosmos/cosmos-sdk/store/v2/types"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
+
+	log "cosmossdk.io/log/v2"
+
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 const benchNumKeys = 1000
@@ -105,7 +107,7 @@ func BenchmarkHistoricalQuery(b *testing.B) {
 	})
 }
 
-// the cold cost the LRU amortises, for scale against BenchmarkHistoricalQuery
+// the cold cost the LRU amortizes, for scale against BenchmarkHistoricalQuery
 func BenchmarkHistoricalLoad(b *testing.B) {
 	store, target := setupHistoricalBenchStore(b)
 
