@@ -2,8 +2,6 @@ package memiavl
 
 import "testing"
 
-// mirrors the cachekv merge iterator, which calls Key() several times per
-// position (compare in Next/Valid, then again in Key/Value)
 func BenchmarkIteratorRepeatedKeyAccess(b *testing.B) {
 	tmpDir := b.TempDir()
 	tree := New(0)

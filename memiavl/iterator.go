@@ -12,8 +12,6 @@ type Iterator struct {
 	key, value []byte
 
 	// clones of key/value handed out when zeroCopy is off, reset on every Next.
-	// Callers treat them as read-only (dbm.Iterator contract), so one clone per
-	// position is enough — merge iterators call Key() several times per element.
 	keyCopy, valueCopy []byte
 
 	valid bool
