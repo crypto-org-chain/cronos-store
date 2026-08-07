@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"runtime/debug"
 	"strconv"
 	"testing"
 
@@ -17,6 +18,44 @@ func TestProofsEmptyTree(t *testing.T) {
 	nonExistProof, err := tree.GetNonMembershipProof([]byte("hello"))
 	require.Error(t, err)
 	require.Nil(t, nonExistProof)
+}
+
+func TestProofOutlivesSnapshotWhenZeroCopyDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	tree := New(0)
+	for _, changes := range ChangeSets[:6] {
+		tree.ApplyChangeSet(changes)
+		_, _, err := tree.SaveVersion(true)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tree.WriteSnapshot(tmpDir))
+
+	snapshot, err := OpenSnapshot(tmpDir)
+	require.NoError(t, err)
+	ptree := NewFromSnapshot(snapshot, false, 0)
+
+	existKey := []byte("hello1")
+	exist, err := ptree.GetMembershipProof(existKey)
+	require.NoError(t, err)
+	require.NotEmpty(t, exist.GetExist().Path, "test key must have a non-trivial inner path")
+
+	nonExist, err := ptree.GetNonMembershipProof([]byte("hello12"))
+	require.NoError(t, err)
+	left := nonExist.GetNonexist().Left
+	right := nonExist.GetNonexist().Right
+	require.NotNil(t, left)
+	require.NotNil(t, right)
+
+	require.NoError(t, ptree.Close())
+
+	// turn a fault from touching the unmapped snapshot into a failing panic instead of a crash
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	require.Equal(t, existKey, exist.GetExist().Key)
+	require.Equal(t, []byte("world1"), exist.GetExist().Value)
+	require.Equal(t, existKey, left.Key)
+	require.Equal(t, []byte("world1"), left.Value)
+	require.Equal(t, []byte("hello2"), right.Key)
+	require.Equal(t, []byte("world1"), right.Value)
 }
 
 func TestProofs(t *testing.T) {

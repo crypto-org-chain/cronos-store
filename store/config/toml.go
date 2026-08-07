@@ -14,6 +14,8 @@ enable = {{ .MemIAVL.Enable }}
 # ZeroCopy defines if the memiavl should return slices pointing to mmap-ed buffers directly (zero-copy),
 # the zero-copied slices must not be retained beyond current block's execution.
 # the sdk address cache will be disabled if zero-copy is enabled.
+# only affects latest-height reads; historical-height queries always copy, since their snapshot can be
+# unmapped by the historical store cache while a response is still in flight.
 zero-copy = {{ .MemIAVL.ZeroCopy }}
 
 # AsyncCommitBuffer defines the size of asynchronous commit queue, this greatly improve block catching-up

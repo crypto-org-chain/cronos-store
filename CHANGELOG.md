@@ -1,5 +1,6 @@
 # Changelog
 
+- [#110](https://github.com/crypto-org-chain/cronos-store/pull/110) fix(store): disable zero-copy for historical queries so results outlive the DB cache
 - [#85](https://github.com/crypto-org-chain/cronos-store/pull/85) fix(memiavl): preserve configured CacheSize across background snapshot rewrite
 - [#86](https://github.com/crypto-org-chain/cronos-store/pull/86) fix(memiavl): close WAL after reading latest version in GetLatestVersion
 - [#82](https://github.com/crypto-org-chain/cronos-store/pull/82) fix(memiavl): close loaded MultiTree when CatchupWAL fails during snapshot rewrite

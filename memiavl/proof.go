@@ -93,12 +93,21 @@ func (t *Tree) createExistenceProof(key []byte) (*ics23.ExistenceProof, error) {
 	}
 
 	path, node, err := pathToLeaf(t.root, key)
+	if err != nil {
+		return nil, err
+	}
+	// PersistedNode.Key()/Value() alias the mmap unconditionally, unlike Tree.Get, so clone under zeroCopy.
+	nodeKey, nodeValue := node.Key(), node.Value()
+	if !t.zeroCopy {
+		nodeKey = bytes.Clone(nodeKey)
+		nodeValue = bytes.Clone(nodeValue)
+	}
 	return &ics23.ExistenceProof{
-		Key:   node.Key(),
-		Value: node.Value(),
+		Key:   nodeKey,
+		Value: nodeValue,
 		Leaf:  convertLeafOp(int64(node.Version())),
 		Path:  convertInnerOps(path),
-	}, err
+	}, nil
 }
 
 func convertLeafOp(version int64) *ics23.LeafOp {

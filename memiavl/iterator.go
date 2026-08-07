@@ -11,6 +11,9 @@ type Iterator struct {
 	// cache the next key-value pair
 	key, value []byte
 
+	// clones of key/value handed out when zeroCopy is off, reset on every Next.
+	keyCopy, valueCopy []byte
+
 	valid bool
 
 	stack []Node
@@ -51,7 +54,10 @@ func (iter *Iterator) Error() error {
 // Key implements dbm.Iterator
 func (iter *Iterator) Key() []byte {
 	if !iter.zeroCopy {
-		return bytes.Clone(iter.key)
+		if iter.keyCopy == nil {
+			iter.keyCopy = bytes.Clone(iter.key)
+		}
+		return iter.keyCopy
 	}
 	return iter.key
 }
@@ -59,13 +65,18 @@ func (iter *Iterator) Key() []byte {
 // Value implements dbm.Iterator
 func (iter *Iterator) Value() []byte {
 	if !iter.zeroCopy {
-		return bytes.Clone(iter.value)
+		if iter.valueCopy == nil {
+			iter.valueCopy = bytes.Clone(iter.value)
+		}
+		return iter.valueCopy
 	}
 	return iter.value
 }
 
 // Next implements dbm.Iterator
 func (iter *Iterator) Next() {
+	iter.keyCopy, iter.valueCopy = nil, nil
+
 	for len(iter.stack) > 0 {
 		// pop node
 		node := iter.stack[len(iter.stack)-1]

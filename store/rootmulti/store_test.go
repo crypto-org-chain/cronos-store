@@ -2,10 +2,13 @@ package rootmulti
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	protoio "github.com/cosmos/gogoproto/io"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
@@ -521,6 +524,106 @@ func TestQueryHistoricalHeightAllowsRenamedStore(t *testing.T) {
 	res, err := store.Query(&types.RequestQuery{Path: "/old/key", Data: []byte("k"), Height: 1})
 	require.NoError(t, err)
 	require.Equal(t, []byte("v"), res.Value)
+}
+
+func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
+	dir := t.TempDir()
+	db, err := memiavl.Load(dir, memiavl.Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: -1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSet(testStoreName, memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: bytes.Repeat([]byte("v"), 64)}}}))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.WaitAsyncCommit())
+	// force a real on-disk snapshot so loadAtVersion loads an mmap-backed PersistedNode tree, not a WAL-replayed one
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Close())
+
+	// CacheSize: 0 forces every Get through the real path instead of a cache hit
+	opts := memiavl.Options{ZeroCopy: true, CacheSize: 0}
+	historical, err := loadAtVersion(dir, opts, TestAppChainID, 1)
+	require.NoError(t, err)
+	defer historical.Close()
+
+	tree := historical.TreeByName(testStoreName)
+	require.NotNil(t, tree)
+
+	want := bytes.Repeat([]byte("v"), 64)
+	first := tree.Get([]byte("k"))
+	second := tree.Get([]byte("k"))
+	require.Equal(t, want, first)
+	// compare backing addresses, not require.NotEqual (which follows pointers and would treat equal content as equal)
+	firstAddr := uintptr(unsafe.Pointer(unsafe.SliceData(first)))
+	secondAddr := uintptr(unsafe.Pointer(unsafe.SliceData(second)))
+	require.NotEqual(t, firstAddr, secondAddr,
+		"loadAtVersion must force ZeroCopy off so historical reads are cloned, not aliased to the mmap")
+}
+
+func TestHistoricalQueryResultSurvivesCacheEviction(t *testing.T) {
+	numVersions := defaultHistoricalDBCacheSize + 1
+	dir := t.TempDir()
+	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+	store.SetMemIAVLOptions(memiavl.Options{
+		// larger than numVersions so the background rewrite never fires; snapshots are written synchronously below instead
+		SnapshotInterval:   uint32(numVersions + 10),
+		SnapshotKeepRecent: uint32(numVersions + 1),
+		ZeroCopy:           true, // simulates operator's memiavl.zero-copy=true
+		CacheSize:          0,
+	})
+
+	key := types.NewKVStoreKey(testStoreName)
+	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+
+	values := make([][]byte, numVersions)
+	versions := make([]int64, numVersions)
+	for i := 0; i < numVersions; i++ {
+		values[i] = []byte(fmt.Sprintf("value-%d", i))
+		kvStore := store.GetKVStore(key)
+		kvStore.Set([]byte("k"), values[i])
+		cid := store.Commit()
+		versions[i] = cid.Version
+		require.NoError(t, store.db.WaitAsyncCommit())
+		require.NoError(t, store.db.RewriteSnapshot())
+	}
+	// one more commit so no queried version is current, else Query would bypass historicalDBCache via rs.lastCommitInfo
+	finalCid := store.Commit()
+	require.Greater(t, finalCid.Version, versions[numVersions-1])
+	require.NoError(t, store.db.WaitAsyncCommit())
+
+	path := "/" + testStoreName + "/key"
+
+	// this entry gets evicted once defaultHistoricalDBCacheSize more distinct versions are queried after it
+	res0, err := store.Query(&types.RequestQuery{Path: path, Data: []byte("k"), Height: versions[0], Prove: true})
+	require.NoError(t, err)
+	require.Equal(t, values[0], res0.Value)
+	require.NotNil(t, res0.ProofOps)
+	require.NotEmpty(t, res0.ProofOps.Ops)
+
+	// the last of these evicts version[0]'s entry with refs==0, closing it synchronously
+	for i := 1; i <= defaultHistoricalDBCacheSize; i++ {
+		_, err := store.Query(&types.RequestQuery{Path: path, Data: []byte("k"), Height: versions[i], Prove: true})
+		require.NoError(t, err)
+	}
+
+	store.historicalDBCache.mu.Lock()
+	evicted := true
+	for _, e := range store.historicalDBCache.entries {
+		if e.version == versions[0] {
+			evicted = false
+		}
+	}
+	store.historicalDBCache.mu.Unlock()
+	require.True(t, evicted, "version[0]'s entry should have been evicted")
+
+	// a result still aliasing the unmapped snapshot faults; make that a failing panic instead of killing the test binary
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	require.Equal(t, values[0], res0.Value)
+	require.NotEmpty(t, res0.ProofOps.Ops)
 }
 
 func TestCacheMultiStoreWithVersionHistoricalHeightSkipsDeletedStore(t *testing.T) {
