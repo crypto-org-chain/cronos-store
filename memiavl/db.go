@@ -29,6 +29,10 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// onlyGenesisSnapshot is the earliestSnapshotCache marker for "only snapshot-0
+// exists"; a real earliest version is always positive and zero means uncached.
+const onlyGenesisSnapshot = -1
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -94,7 +98,8 @@ type DB struct {
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory.
+	// scanning the directory. onlyGenesisSnapshot means the scan found nothing
+	// but snapshot-0, so the initialVersion fallback applies.
 	earliestSnapshotCache atomic.Int64
 
 	// reusable write batch
@@ -1044,24 +1049,28 @@ func (db *DB) FirstVersion() (int64, error) {
 // this on every height-bound query, so we avoid scanning the snapshot
 // directory on the hot path.
 func (db *DB) EarliestVersion() (int64, error) {
-	if v := db.earliestSnapshotCache.Load(); v > 0 {
-		return v, nil
-	}
-	v, err := firstSnapshotVersion(db.dir)
-	if err != nil {
-		return 0, err
-	}
+	v := db.earliestSnapshotCache.Load()
 	if v == 0 {
-		// snapshot-0 is the genesis placeholder; the first queryable height is
-		// initialVersion (defaults to 1 for standard chains). Don't cache this
-		// fallback: it isn't a real snapshot version, and caching it would keep
-		// EarliestVersion reporting a stale value once a snapshot actually appears.
-		if v = int64(db.initialVersion); v == 0 {
-			v = 1
+		var err error
+		if v, err = firstSnapshotVersion(db.dir); err != nil {
+			return 0, err
 		}
+		// Cache the genesis-only state, not the fallback value: the fallback isn't a
+		// snapshot version, and pruneSnapshots overwrites this marker once a real
+		// snapshot exists, so it can't go stale the way a cached fallback would.
+		if v == 0 {
+			v = onlyGenesisSnapshot
+		}
+		db.earliestSnapshotCache.Store(v)
+	}
+	if v > 0 {
 		return v, nil
 	}
-	db.earliestSnapshotCache.Store(v)
+	// snapshot-0 is the genesis placeholder; the first queryable height is
+	// initialVersion (defaults to 1 for standard chains).
+	if v = int64(db.initialVersion); v == 0 {
+		v = 1
+	}
 	return v, nil
 }
 

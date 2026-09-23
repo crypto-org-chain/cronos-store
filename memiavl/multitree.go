@@ -494,7 +494,8 @@ func walVersion(index uint64, initialVersion uint32) int64 {
 
 func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	// load commit info
-	bz, err := os.ReadFile(filepath.Join(dir, MetadataFileName))
+	path := filepath.Join(dir, MetadataFileName)
+	bz, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -502,11 +503,10 @@ func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	if err := metadata.Unmarshal(bz); err != nil {
 		return nil, err
 	}
-	// WriteMetadata truncates in place, so a crash between truncate and write
-	// leaves a zero-length file that unmarshals into a metadata with no commit
-	// info. Reject it here rather than nil-deref below.
+	// Every writer sets CommitInfo, so nil means the file is truncated or
+	// corrupt (an empty file unmarshals cleanly); fail instead of dereferencing.
 	if metadata.CommitInfo == nil {
-		return nil, fmt.Errorf("metadata file %s is missing commit info", filepath.Join(dir, MetadataFileName))
+		return nil, fmt.Errorf("metadata file %s is missing commit info", path)
 	}
 	if metadata.CommitInfo.Version > math.MaxUint32 {
 		return nil, fmt.Errorf("commit info version overflows uint32: %d", metadata.CommitInfo.Version)

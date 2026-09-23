@@ -1141,8 +1141,9 @@ func TestEarliestVersion(t *testing.T) {
 
 func TestEarliestVersionFallbackNotCached(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotKeepRecent: 0,
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
@@ -1152,11 +1153,33 @@ func TestEarliestVersionFallbackNotCached(t *testing.T) {
 	fallback, err := db.EarliestVersion()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, fallback)
+	// The genesis-only state must still be cached: this runs on the query hot
+	// path and a miss costs a directory scan.
+	require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
 
-	// The fallback isn't a real snapshot version. Caching it would make
-	// EarliestVersion keep reporting it forever, since the cache short-circuits
-	// before a directory scan could ever discover a real snapshot later.
-	require.Zero(t, db.earliestSnapshotCache.Load(), "fallback value must not be cached")
+	// InitChain sets the initial version after the store is loaded; a cached
+	// fallback value would keep reporting 1 here.
+	require.NoError(t, db.SetInitialVersion(100))
+	got, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, got)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", fmt.Sprintf("v%d", i))))
+		_, err = db.Commit()
+		require.NoError(t, err)
+	}
+	// A background rewrite prunes snapshot-0 (keep-recent is 0) and refreshes
+	// the cache with the first real snapshot version.
+	require.NoError(t, db.RewriteSnapshotBackground())
+	for db.snapshotRewriteChan != nil {
+		require.NoError(t, db.checkAsyncTasks())
+	}
+	waitPrune(db)
+
+	got, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 102, got)
 }
 
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
