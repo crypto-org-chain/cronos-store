@@ -90,8 +90,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				}
 			}
 
-			// A repeated name would otherwise hand the same tree to two workers, which
-			// then replay change sets into it concurrently and corrupt it silently.
+			// A repeated name would otherwise produce a duplicate store entry in the
+			// commit info and, with --load-snapshot, hand the same tree to two workers
+			// that replay change sets into it concurrently.
 			stores = dedupStores(stores)
 
 			verified := make([]verifiedStore, len(stores))

@@ -115,12 +115,12 @@ func TestDedupStores(t *testing.T) {
 // A store carried in from --load-snapshot has no change sets to replay, but it's
 // still part of the store set: dropping it would change the app hash and leave the
 // written metadata inconsistent with the trees beside it.
-func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
-	changeSetDir := t.TempDir()
+// writeBaseSnapshot writes a snapshot holding "foo" and "bar" at version 1, with
+// one key in "foo", and returns its directory.
+func writeBaseSnapshot(t *testing.T) string {
+	t.Helper()
 	baseDir := filepath.Join(t.TempDir(), "base")
-	outDir := filepath.Join(t.TempDir(), "out")
 
-	// A base snapshot holding "foo" and "bar", both at version 1.
 	mtree := memiavl.NewEmptyMultiTree(0, 0, "")
 	require.NoError(t, mtree.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: fooStore}, {Name: barStore}}))
 	require.NoError(t, mtree.ApplyChangeSet(fooStore, memiavl.ChangeSet{
@@ -133,6 +133,13 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 	defer pool.StopAndWait()
 	require.NoError(t, mtree.WriteSnapshot(baseDir, pool))
 	require.NoError(t, mtree.Close())
+	return baseDir
+}
+
+func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
+	changeSetDir := t.TempDir()
+	baseDir := writeBaseSnapshot(t)
+	outDir := filepath.Join(t.TempDir(), "out")
 
 	// Only "foo" has change sets past the snapshot; "bar" has none at all.
 	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
@@ -157,4 +164,32 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 		require.NotNil(t, tree, "%s must survive into the written snapshot", name)
 		require.Equal(t, int64(3), tree.Version())
 	}
+}
+
+// With --load-snapshot a repeated store name resolves to the same loaded tree, so
+// two workers would replay into it concurrently; run under -race.
+func TestVerifyDedupsStoresWithLoadedSnapshot(t *testing.T) {
+	changeSetDir := t.TempDir()
+	baseDir := writeBaseSnapshot(t)
+	outDir := filepath.Join(t.TempDir(), "out")
+
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
+
+	cmd := VerifyChangeSetCmd(nil)
+	cmd.SetArgs([]string{
+		changeSetDir,
+		"--" + flagStores, "foo foo bar foo",
+		"--" + flagLoadSnapshot, baseDir,
+		"--" + flagSaveSnapshot, outDir,
+		"--" + flagSave,
+	})
+	require.NoError(t, cmd.Execute())
+
+	loaded, err := memiavl.LoadMultiTree(outDir, false, 0, "")
+	require.NoError(t, err)
+	defer loaded.Close()
+
+	require.Len(t, loaded.Trees(), 2, "each store must appear once in the written snapshot")
+	require.Equal(t, int64(3), loaded.Version())
+	require.Equal(t, []byte("value"), loaded.TreeByName(fooStore).Get([]byte("key")))
 }
