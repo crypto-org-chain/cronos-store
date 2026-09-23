@@ -199,6 +199,8 @@ func (c *historicalDBCache) evictAllLocked() error {
 func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
+	// historicalDBCache's LRU can close this DB, unmapping its snapshot, while a caller still holds a ResponseQuery referencing it.
+	opts.ZeroCopy = false
 	db, err := memiavl.Load(dir, opts, chainId)
 	if err != nil {
 		return nil, err
