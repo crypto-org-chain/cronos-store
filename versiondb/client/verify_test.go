@@ -14,6 +14,11 @@ import (
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
+const (
+	fooStore = "foo"
+	barStore = "bar"
+)
+
 func TestBuildCommitInfoUsesVersionParam(t *testing.T) {
 	storeInfos := []storetypes.StoreInfo{
 		{Name: "b", CommitId: storetypes.CommitID{Version: 10}},
@@ -49,10 +54,10 @@ func TestVerifyOneStoreBumpsVersionOnGaps(t *testing.T) {
 
 	// "foo" only changed at versions 1 and 3, skipping version 2 entirely - as would happen for
 	// a store that had no writes in block 2.
-	writeStoreChangeSet(t, dir, "foo", []int64{1, 3})
+	writeStoreChangeSet(t, dir, fooStore, []int64{1, 3})
 
 	tree := memiavl.New(0)
-	exists, err := verifyOneStore(tree, "foo", dir, 3)
+	exists, err := verifyOneStore(tree, fooStore, dir, 3)
 	require.NoError(t, err)
 	require.True(t, exists)
 
@@ -62,10 +67,10 @@ func TestVerifyOneStoreBumpsVersionOnGaps(t *testing.T) {
 func TestVerifyOneStoreCatchesUpToTargetVersion(t *testing.T) {
 	dir := t.TempDir()
 
-	writeStoreChangeSet(t, dir, "foo", []int64{1})
+	writeStoreChangeSet(t, dir, fooStore, []int64{1})
 
 	tree := memiavl.New(0)
-	exists, err := verifyOneStore(tree, "foo", dir, 5)
+	exists, err := verifyOneStore(tree, fooStore, dir, 5)
 	require.NoError(t, err)
 	require.True(t, exists)
 
@@ -79,8 +84,8 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 	changeSetDir := t.TempDir()
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
 
-	writeStoreChangeSet(t, changeSetDir, "foo", []int64{1, 2, 3})
-	writeStoreChangeSet(t, changeSetDir, "bar", []int64{1})
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{1, 2, 3})
+	writeStoreChangeSet(t, changeSetDir, barStore, []int64{1})
 
 	cmd := VerifyChangeSetCmd(nil)
 	cmd.SetArgs([]string{
@@ -96,7 +101,7 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 	defer mtree.Close()
 
 	require.Equal(t, int64(3), mtree.Version())
-	for _, name := range []string{"foo", "bar"} {
+	for _, name := range []string{fooStore, barStore} {
 		tree := mtree.TreeByName(name)
 		require.NotNil(t, tree)
 		require.Equal(t, int64(3), tree.Version())
@@ -104,7 +109,7 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 }
 
 func TestDedupStores(t *testing.T) {
-	require.Equal(t, []string{"foo", "bar"}, dedupStores([]string{"foo", "bar", "foo", "bar", "foo"}))
+	require.Equal(t, []string{fooStore, barStore}, dedupStores([]string{fooStore, barStore, fooStore, barStore, fooStore}))
 }
 
 // A store carried in from --load-snapshot has no change sets to replay, but it's
@@ -117,8 +122,8 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 
 	// A base snapshot holding "foo" and "bar", both at version 1.
 	mtree := memiavl.NewEmptyMultiTree(0, 0, "")
-	require.NoError(t, mtree.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: "foo"}, {Name: "bar"}}))
-	require.NoError(t, mtree.ApplyChangeSet("foo", memiavl.ChangeSet{
+	require.NoError(t, mtree.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: fooStore}, {Name: barStore}}))
+	require.NoError(t, mtree.ApplyChangeSet(fooStore, memiavl.ChangeSet{
 		Pairs: []*memiavl.KVPair{{Key: []byte("key"), Value: []byte("value")}},
 	}))
 	_, err := mtree.SaveVersion(true)
@@ -130,7 +135,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 	require.NoError(t, mtree.Close())
 
 	// Only "foo" has change sets past the snapshot; "bar" has none at all.
-	writeStoreChangeSet(t, changeSetDir, "foo", []int64{2, 3})
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
 
 	cmd := VerifyChangeSetCmd(nil)
 	cmd.SetArgs([]string{
@@ -147,7 +152,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 	defer loaded.Close()
 
 	require.Equal(t, int64(3), loaded.Version())
-	for _, name := range []string{"foo", "bar"} {
+	for _, name := range []string{fooStore, barStore} {
 		tree := loaded.TreeByName(name)
 		require.NotNil(t, tree, "%s must survive into the written snapshot", name)
 		require.Equal(t, int64(3), tree.Version())

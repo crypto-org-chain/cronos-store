@@ -420,7 +420,7 @@ func (t *MultiTree) WriteSnapshot(dir string, wp *pond.WorkerPool) error {
 // caller would promote whatever half-finished output the task left behind.
 //
 // A plain group is used instead of pond's GroupContext: the latter's Wait returns
-// as soon as its context is cancelled, so the caller would resume — and may free
+// as soon as its context is canceled, so the caller would resume — and may free
 // what the tasks are reading — while workers are still running.
 func RunWorkerGroup(wp *pond.WorkerPool, labels []string, fn func(i int) error) error {
 	group := wp.Group()
@@ -457,11 +457,11 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 	// write the snapshots in parallel and wait all jobs done
 	if err := RunWorkerGroup(wp, names, func(i int) error {
 		entry := t.trees[i]
-		return entry.Tree.WriteSnapshotWithContext(ctx, filepath.Join(dir, entry.Name))
+		return entry.WriteSnapshotWithContext(ctx, filepath.Join(dir, entry.Name))
 	}); err != nil {
 		return err
 	}
-	// RunWorkerGroup doesn't watch ctx itself, so a caller that cancelled ctx
+	// RunWorkerGroup doesn't watch ctx itself, so a caller that canceled ctx
 	// during (or before) the write must be told, even if every write succeeded.
 	if err := ctx.Err(); err != nil {
 		return err
