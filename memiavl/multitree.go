@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -111,6 +112,16 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 	// initial version is nesserary for wal index conversion,
 	// overflow checked in `readMetadata`.
 	mtree.setInitialVersion(uint32(metadata.InitialVersion))
+
+	// Verify metadata commit info matches the trees we actually loaded.
+	actualVersion := metadata.CommitInfo.Version
+	if len(trees) > 0 {
+		actualVersion = trees[0].Version()
+	}
+	actual := mtree.buildCommitInfo(actualVersion)
+	if err := commitInfoEqual(metadata.CommitInfo, actual); err != nil {
+		return nil, fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err)
+	}
 	return mtree, nil
 }
 
@@ -318,6 +329,28 @@ func (t *MultiTree) buildCommitInfo(version int64) *CommitInfo {
 // it's needed if `updateCommitInfo` is set to `false` in `ApplyChangeSet`.
 func (t *MultiTree) UpdateCommitInfo() {
 	t.lastCommitInfo = *t.buildCommitInfo(t.lastCommitInfo.Version)
+}
+
+func commitInfoEqual(trusted, actual *CommitInfo) error {
+	if trusted.Version != actual.Version {
+		return fmt.Errorf("version mismatch: trusted=%d actual=%d", trusted.Version, actual.Version)
+	}
+	if len(trusted.StoreInfos) != len(actual.StoreInfos) {
+		return fmt.Errorf("store count mismatch: trusted=%d actual=%d", len(trusted.StoreInfos), len(actual.StoreInfos))
+	}
+	for i, want := range trusted.StoreInfos {
+		got := actual.StoreInfos[i]
+		if want.Name != got.Name {
+			return fmt.Errorf("store name mismatch at index %d: trusted=%s actual=%s", i, want.Name, got.Name)
+		}
+		if want.CommitId.Version != got.CommitId.Version {
+			return fmt.Errorf("store %s version mismatch: trusted=%d actual=%d", want.Name, want.CommitId.Version, got.CommitId.Version)
+		}
+		if !bytes.Equal(want.CommitId.Hash, got.CommitId.Hash) {
+			return fmt.Errorf("store %s hash mismatch: trusted=%x actual=%x", want.Name, want.CommitId.Hash, got.CommitId.Hash)
+		}
+	}
+	return nil
 }
 
 // CatchupWAL replay the new entries in the WAL on the tree to catch-up to the target or latest version.

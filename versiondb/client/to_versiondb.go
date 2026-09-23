@@ -11,7 +11,7 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 		Use:   "to-versiondb versiondb-path plain-1 [plain-2] ...",
 		Short: "Feed change set files into versiondb",
 		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			store, err := cmd.Flags().GetString(flagStore)
 			if err != nil {
 				return err
@@ -21,6 +21,11 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer func() {
+				if cerr := versionDB.Close(); cerr != nil && err == nil {
+					err = cerr
+				}
+			}()
 
 			for _, plainFile := range args[1:] {
 				if err := withChangeSetFile(plainFile, func(reader Reader) error {
@@ -37,7 +42,9 @@ func ChangeSetToVersionDBCmd() *cobra.Command {
 				}
 			}
 
-			return nil
+			// Flush before reporting success, so a crash right after can't
+			// silently lose the tail of the migrated changesets.
+			return versionDB.Flush()
 		},
 	}
 

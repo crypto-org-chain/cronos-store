@@ -3,6 +3,7 @@ package memiavl
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,8 @@ func TestCorruptedTail(t *testing.T) {
 		{"failure-3", []byte(`{"index":"1"}` + "\n"), 0},
 		{"failure-4", []byte(`{"index":"1","data":"?"}`), 0},
 		{"failure-5", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1},
+		// entry is 23 bytes (including newline); tail is also 23 bytes to exercise pos == len(tail) parity.
+		{"failure-6-equal-length-tail", []byte(`{"index":1,"data":"?"}` + "\n" + strings.Repeat("?", 23)), 1},
 	}
 
 	for _, tc := range testCases {
