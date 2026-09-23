@@ -281,18 +281,24 @@ func (rs *Store) publishQuerySnapshot() {
 	})
 }
 
+// latestDB returns the published snapshot's db, or nil when none is published.
+// It deliberately never falls back to rs.db: closeDB nils rs.db from the
+// state-sync and shutdown goroutines while query goroutines run, so reading it
+// here would race.
 func (rs *Store) latestDB() *memiavl.DB {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.db
 	}
-	return rs.db
+	return nil
 }
 
+// latestCommitInfo is the commit-info counterpart of latestDB, with the same
+// no-fallback rule: closeDB nils rs.lastCommitInfo concurrently with readers.
 func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.lastCommitInfo
 	}
-	return rs.lastCommitInfo
+	return nil
 }
 
 func (rs *Store) refreshLastCommitInfo(db *memiavl.DB) *types.CommitInfo {
@@ -594,7 +600,7 @@ func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
 func (rs *Store) LatestVersion() int64 {
 	db := rs.latestDB()
 	if db == nil {
-		// Restore closed the db and LoadLatestVersion hasn't run yet.
+		// no snapshot is published between Close/Restore and the next load.
 		return 0
 	}
 	return db.Version()
@@ -960,14 +966,10 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 
 	version := req.Height
 	if version == 0 {
-		db := rs.db
-		if snap != nil {
-			db = snap.db
-		}
-		if db == nil {
+		if snap == nil {
 			return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 		}
-		version = db.Version()
+		version = snap.lastCommitInfo.Version
 	}
 
 	if version < 0 || version > math.MaxUint32 {

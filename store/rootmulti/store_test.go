@@ -750,6 +750,87 @@ func TestReadPathsWithClosedDB(t *testing.T) {
 	})
 }
 
+// A restore that fails after teardown leaves no db until the next load; the
+// store must then report no committed hash and hold no historical dbs mapped
+// over the directory the importer was rewriting.
+func TestRestoreFailureTearsDownReadState(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
+	rs.Commit()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
+	rs.Commit()
+
+	// populate the historical cache with a db mapped over the current files.
+	_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
+	require.NoError(t, err)
+	require.Len(t, rs.historicalDBCache.entries, 1)
+
+	// a stream the importer rejects, so Restore returns before LoadLatestVersion.
+	var buf bytes.Buffer
+	w := protoio.NewDelimitedWriter(&buf)
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_IAVL{
+			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Value: []byte("v"), Height: 0, Version: 1},
+		},
+	}))
+	require.NoError(t, w.Close())
+	r := protoio.NewDelimitedReader(&buf, 1<<20)
+	defer r.Close()
+
+	_, err = rs.Restore(1, 1, r)
+	require.Error(t, err)
+
+	require.Nil(t, rs.db)
+	require.Zero(t, rs.LatestVersion())
+	require.Empty(t, rs.LastCommitID().Hash, "no db is loaded, so no hash may be reported")
+	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
+}
+
+// closeDB runs on the state-sync goroutine while ABCI queries keep arriving;
+// run under -race.
+func TestReadPathsRaceAgainstClose(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	rs.Commit()
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	readers := []func(){
+		func() { rs.LatestVersion() },
+		func() { rs.EarliestVersion() },
+		func() { rs.LastCommitID() },
+		func() { _, _ = rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")}) },
+		func() { _, _ = rs.CacheMultiStoreWithVersion(0) },
+	}
+	for _, read := range readers {
+		wg.Add(1)
+		go func(read func()) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					read()
+				}
+			}
+		}(read)
+	}
+
+	rs.closeDBForReload()
+	close(done)
+	wg.Wait()
+	require.NoError(t, rs.Close())
+}
+
 func TestRestoreRejectsIAVLNodeBeforeStore(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 

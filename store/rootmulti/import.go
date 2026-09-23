@@ -2,7 +2,6 @@ package rootmulti
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"math"
 
@@ -19,13 +18,9 @@ import (
 func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
-	if rs.db != nil {
-		rs.dropQuerySnapshot()
-		if err := rs.db.Close(); err != nil {
-			return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
-		}
-		rs.db = nil
-	}
+	// The importer rewrites rs.dir, so the current db, its published snapshot and
+	// every cached historical db mapped over those files have to go first.
+	rs.closeDBForReload()
 
 	item, err := rs.restore(height, format, protoReader)
 	if err != nil {
