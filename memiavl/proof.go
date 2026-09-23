@@ -39,6 +39,10 @@ GetNonMembershipProof will produce a CommitmentProof that the given key doesn't 
 If the key exists in the tree, this will return an error.
 */
 func (t *Tree) GetNonMembershipProof(key []byte) (*ics23.CommitmentProof, error) {
+	if t.root == nil {
+		return nil, errors.New("cannot create non-existence proof for an empty tree")
+	}
+
 	// idx is one node right of what we want....
 	var err error
 	idx, val := t.GetWithIndex(key)
@@ -84,13 +88,26 @@ func (t *Tree) VerifyNonMembership(proof *ics23.CommitmentProof, key []byte) boo
 // createExistenceProof will get the proof from the tree and convert the proof into a valid
 // existence proof, if that's what it is.
 func (t *Tree) createExistenceProof(key []byte) (*ics23.ExistenceProof, error) {
+	if t.root == nil {
+		return nil, errors.New("key does not exist")
+	}
+
 	path, node, err := pathToLeaf(t.root, key)
+	if err != nil {
+		return nil, err
+	}
+	// PersistedNode.Key()/Value() alias the mmap unconditionally, unlike Tree.Get, so clone under zeroCopy.
+	nodeKey, nodeValue := node.Key(), node.Value()
+	if !t.zeroCopy {
+		nodeKey = bytes.Clone(nodeKey)
+		nodeValue = bytes.Clone(nodeValue)
+	}
 	return &ics23.ExistenceProof{
-		Key:   node.Key(),
-		Value: node.Value(),
+		Key:   nodeKey,
+		Value: nodeValue,
 		Leaf:  convertLeafOp(int64(node.Version())),
 		Path:  convertInnerOps(path),
-	}, err
+	}, nil
 }
 
 func convertLeafOp(version int64) *ics23.LeafOp {
