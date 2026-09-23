@@ -1,6 +1,10 @@
 # Changelog
 
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): replace query-path mutex with lock-free snapshot
+- [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
+- [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
+- [#110](https://github.com/crypto-org-chain/cronos-store/pull/110) fix(store): disable zero-copy for historical queries so results outlive the DB cache
+- [#85](https://github.com/crypto-org-chain/cronos-store/pull/85) fix(memiavl): preserve configured CacheSize across background snapshot rewrite
 - [#86](https://github.com/crypto-org-chain/cronos-store/pull/86) fix(memiavl): close WAL after reading latest version in GetLatestVersion
 - [#82](https://github.com/crypto-org-chain/cronos-store/pull/82) fix(memiavl): close loaded MultiTree when CatchupWAL fails during snapshot rewrite
 - [#78](https://github.com/crypto-org-chain/cronos-store/pull/78) fix(store): return error for unknown store name in Query instead of panicking

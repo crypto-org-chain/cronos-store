@@ -22,6 +22,9 @@ const (
 	LockFileName               = "LOCK"
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
+
+	walCatchupTimeout = 5 * time.Second
+	walPollInterval   = 50 * time.Nanosecond
 )
 
 var errReadOnly = errors.New("db is read-only")
@@ -514,6 +517,26 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return walVersion(lastIndex, db.initialVersion), nil
 }
 
+func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := db.checkAsyncCommit(); err != nil {
+			return err
+		}
+		committedVersion, err := db.CommittedVersion()
+		if err != nil {
+			return fmt.Errorf("get wal version failed: %w", err)
+		}
+		if committedVersion >= targetVersion {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
+		}
+		time.Sleep(walPollInterval)
+	}
+}
+
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
 func (db *DB) checkBackgroundSnapshotRewrite() error {
 	// check the completeness of background snapshot rewriting
@@ -534,18 +557,8 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		for {
-			if err := db.checkAsyncCommit(); err != nil {
-				return errors.Join(err, result.mtree.Close())
-			}
-			committedVersion, err := db.CommittedVersion()
-			if err != nil {
-				return errors.Join(fmt.Errorf("get wal version failed: %w", err), result.mtree.Close())
-			}
-			if db.lastCommitInfo.Version == committedVersion {
-				break
-			}
-			time.Sleep(time.Nanosecond)
+		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, walCatchupTimeout); err != nil {
+			return errors.Join(err, result.mtree.Close())
 		}
 
 		// catchup the remaining wal
@@ -621,8 +634,14 @@ func (db *DB) pruneSnapshots() {
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
 			db.logger.Error("failed to find first snapshot", "err", err)
-		} else {
-			db.earliestSnapshotCache.Store(earliestVersion)
+			return
+		}
+		db.earliestSnapshotCache.Store(earliestVersion)
+
+		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
+		// the genesis placeholder snapshot has no corresponding wal entries yet.
+		if earliestVersion+1 < int64(initialVersion) {
+			return
 		}
 
 		if err := wal.TruncateFront(walIndex(earliestVersion+1, initialVersion)); err != nil {
@@ -897,7 +916,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 			return
 		}
 		cloned.logger.Info("finished rewriting snapshot", "version", cloned.Version())
-		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, 0, cloned.chainId)
+		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, cloned.cacheSize, cloned.chainId)
 		if err != nil {
 			ch <- snapshotResult{err: err}
 			return
