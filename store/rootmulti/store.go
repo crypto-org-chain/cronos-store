@@ -265,12 +265,32 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot also repoints the mounted iavl stores at the snapshot's
+// trees: flush mutates the live trees in place while readers branched off
+// rs.stores (CheckTx state on another ABCI connection) may still be reading.
+//
+// The repoint is not atomic across stores. Block execution runs on this
+// goroutine after the publish, so only CheckTx can see a torn view, and that
+// costs it an occasional stale read.
 func (rs *Store) publishQuerySnapshot() {
+	// full node cache: the mounted stores read these trees during block execution.
+	db := rs.db.Copy()
 	rs.querySnapshot.Store(&querySnapshot{
-		// no node cache: the snapshot is replaced every Commit, so it never warms up.
-		db:             rs.db.CopyWithCacheSize(0),
+		db:             db,
 		lastCommitInfo: rs.lastCommitInfo,
 	})
+
+	for key, store := range rs.stores {
+		memiavlStore, ok := store.(*memiavlstore.Store)
+		if !ok {
+			continue
+		}
+		tree := db.TreeByName(key.Name())
+		if tree == nil {
+			panic(fmt.Sprintf("no memiavl tree for mounted store: %s", key.Name()))
+		}
+		memiavlStore.SetTree(tree)
+	}
 }
 
 // latestDB never falls back to rs.db: closeDB nils it concurrently with readers.
@@ -343,18 +363,11 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
-
 	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
 	}
+	// also repoints the mounted stores' trees, which db.Commit may have reloaded.
 	rs.publishQuerySnapshot()
 	return rs.lastCommitInfo.CommitID()
 }
@@ -488,6 +501,8 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
+// A Write() on the result is discarded for iavl stores (nothing flushes their
+// change sets) but still reaches the transient and mem stores from rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {

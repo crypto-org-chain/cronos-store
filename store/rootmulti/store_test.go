@@ -497,6 +497,29 @@ func TestQueryEmptyStoreName(t *testing.T) {
 	}
 }
 
+func TestCloseIsIdempotent(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+
+	require.NoError(t, store.Close())
+	require.NoError(t, store.Close())
+}
+
+func TestQueryProveAgainstEmptyStore(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+	store.Commit()
+
+	res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.ErrorIs(t, err, sdkerrors.ErrInvalidRequest)
+	require.Contains(t, err.Error(), "failed to build non-membership proof")
+}
+
 func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {
 	dir := t.TempDir()
 	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
@@ -786,21 +809,30 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		}
 	}()
 
+	// baseapp's CheckTx state: branched once, read while commits flush.
+	checkState := store.CacheMultiStore()
+
 	readers := []func(){
-		func() { store.CacheMultiStore() },
+		func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
+		func() { checkState.GetKVStore(key).Get([]byte("k")) },
+		func() { store.GetKVStore(key).Get([]byte("k")) },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
 			if err == nil {
+				cms.GetKVStore(key).Get([]byte("k"))
 				if closer, ok := cms.(io.Closer); ok {
 					_ = closer.Close()
 				}
 			}
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k"), Prove: true})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
 		},
 		func() { store.LatestVersion() },
 		func() { store.EarliestVersion() },
