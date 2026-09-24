@@ -778,11 +778,19 @@ func (db *DB) waitAsyncCommit() error {
 	return db.latchWalErr(err)
 }
 
+// Copy returns a read-only view of the current state that shares the live
+// snapshot's mmap; see Tree.Copy for how long it stays valid.
 func (db *DB) Copy() *DB {
+	return db.CopyWithCacheSize(db.cacheSize)
+}
+
+// CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
+// short-lived copy: its cache would start cold and never pay for itself.
+func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	return db.copy(cacheSize)
 }
 
 func (db *DB) copy(cacheSize int) *DB {
@@ -794,6 +802,9 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 	}
+	// carry the cached earliest version so the copy does not rescan the
+	// snapshot directory on its first EarliestVersion call.
+	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
 	cloned.attachTraverseStateChanges()
 	return cloned
 }

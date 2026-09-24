@@ -1422,3 +1422,27 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
 }
+
+func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		CacheSize:       16,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.NotZero(t, earliest)
+
+	cp := db.CopyWithCacheSize(0)
+	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Nil(t, cp.TreeByName(testStoreName).cache)
+	require.NotNil(t, db.TreeByName(testStoreName).cache)
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+}

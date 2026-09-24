@@ -271,9 +271,11 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot copies the live db without a node cache: the snapshot is
+// replaced on the next Commit, so a cache would never warm up.
 func (rs *Store) publishQuerySnapshot() {
 	rs.querySnapshot.Store(&querySnapshot{
-		db:             rs.db.Copy(),
+		db:             rs.db.CopyWithCacheSize(0),
 		lastCommitInfo: rs.lastCommitInfo,
 	})
 }
