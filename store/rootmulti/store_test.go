@@ -436,7 +436,7 @@ func TestCloseClearsQuerySnapshot(t *testing.T) {
 	key := types.NewKVStoreKey(testStoreName)
 	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
 	require.NoError(t, rs.LoadLatestVersion())
-	rs.Commit() // publishes a querySnapshot backed by rs.db's mmap state.
+	rs.Commit()
 
 	require.NoError(t, rs.Close())
 	require.Nil(t, rs.querySnapshot.Load(), "Close must drop the querySnapshot before closing rs.db")
@@ -470,7 +470,7 @@ func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
 	t.Cleanup(func() { rs.Close() })
 	rs.AddListeners([]types.StoreKey{key})
 
-	rs.Commit() // publishes the querySnapshot whose cached stores map this test targets.
+	rs.Commit()
 
 	cms, err := rs.CacheMultiStoreWithVersion(0)
 	require.NoError(t, err)
@@ -750,9 +750,6 @@ func TestReadPathsWithClosedDB(t *testing.T) {
 	})
 }
 
-// A restore that fails after teardown leaves no db until the next load; the
-// store must then report no committed hash and hold no historical dbs mapped
-// over the directory the importer was rewriting.
 func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
@@ -765,12 +762,12 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
 	rs.Commit()
 
-	// populate the historical cache with a db mapped over the current files.
+	// populate the historical cache.
 	_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
 	require.NoError(t, err)
 	require.Len(t, rs.historicalDBCache.entries, 1)
 
-	// a stream the importer rejects, so Restore returns before LoadLatestVersion.
+	// a stream the importer rejects, so Restore fails before reloading.
 	var buf bytes.Buffer
 	w := protoio.NewDelimitedWriter(&buf)
 	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
@@ -791,8 +788,7 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
 }
 
-// closeDB runs on the state-sync goroutine while ABCI queries keep arriving;
-// run under -race.
+// closeDB runs on the state-sync goroutine while ABCI queries keep arriving.
 func TestReadPathsRaceAgainstClose(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
@@ -900,8 +896,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	}()
 
 	readers := []func(){
-		// wraps the live rs.stores, not the querySnapshot, so only construction is
-		// safe to exercise here -- not a read through the concurrently-mutated tree.
+		// wraps live rs.stores: only construction is safe here, not a read.
 		func() { store.CacheMultiStore() },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
@@ -968,9 +963,38 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 
 	require.NoError(t, rs.RollbackToVersion(1))
 
-	// The version-2 DB cached by the query above is still mmap'd over files the
-	// rollback discarded; answering from it would hand out state and a proof for a
-	// history this node no longer has.
+	// the cached version-2 db maps files the rollback discarded.
 	_, err = rs.Query(newQuery())
 	require.Error(t, err)
+}
+
+// WorkingHash flushes the next block into the live tree before Commit.
+func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
+	store, versions := newTestStore(t, 1)
+	defer store.Close()
+	key := store.keysByName[testStoreName]
+
+	store.GetKVStore(key).Set([]byte("k"), []byte("dirty"))
+	store.WorkingHash()
+
+	newQuery := func(height int64) *types.RequestQuery {
+		return &types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: height}
+	}
+	res, err := store.Query(newQuery(0))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0}, res.Value)
+	require.Equal(t, versions[0], res.Height)
+
+	for _, v := range []int64{0, versions[0]} {
+		cms, err := store.CacheMultiStoreWithVersion(v)
+		require.NoError(t, err)
+		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
+	}
+
+	cid := store.Commit()
+	res, err = store.Query(newQuery(0))
+	require.NoError(t, err)
+	require.Equal(t, []byte("dirty"), res.Value)
+	require.Equal(t, cid.Version, res.Height)
+	require.Equal(t, cid.Version, store.LatestVersion())
 }

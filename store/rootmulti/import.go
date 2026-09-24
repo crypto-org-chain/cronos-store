@@ -18,8 +18,7 @@ import (
 func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
-	// The importer rewrites rs.dir, so the current db, its published snapshot and
-	// every cached historical db mapped over those files have to go first.
+	// the importer rewrites rs.dir; everything mapped over it must close first.
 	rs.closeDBForReload()
 
 	item, err := rs.restore(height, format, protoReader)

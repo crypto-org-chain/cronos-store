@@ -1,7 +1,7 @@
 # Changelog
 
 - [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fix WAL durability-ack race, adopt lock-free query snapshot
-- [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): replace query-path mutex with lock-free snapshot
+- [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
 - [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
 - [#110](https://github.com/crypto-org-chain/cronos-store/pull/110) fix(store): disable zero-copy for historical queries so results outlive the DB cache
