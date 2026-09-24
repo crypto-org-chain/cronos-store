@@ -214,7 +214,6 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
-	stores         map[types.StoreKey]types.CacheWrapper
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -267,12 +266,10 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 }
 
 func (rs *Store) publishQuerySnapshot() {
-	// no node cache: the snapshot is replaced every Commit, so it never warms up.
-	db := rs.db.CopyWithCacheSize(0)
 	rs.querySnapshot.Store(&querySnapshot{
-		db:             db,
+		// no node cache: the snapshot is replaced every Commit, so it never warms up.
+		db:             rs.db.CopyWithCacheSize(0),
 		lastCommitInfo: rs.lastCommitInfo,
-		stores:         rs.wireListeners(rs.storesFromDB(db)),
 	})
 }
 
@@ -485,7 +482,9 @@ func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map
 	return stores
 }
 
-func (rs *Store) storesFromDB(db *memiavl.DB) map[types.StoreKey]types.CacheWrapper {
+// cacheMultiStoreFromDB takes closer=nil for a query snapshot, which shares
+// rs.db's mmap and must never be closed on its own.
+func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
 	// add the transient/mem stores registered in current app.
@@ -505,27 +504,22 @@ func (rs *Store) storesFromDB(db *memiavl.DB) map[types.StoreKey]types.CacheWrap
 		stores[key] = memiavlstore.New(tree.Tree, rs.logger)
 	}
 
-	return stores
-}
-
-// cacheMultiStoreFromDB takes closer=nil for a query snapshot, which shares
-// rs.db's mmap and must never be closed on its own.
-func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
-	return cachemulti.NewStore(rs.storesFromDB(db), nil, nil, closer)
+	return cachemulti.NewStore(stores, nil, nil, closer)
 }
 
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
+// A Write() on the result is discarded for iavl stores (nothing flushes their
+// change sets) but still reaches the transient and mem stores from rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
 	if snap == nil {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		// snap.stores already carries the listener wiring.
-		return cachemulti.NewStore(snap.stores, nil, nil, nil), nil
+		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
 	}
 
 	if version < 0 || version > math.MaxUint32 {

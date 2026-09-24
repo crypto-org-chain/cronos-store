@@ -461,7 +461,7 @@ func TestRollbackToVersionRebuildsStores(t *testing.T) {
 	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
+func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
 	key := types.NewKVStoreKey(testStoreName)
@@ -477,8 +477,10 @@ func TestCacheMultiStoreWithVersionZeroWiresListeners(t *testing.T) {
 	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
 	cms.Write()
 
-	require.NotEmpty(t, rs.listeners[key].PopStateCache(),
-		"CacheMultiStoreWithVersion(0) must wire listenkv for listening-enabled stores")
+	// the dropped write must not reach the listener stream either.
+	require.Empty(t, rs.listeners[key].PopStateCache())
+	rs.Commit()
+	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
 }
 
 func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
