@@ -1,8 +1,8 @@
 package memiavlstore
 
 import (
-	"fmt"
 	"io"
+	"sync/atomic"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
 	ics23 "github.com/cosmos/ics23/go"
@@ -26,18 +26,23 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
-	tree   *memiavl.Tree
+	// swapped by SetTree while queries run on another ABCI connection. The
+	// published tree is a Copy(), never the live tree flush mutates in place, so
+	// readers on the old pointer stay on stable nodes.
+	tree   atomic.Pointer[memiavl.Tree]
 	logger log.Logger
 
 	changeSet memiavl.ChangeSet
 }
 
 func New(tree *memiavl.Tree, logger log.Logger) *Store {
-	return &Store{tree: tree, logger: logger}
+	st := &Store{logger: logger}
+	st.tree.Store(tree)
+	return st
 }
 
 func (st *Store) SetTree(tree *memiavl.Tree) {
-	st.tree = tree
+	st.tree.Store(tree)
 }
 
 func (st *Store) Commit() types.CommitID {
@@ -45,9 +50,10 @@ func (st *Store) Commit() types.CommitID {
 }
 
 func (st *Store) LastCommitID() types.CommitID {
-	hash := st.tree.RootHash()
+	tree := st.tree.Load()
+	hash := tree.RootHash()
 	return types.CommitID{
-		Version: st.tree.Version(),
+		Version: tree.Version(),
 		Hash:    hash,
 	}
 }
@@ -89,12 +95,12 @@ func (st *Store) Set(key, value []byte) {
 
 // Get Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
-	return st.tree.Get(key)
+	return st.tree.Load().Get(key)
 }
 
 // Has Implements types.KVStore.
 func (st *Store) Has(key []byte) bool {
-	return st.tree.Has(key)
+	return st.tree.Load().Has(key)
 }
 
 // Delete Implements types.KVStore.
@@ -106,11 +112,11 @@ func (st *Store) Delete(key []byte) {
 }
 
 func (st *Store) Iterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, true)
+	return st.tree.Load().Iterator(start, end, true)
 }
 
 func (st *Store) ReverseIterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, false)
+	return st.tree.Load().Iterator(start, end, false)
 }
 
 // SetInitialVersion sets the initial version of the IAVL tree. It is used when
@@ -132,25 +138,29 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		return nil, errors.Wrap(types.ErrTxDecode, "query cannot be zero length")
 	}
 
-	if req.Height > 0 && req.Height != st.tree.Version() {
+	tree := st.tree.Load()
+	if req.Height > 0 && req.Height != tree.Version() {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidHeight, "invalid height")
 	}
 
 	res = &types.ResponseQuery{
-		Height: st.tree.Version(),
+		Height: tree.Version(),
 	}
 
 	switch req.Path {
 	case "/key": // get by key
 		res.Key = req.Data // data holds the key bytes
-		res.Value = st.tree.Get(res.Key)
+		res.Value = tree.Get(res.Key)
 
 		if !req.Prove {
 			break
 		}
 
 		// get proof from tree and convert to merkle.Proof before adding to result
-		res.ProofOps = getProofFromTree(st.tree, req.Data, res.Value != nil)
+		res.ProofOps, err = getProofFromTree(tree, req.Data, res.Value != nil)
+		if err != nil {
+			return nil, err
+		}
 	case "/subspace":
 		pairs := memiavl.Pairs{
 			Pairs: make([]memiavl.Pair, 0),
@@ -159,7 +169,9 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		subspace := req.Data
 		res.Key = subspace
 
-		iterator := types.KVStorePrefixIterator(st, subspace)
+		// use the tree loaded above, or a concurrent SetTree could serve a newer
+		// version than res.Height reports.
+		iterator := tree.Iterator(subspace, types.PrefixEndBytes(subspace), true)
 		for ; iterator.Valid(); iterator.Next() {
 			pairs.Pairs = append(pairs.Pairs, memiavl.Pair{Key: iterator.Key(), Value: iterator.Value()})
 		}
@@ -182,34 +194,29 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 }
 
 func (st *Store) WorkingHash() []byte {
-	return st.tree.RootHash()
+	return st.tree.Load().RootHash()
 }
 
-// Takes a MutableTree, a key, and a flag for creating existence or absence proof and returns the
-// appropriate merkle.Proof. Since this must be called after querying for the value, this function should never error
-// Thus, it will panic on error rather than returning it
-func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) *cmtprotocrypto.ProofOps {
+func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
 	)
 
 	if exists {
-		// value was found
+		// the value came from this tree, so a failure means the tree is inconsistent.
 		commitmentProof, err = tree.GetMembershipProof(key)
 		if err != nil {
-			// sanity check: If value was found, membership proof must be creatable
-			panic(fmt.Sprintf("unexpected value for empty proof: %s", err.Error()))
+			return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build membership proof for key %X: %s", key, err)
 		}
 	} else {
-		// value wasn't found
+		// an empty tree has no absence proof; that is the querier's problem, not a panic.
 		commitmentProof, err = tree.GetNonMembershipProof(key)
 		if err != nil {
-			// sanity check: If value wasn't found, nonmembership proof must be creatable
-			panic(fmt.Sprintf("unexpected error for nonexistence proof: %s", err.Error()))
+			return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build non-membership proof for key %X: %s", key, err)
 		}
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)
-	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}
+	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}, nil
 }
