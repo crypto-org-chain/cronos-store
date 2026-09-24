@@ -514,7 +514,9 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 	return cachemulti.NewStore(rs.storesFromDB(db), nil, nil, closer)
 }
 
-// CacheMultiStoreWithVersion Implements interface MultiStore.
+// CacheMultiStoreWithVersion Implements interface MultiStore
+// used to createQueryContext, abci_query or grpc query service.
+//
 // version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.querySnapshot.Load()
