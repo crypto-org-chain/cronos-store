@@ -6,14 +6,17 @@ import (
 	fmt "fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/wal"
 )
 
 const TestAppChainID = "test_chain"
@@ -158,96 +161,6 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 
 	// three files: snapshot, current link, wal, LOCK
 	require.Equal(t, 4, len(entries))
-}
-
-func TestWaitCommittedVersionTimesOut(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version that the wal will never reach, simulating a stuck/dead wal writer.
-	unreachableTarget := committedVersion + 1000
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(unreachableTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "timed out waiting for wal to catch up")
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return within the bounded timeout; it is spinning forever")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(committedVersion, 5*time.Second)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitCommittedVersion did not return for an already-caught-up version")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version the wal has already passed, simulating a concurrent commit
-	// that advanced the wal beyond the target between polls. An exact "==" check would
-	// never match again and spin until timeout; ">=" must succeed immediately.
-	pastTarget := committedVersion - 1
-	require.GreaterOrEqual(t, pastTarget, int64(0))
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(pastTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return promptly when wal already advanced past target")
-	}
 }
 
 func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
@@ -720,7 +633,8 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
 	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
-	// reported version or checkBackgroundSnapshotRewrite's wait loop spins forever.
+	// reported version or checkBackgroundSnapshotRewrite rejects the rewrite for
+	// being behind the last commit before it ever reads the corrupt entry.
 	db.lastCommitInfo.Version = corruptVersion
 
 	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
@@ -735,11 +649,97 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	require.Nil(t, mtree.trees, "mtree must be closed on catchup failure, not leaked")
 }
 
-func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+func TestCheckBackgroundSnapshotRewriteDiscardsAheadResult(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
 		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world0")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world1")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	// a rewrite result that caught up past the committed version.
+	ahead, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
+	require.NoError(t, err)
+	require.NoError(t, ahead.CatchupWAL(db.wal, 2))
+	db.lastCommitInfo.Version = ahead.Version() - 1
+	injectSnapshotRewriteResult(db, ahead)
+
+	require.NoError(t, db.checkBackgroundSnapshotRewrite(), "an ahead result must be discarded, not surfaced as a catchup error")
+	require.Nil(t, ahead.trees, "discarded mtree must be closed")
+
+	// the live db's own snapshot must be unaffected by discarding the independent one.
+	require.Equal(t, []byte("world1"), db.TreeByName(testStoreName).Get([]byte("hello")))
+}
+
+func TestCommittedVersionNilWAL(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = db.CommittedVersion()
+	require.Error(t, err)
+}
+
+func TestCommittedVersionConcurrentWithClose(t *testing.T) {
+	// CommittedVersion must take db.mtx: Close nils db.wal under it.
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_, _ = db.CommittedVersion()
+		}
+	}()
+
+	require.NoError(t, db.Close())
+	<-done
+}
+
+func TestCommitAfterCloseAtSnapshotIntervalDoesNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing:  true,
+		InitialStores:    []string{testStoreName},
+		SnapshotInterval: 1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	require.NotPanics(t, func() {
+		_, _ = db.Commit()
+	})
+}
+
+func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing:     true,
+		InitialStores:       []string{testStoreName},
+		SnapshotWriterLimit: 1,
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
@@ -750,14 +750,31 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	corruptTrailingWALEntry(t, db)
+	// hold the sole snapshot writer so a wal entry can land mid-rewrite, which
+	// the post-rewrite CatchupWAL then trips over.
+	release := make(chan struct{})
+	held := make(chan struct{})
+	db.snapshotWriterPool.Submit(func() {
+		close(held)
+		<-release
+	})
+	<-held
+
+	var loaded *MultiTree
+	db.onCatchupMTreeLoaded = func(mtree *MultiTree) { loaded = mtree }
 
 	require.NoError(t, db.RewriteSnapshotBackground())
+
+	corruptTrailingWALEntry(t, db)
+
+	close(release)
 
 	select {
 	case result := <-db.snapshotRewriteChan:
 		require.Error(t, result.err, "background catchup failure must be reported")
 		require.Nil(t, result.mtree, "no tree handed back on failure, so no way to leak it via the result")
+		require.NotNil(t, loaded, "hook must have observed the loaded mtree before catchup failed")
+		require.Nil(t, loaded.trees, "mtree must be closed on catchup failure, not leaked")
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	case <-time.After(5 * time.Second):
@@ -923,6 +940,144 @@ func TestFastCommit(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestCommitFsyncsWALBeforeReturning(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFsyncsWALBeforeReturning(t, asyncCommit)
+		})
+	}
+}
+
+func asyncCommitBufferFor(asyncCommit bool) int {
+	if asyncCommit {
+		return 10
+	}
+	return -1
+}
+
+func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	original := db.walSync
+	var syncCalls atomic.Int32
+	db.walSync = func(w *wal.Log) error {
+		syncCalls.Add(1)
+		return original(w)
+	}
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+}
+
+func TestCommitFailsWhenWALSyncFails(t *testing.T) {
+	for _, asyncCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
+			testCommitFailsWhenWALSyncFails(t, asyncCommit)
+		})
+	}
+}
+
+func testCommitFailsWhenWALSyncFails(t *testing.T, asyncCommit bool) {
+	t.Helper()
+
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	syncErr := errors.New("simulated fsync failure")
+	db.walSync = func(*wal.Log) error {
+		return syncErr
+	}
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, syncErr)
+	require.Zero(t, v)
+
+	// both paths must latch the error so Close still surfaces it.
+	require.ErrorIs(t, db.Close(), syncErr)
+}
+
+// newDBWithDeadAsyncWALWriter kills the async wal writer by closing the wal out
+// from under it and driving one Commit through the resulting error.
+func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
+	t.Helper()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 10,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	// close the wal out from under the writer so its next write fails.
+	require.NoError(t, db.wal.Close())
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, wal.ErrClosed)
+	require.Zero(t, v)
+
+	// join the writer: it parks its error on walQuit before exiting.
+	<-db.walQuit
+
+	return db
+}
+
+func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
+	dir := t.TempDir()
+	db := newDBWithDeadAsyncWALWriter(t, dir)
+
+	// release the file lock without touching the now-closed wal.
+	db.walChan = nil
+	db.walQuit = nil
+	db.wal = nil
+	require.NoError(t, db.fileLock.Unlock())
+	require.NoError(t, db.fileLock.Destroy())
+}
+
+func TestCommitAfterDeadAsyncWriterDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+	db := newDBWithDeadAsyncWALWriter(t, dir)
+
+	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+		{Name: testStoreName, Changeset: ChangeSet{
+			Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
+		}},
+	}))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := db.Commit()
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Commit call deadlocked waiting on a dead async wal writer")
+	}
+}
+
 func TestRepeatedApplyChangeSet(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{test1StoreName, test2StoreName}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
 	require.NoError(t, err)
@@ -1025,10 +1180,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	t.Helper()
 	dir := t.TempDir()
 
-	asyncCommitBuffer := -1
-	if asyncCommit {
-		asyncCommitBuffer = 10
-	}
+	asyncCommitBuffer := asyncCommitBufferFor(asyncCommit)
 
 	db, err := Load(dir, Options{
 		CreateIfMissing:   true,
@@ -1082,6 +1234,61 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
 	require.Equal(t, commitInfo, *db.LastCommitInfo())
+}
+
+func TestDBCloseIsIdempotent(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Close())
+	require.NoError(t, db.Close())
+}
+
+func TestSnapshotRewriteDuringWALReplay(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", fmt.Sprintf("world%d", i))))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	commitInfo := *db.LastCommitInfo()
+	require.NoError(t, db.Close())
+
+	// tree at version 5, wal still holds 6..10.
+	db, err = Load(dir, Options{TargetVersion: 5}, TestAppChainID)
+	require.NoError(t, err)
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+	require.Equal(t, int64(10), committedVersion)
+	require.Equal(t, int64(5), db.Version())
+
+	// no rewrite may start while the wal is ahead; it would overshoot and be discarded.
+	interval := db.snapshotInterval
+	db.snapshotInterval = 1
+	db.rewriteIfApplicable(db.Version())
+	require.Nil(t, db.snapshotRewriteChan, "no rewrite may start while the wal is ahead")
+	db.snapshotInterval = interval
+
+	// An explicit rewrite must also be refused while the wal is ahead.
+	require.Error(t, db.RewriteSnapshotBackground())
+
+	for i := 5; i < 10; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", fmt.Sprintf("world%d", i))))
+		_, err := db.Commit()
+		require.NoError(t, err, "commit must not fail while the wal is ahead of the tree")
+	}
+	require.Equal(t, commitInfo, *db.LastCommitInfo())
+
+	require.NoError(t, db.Close())
 }
 
 // TestEarliestVersion verifies that EarliestVersion returns the earliest
@@ -1421,6 +1628,31 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
+}
+
+func TestCloseStopsSnapshotWriterPool(t *testing.T) {
+	// read-only DBs are opened and closed once per historical query.
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		db, err := Load(t.TempDir(), Options{
+			CreateIfMissing: true,
+			InitialStores:   []string{testStoreName},
+		}, TestAppChainID)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+	}
+
+	// Goroutine teardown is not instantaneous, so allow a short settle window.
+	var after int
+	for i := 0; i < 100; i++ {
+		after = runtime.NumGoroutine()
+		if after <= before+5 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("goroutines leaked across 20 Load/Close cycles: before=%d after=%d", before, after)
 }
 
 func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {

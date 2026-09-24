@@ -1,5 +1,6 @@
 # Changelog
 
+- [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fsync WAL entry before acknowledging Commit
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
 - [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
