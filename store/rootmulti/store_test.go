@@ -862,3 +862,36 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 	_, err = rs.Query(newQuery())
 	require.Error(t, err)
 }
+
+// Latest-height reads must serve the last committed version even while the live
+// tree already carries the next block's flushed-but-uncommitted writes, which is
+// the state WorkingHash leaves behind between FinalizeBlock and Commit.
+func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
+	store, versions := newTestStore(t, 1)
+	defer store.Close()
+	key := store.keysByName[testStoreName]
+
+	store.GetKVStore(key).Set([]byte("k"), []byte("dirty"))
+	store.WorkingHash()
+
+	newQuery := func(height int64) *types.RequestQuery {
+		return &types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: height}
+	}
+	res, err := store.Query(newQuery(0))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0}, res.Value)
+	require.Equal(t, versions[0], res.Height)
+
+	for _, v := range []int64{0, versions[0]} {
+		cms, err := store.CacheMultiStoreWithVersion(v)
+		require.NoError(t, err)
+		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
+	}
+
+	cid := store.Commit()
+	res, err = store.Query(newQuery(0))
+	require.NoError(t, err)
+	require.Equal(t, []byte("dirty"), res.Value)
+	require.Equal(t, cid.Version, res.Height)
+	require.Equal(t, cid.Version, store.LatestVersion())
+}
