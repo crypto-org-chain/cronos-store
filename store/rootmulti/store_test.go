@@ -641,9 +641,6 @@ func TestCacheMultiStoreWithVersionHistoricalHeightSkipsDeletedStore(t *testing.
 	require.NotPanics(t, func() { cms.GetKVStore(testKey) })
 }
 
-// A restore that fails after teardown leaves no db until the next load; the
-// store must then report no committed hash and hold no historical dbs mapped
-// over the directory the importer was rewriting.
 func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
@@ -656,12 +653,12 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
 	rs.Commit()
 
-	// populate the historical cache with a db mapped over the current files.
+	// populate the historical cache.
 	_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
 	require.NoError(t, err)
 	require.Len(t, rs.historicalDBCache.entries, 1)
 
-	// a stream the importer rejects, so Restore returns before LoadLatestVersion.
+	// a stream the importer rejects, so Restore fails before reloading.
 	var buf bytes.Buffer
 	w := protoio.NewDelimitedWriter(&buf)
 	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
@@ -682,8 +679,7 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
 }
 
-// closeDB runs on the state-sync goroutine while ABCI queries keep arriving;
-// run under -race.
+// closeDB runs on the state-sync goroutine while ABCI queries keep arriving.
 func TestReadPathsRaceAgainstClose(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
@@ -856,16 +852,12 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 
 	require.NoError(t, rs.RollbackToVersion(1))
 
-	// The version-2 DB cached by the query above is still mmap'd over files the
-	// rollback discarded; answering from it would hand out state and a proof for a
-	// history this node no longer has.
+	// the cached version-2 db maps files the rollback discarded.
 	_, err = rs.Query(newQuery())
 	require.Error(t, err)
 }
 
-// Latest-height reads must serve the last committed version even while the live
-// tree already carries the next block's flushed-but-uncommitted writes, which is
-// the state WorkingHash leaves behind between FinalizeBlock and Commit.
+// WorkingHash flushes the next block into the live tree before Commit.
 func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
 	store, versions := newTestStore(t, 1)
 	defer store.Close()

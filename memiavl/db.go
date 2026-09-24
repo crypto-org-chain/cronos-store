@@ -802,8 +802,7 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 	}
-	// carry the cached earliest version so the copy does not rescan the
-	// snapshot directory on its first EarliestVersion call.
+	// so the copy does not rescan the snapshot dir on its first EarliestVersion.
 	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
 	cloned.attachTraverseStateChanges()
 	return cloned
