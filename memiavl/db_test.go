@@ -1036,6 +1036,9 @@ func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
 	require.ErrorIs(t, err, wal.ErrClosed)
 	require.Zero(t, v)
 
+	// join the writer: it parks its error on walQuit before exiting.
+	<-db.walQuit
+
 	return db
 }
 
@@ -1043,9 +1046,7 @@ func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
 	dir := t.TempDir()
 	db := newDBWithDeadAsyncWALWriter(t, dir)
 
-	// release the writer (parked delivering its error on walQuit) and the file
-	// lock, without touching the now-closed wal.
-	<-db.walQuit
+	// release the file lock without touching the now-closed wal.
 	db.walChan = nil
 	db.walQuit = nil
 	db.wal = nil

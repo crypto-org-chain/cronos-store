@@ -474,8 +474,8 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(rs.wireListeners(stores), nil, nil, nil)
 }
 
-// wireListeners wraps listening-enabled stores so listeners see writes made
-// through the cache store.
+// wireListeners wraps listening-enabled stores in place so listeners see
+// writes made through the cache store.
 func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map[types.StoreKey]types.CacheWrapper {
 	for k, store := range stores {
 		if kv, ok := store.(types.KVStore); ok && rs.ListeningEnabled(k) {

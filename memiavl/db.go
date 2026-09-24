@@ -762,7 +762,6 @@ func (db *DB) Commit() (int64, error) {
 				return 0, db.latchFatalErr(err)
 			}
 		} else {
-			db.wbatch.Clear()
 			if err := db.writeAndSyncWAL(&db.wbatch, []*walEntry{&entry}); err != nil {
 				return 0, db.latchFatalErr(err)
 			}
@@ -805,7 +804,6 @@ func (db *DB) initAsyncCommit() {
 				walQuit <- writeErr
 				return
 			}
-			batch.Clear()
 		}
 	}()
 
@@ -857,6 +855,7 @@ func (db *DB) copy(cacheSize int) *DB {
 		logger:             db.logger,
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
+		walSync:            db.walSync,
 	}
 	// so the copy does not rescan the snapshot dir on its first EarliestVersion.
 	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
@@ -1527,16 +1526,26 @@ func channelBatchRecv[T any](ch <-chan *T) []*T {
 	return result
 }
 
+// writeAndSyncWAL owns batch for the call and leaves it cleared.
 func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
+	defer batch.Clear()
+
 	lastIndex, err := db.wal.LastIndex()
 	if err != nil {
 		return err
 	}
 
+	written := false
 	for _, entry := range entries {
-		if err := writeEntry(batch, db.logger, lastIndex, entry); err != nil {
+		ok, err := writeEntry(batch, db.logger, lastIndex, entry)
+		if err != nil {
 			return err
 		}
+		written = written || ok
+	}
+	if !written {
+		// every entry was already durable (replay after a restart), nothing to sync.
+		return nil
 	}
 
 	if err := db.wal.WriteBatch(batch); err != nil {
@@ -1550,17 +1559,18 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 	return fsyncDir(walPath(db.dir))
 }
 
-func writeEntry(batch *wal.Batch, logger Logger, lastIndex uint64, entry *walEntry) error {
+// writeEntry reports whether it added entry to batch.
+func writeEntry(batch *wal.Batch, logger Logger, lastIndex uint64, entry *walEntry) (bool, error) {
 	bz, err := entry.data.Marshal()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// already durable; happens on replay after a restart.
 	if entry.index <= lastIndex {
 		logger.Info("commit old version idempotently", "lastIndex", lastIndex, "version", entry.index)
-	} else {
-		batch.Write(entry.index, bz)
+		return false, nil
 	}
-	return nil
+	batch.Write(entry.index, bz)
+	return true, nil
 }
