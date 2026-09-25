@@ -6,65 +6,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIteratorDomainNilBounds(t *testing.T) {
+// Domain must report the caller's unprefixed bounds, not the prefixed range the
+// iterator rewrites start/end to internally.
+func TestIteratorDomain(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
-	itr, err := store.IteratorAtVersion(testStoreKey, nil, nil, nil)
-	require.NoError(t, err)
-	defer itr.Close()
+	cases := []struct {
+		name       string
+		reverse    bool
+		start, end []byte
+	}{
+		{name: "nil bounds"},
+		{name: "nil bounds reverse", reverse: true},
+		{name: "explicit bounds", start: []byte("aaa"), end: []byte("zzz")},
+		{name: "explicit end only", end: []byte("zzz")},
+		{name: "explicit start only", start: []byte("aaa")},
+	}
 
-	start, end := itr.Domain()
-	require.Nil(t, start)
-	require.Nil(t, end)
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			newIterator := store.IteratorAtVersion
+			if tc.reverse {
+				newIterator = store.ReverseIteratorAtVersion
+			}
+			itr, err := newIterator(testStoreKey, tc.start, tc.end, nil)
+			require.NoError(t, err)
+			defer itr.Close()
 
-func TestReverseIteratorDomainNilBounds(t *testing.T) {
-	store, err := NewStore(t.TempDir())
-	require.NoError(t, err)
-
-	itr, err := store.ReverseIteratorAtVersion(testStoreKey, nil, nil, nil)
-	require.NoError(t, err)
-	defer itr.Close()
-
-	start, end := itr.Domain()
-	require.Nil(t, start)
-	require.Nil(t, end)
-}
-
-func TestIteratorDomainExplicitBounds(t *testing.T) {
-	store, err := NewStore(t.TempDir())
-	require.NoError(t, err)
-
-	explicitStart := []byte("aaa")
-	explicitEnd := []byte("zzz")
-
-	itr, err := store.IteratorAtVersion(testStoreKey, explicitStart, explicitEnd, nil)
-	require.NoError(t, err)
-	defer itr.Close()
-
-	start, end := itr.Domain()
-	require.Equal(t, explicitStart, start)
-	require.Equal(t, explicitEnd, end)
-}
-
-func TestIteratorDomainMixedBounds(t *testing.T) {
-	store, err := NewStore(t.TempDir())
-	require.NoError(t, err)
-
-	explicitEnd := []byte("zzz")
-	itr, err := store.IteratorAtVersion(testStoreKey, nil, explicitEnd, nil)
-	require.NoError(t, err)
-	start, end := itr.Domain()
-	require.Nil(t, start)
-	require.Equal(t, explicitEnd, end)
-	require.NoError(t, itr.Close())
-
-	explicitStart := []byte("aaa")
-	itr2, err := store.IteratorAtVersion(testStoreKey, explicitStart, nil, nil)
-	require.NoError(t, err)
-	start, end = itr2.Domain()
-	require.Equal(t, explicitStart, start)
-	require.Nil(t, end)
-	require.NoError(t, itr2.Close())
+			start, end := itr.Domain()
+			require.Equal(t, tc.start, start)
+			require.Equal(t, tc.end, end)
+		})
+	}
 }

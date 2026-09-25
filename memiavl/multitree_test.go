@@ -2,8 +2,10 @@ package memiavl
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -472,5 +474,107 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)
 		})
+	}
+}
+
+func TestRunWorkerGroupConvertsPanicToError(t *testing.T) {
+	pool := pond.New(2, 10)
+	defer pool.StopAndWait()
+
+	var ran atomic.Int32
+	err := RunWorkerGroup(pool, []string{store1Name, store2Name}, func(i int) error {
+		ran.Add(1)
+		if i == 0 {
+			panic("boom")
+		}
+		return nil
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
+	require.Contains(t, err.Error(), store1Name)
+	// A panicking task must not take down its siblings.
+	require.EqualValues(t, 2, ran.Load())
+}
+
+func TestRunWorkerGroupWaitsForEveryTask(t *testing.T) {
+	// One worker for three tasks, so two are still queued when Wait is entered.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	var finished atomic.Int32
+	labels := []string{store1Name, store2Name, store3Name}
+	err := RunWorkerGroup(pool, labels, func(int) error {
+		time.Sleep(10 * time.Millisecond)
+		finished.Add(1)
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.EqualValues(t, len(labels), finished.Load())
+}
+
+func TestRunWorkerGroupJoinsEveryError(t *testing.T) {
+	pool := pond.New(3, 10)
+	defer pool.StopAndWait()
+
+	err := RunWorkerGroup(pool, []string{store1Name, store2Name, store3Name}, func(i int) error {
+		if i == 1 {
+			return nil
+		}
+		return fmt.Errorf("task %d failed", i)
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "task 0 failed")
+	require.Contains(t, err.Error(), "task 2 failed")
+}
+
+// WriteSnapshotWithContext must not return while a tree write is still running:
+// RewriteSnapshotWithContext removes the snapshot directory as soon as it
+// returns an error, so an early return would race the in-flight writers.
+func TestMultiTreeWriteSnapshotWaitsForInFlightWorkers(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	mtree.TreeByName(store1Name).set([]byte("k"), []byte("v"))
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	// One worker, parked on a blocking task, so every snapshot write stays queued
+	// behind it until released.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+	release := make(chan struct{})
+	// Runs before StopAndWait on every exit, so a failed assertion can't hang the
+	// test on the parked worker.
+	releaseWorker := sync.OnceFunc(func() { close(release) })
+	defer releaseWorker()
+	held := make(chan struct{})
+	pool.Submit(func() {
+		close(held)
+		<-release
+	})
+	<-held
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mtree.WriteSnapshotWithContext(ctx, t.TempDir(), pool)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("returned %v while the writes were still queued behind a running task", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseWorker()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteSnapshotWithContext did not return after the worker was released")
 	}
 }
