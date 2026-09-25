@@ -1,5 +1,6 @@
 # Changelog
 
+- [#TBD](https://github.com/crypto-org-chain/cronos-store/pull/TBD) fix(memiavl): reject metadata with no commit info and stop caching the earliest-version fallback
 - [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
 - [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
 - [#110](https://github.com/crypto-org-chain/cronos-store/pull/110) fix(store): disable zero-copy for historical queries so results outlive the DB cache

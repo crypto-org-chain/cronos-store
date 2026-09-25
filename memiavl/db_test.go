@@ -1139,6 +1139,49 @@ func TestEarliestVersion(t *testing.T) {
 	require.Equal(t, earliest, earliest2)
 }
 
+func TestEarliestVersionFallbackNotCached(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotKeepRecent: 0,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// Only the genesis placeholder snapshot-0 exists, so EarliestVersion
+	// falls back to initialVersion.
+	fallback, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, fallback)
+	// The genesis-only state must still be cached: this runs on the query hot
+	// path and a miss costs a directory scan.
+	require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
+
+	// InitChain sets the initial version after the store is loaded; a cached
+	// fallback value would keep reporting 1 here.
+	require.NoError(t, db.SetInitialVersion(100))
+	got, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, got)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", fmt.Sprintf("v%d", i))))
+		_, err = db.Commit()
+		require.NoError(t, err)
+	}
+	// A background rewrite prunes snapshot-0 (keep-recent is 0) and refreshes
+	// the cache with the first real snapshot version.
+	require.NoError(t, db.RewriteSnapshotBackground())
+	for db.snapshotRewriteChan != nil {
+		require.NoError(t, db.checkAsyncTasks())
+	}
+	waitPrune(db)
+
+	got, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 102, got)
+}
+
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
 // height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestEarliestVersionUnpruned(t *testing.T) {
@@ -1214,7 +1257,7 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// seed a sane cache value so we can verify it's left untouched below.
+	// Poison the cache, as if pruning had previously found a real snapshot.
 	db.earliestSnapshotCache.Store(1)
 
 	// remove every snapshot directory so firstSnapshotVersion errors out.
@@ -1233,8 +1276,8 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	require.Contains(t, errs, "failed to find first snapshot")
 	// the truncation path must not have been reached with the bogus zero value.
 	require.NotContains(t, errs, "failed to truncate wal")
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load(),
-		"cache must not be overwritten with the zero value on error")
+	require.Zero(t, db.earliestSnapshotCache.Load(),
+		"cache must be invalidated rather than left pointing at an already-deleted snapshot")
 }
 
 func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {

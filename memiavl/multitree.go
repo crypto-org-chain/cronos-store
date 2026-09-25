@@ -494,13 +494,19 @@ func walVersion(index uint64, initialVersion uint32) int64 {
 
 func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	// load commit info
-	bz, err := os.ReadFile(filepath.Join(dir, MetadataFileName))
+	path := filepath.Join(dir, MetadataFileName)
+	bz, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var metadata MultiTreeMetadata
 	if err := metadata.Unmarshal(bz); err != nil {
 		return nil, err
+	}
+	// Every writer sets CommitInfo, so nil means the file is truncated or
+	// corrupt (an empty file unmarshals cleanly); fail instead of dereferencing.
+	if metadata.CommitInfo == nil {
+		return nil, fmt.Errorf("metadata file %s is missing commit info", path)
 	}
 	if metadata.CommitInfo.Version > math.MaxUint32 {
 		return nil, fmt.Errorf("commit info version overflows uint32: %d", metadata.CommitInfo.Version)
