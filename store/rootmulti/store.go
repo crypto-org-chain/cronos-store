@@ -279,7 +279,11 @@ func (rs *Store) publishQuerySnapshot() {
 		db:             db,
 		lastCommitInfo: rs.lastCommitInfo,
 	})
+	rs.setMountedTrees(db)
+}
 
+// setMountedTrees points every mounted iavl store at db's trees.
+func (rs *Store) setMountedTrees(db *memiavl.DB) {
 	for key, store := range rs.stores {
 		memiavlStore, ok := store.(*memiavlstore.Store)
 		if !ok {
@@ -343,6 +347,9 @@ func (rs *Store) WorkingHash() []byte {
 	if rs.sdk46Compact {
 		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
 	}
+	// reads before Commit (retention height, Precommit) must see this block's
+	// writes. Copied after hashing, so SaveVersion only reads the shared nodes.
+	rs.setMountedTrees(rs.db.CopyWithCacheSize(0))
 	return commitInfo.Hash()
 }
 

@@ -805,6 +805,9 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		for i := 0; i < commits; i++ {
 			kv := store.GetKVStore(key)
 			kv.Set([]byte("k"), []byte{byte(i)})
+			store.WorkingHash()
+			// a write after WorkingHash lands in the same version as the working copy.
+			kv.Set([]byte("late"), []byte{byte(i)})
 			store.Commit()
 		}
 	}()
@@ -911,6 +914,8 @@ func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
 	}
+	// baseapp's finalize state reads through the mounted stores until Commit.
+	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
 
 	cid := store.Commit()
 	res, err = store.Query(newQuery(0))
