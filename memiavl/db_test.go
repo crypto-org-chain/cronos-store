@@ -225,6 +225,8 @@ func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the default async writer may not have written the entry yet.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	committedVersion, err := db.CommittedVersion()
 	require.NoError(t, err)
@@ -717,6 +719,9 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.NoError(t, db.RewriteSnapshot())
+	// the default async writer may not have written the entry yet; corrupting the
+	// wal first would make it fail with "out of order" instead of the catchup.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
 	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
@@ -749,6 +754,9 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the default async writer may not have written the entry yet; corrupting the
+	// wal first would make it fail with "out of order" instead of the catchup.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptTrailingWALEntry(t, db)
 
@@ -1302,6 +1310,8 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
+	// the default async writer may not have written the entry FirstVersion reads below.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
