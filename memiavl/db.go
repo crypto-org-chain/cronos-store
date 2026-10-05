@@ -309,6 +309,14 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 	}
 
+	if !db.readOnly {
+		// readers query copies, which can't fill this db's cache; warm it here so
+		// every copy inherits it instead of rescanning the snapshot dir.
+		if _, err := db.EarliestVersion(); err != nil {
+			opts.Logger.Error("failed to cache earliest version", "err", err)
+		}
+	}
+
 	return db, nil
 }
 
@@ -355,7 +363,16 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	return initEmptyDB(db.dir, db.initialVersion, db.chainId)
+	if err := initEmptyDB(db.dir, db.initialVersion, db.chainId); err != nil {
+		return err
+	}
+
+	// the earliest version follows the initial version, so re-warm the cache Load filled.
+	db.earliestSnapshotCache.Store(0)
+	if _, err := db.EarliestVersion(); err != nil {
+		db.logger.Error("failed to cache earliest version", "err", err)
+	}
+	return nil
 }
 
 // ApplyUpgrades wraps MultiTree.ApplyUpgrades, it also append the upgrades in a pending log,
