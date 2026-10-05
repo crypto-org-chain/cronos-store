@@ -30,8 +30,8 @@ jobs:
         with:
           files: |
             **/*.go
-            *.mod
-            *.sum
+            **/go.mod
+            **/go.sum
       - name: install rocksDB dependencies
         run: |
           sudo apt-get update
