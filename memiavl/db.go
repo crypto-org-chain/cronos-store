@@ -101,7 +101,7 @@ type DB struct {
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
 	// scanning the directory.
-	earliestSnapshotCache atomic.Int64
+	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
 	wbatch wal.Batch
@@ -303,6 +303,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		snapshotWriterPool:     workerPool,
 		ownsWriterPool:         true,
 		walSync:                writeAheadLog.Sync,
+		earliestSnapshotCache:  new(atomic.Int64),
 	}
 	ownershipMoved = true
 	db.attachTraverseStateChanges()
@@ -319,8 +320,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	}
 
 	if !db.readOnly {
-		// readers query copies, which can't fill this db's cache; warm it here so
-		// every copy inherits it instead of rescanning the snapshot dir.
+		// warm the cache here so no query on a copy pays for the first snapshot dir scan.
 		if _, err := db.EarliestVersion(); err != nil {
 			opts.Logger.Error("failed to cache earliest version", "err", err)
 		}
@@ -886,8 +886,8 @@ func (db *DB) copy(cacheSize int) *DB {
 		snapshotWriterPool: db.snapshotWriterPool,
 		walSync:            db.walSync,
 	}
-	// so the copy does not rescan the snapshot dir on its first EarliestVersion.
-	cloned.earliestSnapshotCache.Store(db.earliestSnapshotCache.Load())
+	// shared so a prune after this copy is taken still reaches its readers.
+	cloned.earliestSnapshotCache = db.earliestSnapshotCache
 	cloned.attachTraverseStateChanges()
 	return cloned
 }
