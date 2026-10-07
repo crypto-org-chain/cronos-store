@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -389,34 +390,46 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 	}
 }
 
-func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
+func TestLoadMultiTreeRejectsCorruptSnapshot(t *testing.T) {
 	const wantErrMismatch = "snapshot metadata commit info does not match loaded trees"
+
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
 	cases := []struct {
 		name    string
-		corrupt func(ci *CommitInfo)
+		corrupt func(t *testing.T, snapshotDir string, ci *CommitInfo)
 		wantErr string
 	}{
 		{
 			name: "hash mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.StoreInfos[0].CommitId.Hash = []byte("bogus-hash-from-torn-write")
 			},
 			wantErr: wantErrMismatch,
 		},
 		{
 			name: "version mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.Version++
 			},
 			wantErr: wantErrMismatch,
 		},
 		{
 			name: "store count mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.StoreInfos = ci.StoreInfos[:len(ci.StoreInfos)-1]
 			},
 			wantErr: wantErrMismatch,
+		},
+		{
+			// stores open in name order, so store1 is already open when store2 fails.
+			name: "later store fails to open",
+			corrupt: func(t *testing.T, snapshotDir string, _ *CommitInfo) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, store2Name, FileNameMetadata), nil, 0o600))
+			},
+			wantErr: "wrong metadata file size",
 		},
 	}
 
@@ -451,15 +464,14 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.NoError(t, err)
 			mtreeOK.Close()
 
-			// Corrupt the trusted metadata to no longer match the trees on disk,
-			// without touching the trees themselves or the WAL.
+			// Corrupt the snapshot without touching the WAL.
 			staleStoreInfos := make([]StoreInfo, len(mtree.lastCommitInfo.StoreInfos))
 			copy(staleStoreInfos, mtree.lastCommitInfo.StoreInfos)
 			staleCommitInfo := CommitInfo{
 				Version:    mtree.lastCommitInfo.Version,
 				StoreInfos: staleStoreInfos,
 			}
-			tc.corrupt(&staleCommitInfo)
+			tc.corrupt(t, snapshotDir, &staleCommitInfo)
 			staleMetadata := MultiTreeMetadata{
 				CommitInfo:     &staleCommitInfo,
 				InitialVersion: int64(mtree.initialVersion),
@@ -468,9 +480,11 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, WriteFileSync(filepath.Join(snapshotDir, MetadataFileName), bz))
 
+			fdsBefore := countOpenFDs(t)
 			_, err = LoadMultiTree(snapshotDir, false, 0, TestAppChainID)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)
+			require.Equal(t, fdsBefore, countOpenFDs(t), "stores opened before the failure must be closed")
 		})
 	}
 }

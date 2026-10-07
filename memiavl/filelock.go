@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"errors"
 	"path/filepath"
 
 	"github.com/zbiljic/go-filelock"
@@ -21,7 +22,7 @@ func LockFile(fname string) (FileLock, error) {
 		return nil, err
 	}
 	if _, err := fl.TryLock(); err != nil {
-		return nil, err
+		return nil, errors.Join(err, fl.Destroy())
 	}
 
 	return fl, nil

@@ -85,7 +85,11 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 		treeNames = append(treeNames, name)
 		snapshot, err := OpenSnapshot(filepath.Join(dir, name))
 		if err != nil {
-			return nil, err
+			errs := []error{err}
+			for _, tree := range treeMap {
+				errs = append(errs, tree.Close())
+			}
+			return nil, errors.Join(errs...)
 		}
 		treeMap[name] = NewFromSnapshot(snapshot, zeroCopy, cacheSize)
 	}
@@ -120,7 +124,7 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 	}
 	actual := mtree.buildCommitInfo(actualVersion)
 	if err := commitInfoEqual(metadata.CommitInfo, actual); err != nil {
-		return nil, fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err)
+		return nil, errors.Join(fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err), mtree.Close())
 	}
 	return mtree, nil
 }

@@ -693,6 +693,21 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	return walVersion(corruptIndex, db.initialVersion)
 }
 
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+
+	dir, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot list open file descriptors: %v", err)
+	}
+	defer dir.Close()
+
+	// names only: stat'ing each entry fails on macOS for the descriptor used by the listing itself.
+	names, err := dir.Readdirnames(-1)
+	require.NoError(t, err)
+	return len(names)
+}
+
 // injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
 // callers can drive checkBackgroundSnapshotRewrite without a real goroutine.
 func injectSnapshotRewriteResult(db *DB, mtree *MultiTree) {
@@ -882,13 +897,18 @@ func TestInvalidOptions(t *testing.T) {
 }
 
 func TestExclusiveLock(t *testing.T) {
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
 	dir := t.TempDir()
 
 	db, err := Load(dir, Options{CreateIfMissing: true}, TestAppChainID)
 	require.NoError(t, err)
 
+	fdsBefore := countOpenFDs(t)
 	_, err = Load(dir, Options{}, TestAppChainID)
 	require.Error(t, err)
+	require.Equal(t, fdsBefore, countOpenFDs(t), "a failed lock attempt must close the lock file")
 
 	_, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
