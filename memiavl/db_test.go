@@ -380,8 +380,11 @@ func TestUnpinnedCopyTakesNoReference(t *testing.T) {
 	require.NoError(t, db.UnpinnedCopy(0).Close())
 	require.NotNil(t, snapshot.nodesMap)
 
-	// an outstanding unpinned copy must not keep the generation mapped.
+	// an unpinned copy stays readable through the first reload after it is taken,
 	rewriteAndReload("k2")
+	require.NotNil(t, snapshot.nodesMap)
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
+	// but must not keep the generation mapped past the second.
 	rewriteAndReload("k3")
 	require.Nil(t, snapshot.nodesMap)
 }

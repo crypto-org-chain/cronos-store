@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	protoio "github.com/cosmos/gogoproto/io"
@@ -909,8 +910,9 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 				maxCommits = 10000
 			)
 			done := make(chan struct{})
-			// CheckTx-style readers never span a reload, as under CometBFT's mempool lock
-			// around Commit: an unpinned copy is unmapped at the second reload after it is taken.
+			// CheckTx-style readers never span a reload: CometBFT's mempool lock (cronos's
+			// app-mempool mutex with mempool.type=app) excludes them during Commit, and an
+			// unpinned copy is unmapped at the second reload after it is taken.
 			var mempool sync.RWMutex
 
 			var wg sync.WaitGroup
@@ -924,10 +926,13 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 						t.Errorf("%d reloads in %d commits", reloads, i)
 						return
 					}
+					if i >= commits {
+						// leaves the background rewrite CPU time on a single-core run.
+						time.Sleep(time.Millisecond)
+					}
 					snapshotVersion := store.db.SnapshotVersion()
 					if tc.reloadEvery > 0 && i%tc.reloadEvery == tc.reloadEvery-1 {
-						// readers walk mmap'd nodes across reloads; like Commit's, each is
-						// followed by a publish before the next.
+						// like Commit's, each reload is followed by a publish before the next.
 						if err := store.db.RewriteSnapshot(); err != nil {
 							t.Error(err)
 							return
