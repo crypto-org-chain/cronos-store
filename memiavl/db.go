@@ -1104,8 +1104,12 @@ func (db *DB) EarliestVersion() (int64, error) {
 		return v, nil
 	}
 	// snapshot-0 is the genesis placeholder; the first queryable height is
-	// initialVersion (defaults to 1 for standard chains).
-	if v = int64(db.initialVersion); v == 0 {
+	// initialVersion (defaults to 1 for standard chains). On the live DB,
+	// SetInitialVersion and snapshot reloads write it under mtx.
+	db.mtx.Lock()
+	v = int64(db.initialVersion)
+	db.mtx.Unlock()
+	if v == 0 {
 		v = 1
 	}
 	return v, nil

@@ -1307,6 +1307,41 @@ func TestEarliestVersionFallbackNotCached(t *testing.T) {
 	require.EqualValues(t, 102, got)
 }
 
+func TestEarliestVersionDuringSetInitialVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	stop := make(chan struct{})
+	errs := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				errs <- nil
+				return
+			default:
+			}
+			if _, err := db.EarliestVersion(); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+	for v := int64(100); v < 120; v++ {
+		require.NoError(t, db.SetInitialVersion(v))
+	}
+	close(stop)
+	require.NoError(t, <-errs)
+
+	got, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 119, got)
+}
+
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
 // height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestEarliestVersionUnpruned(t *testing.T) {
