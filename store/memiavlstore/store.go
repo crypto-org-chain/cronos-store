@@ -26,10 +26,10 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
-	// swapped by SetTree while CheckTx reads on another ABCI connection. Each
-	// tree is an unpinned copy, never the live tree flush mutates in place, so a
-	// reader on an older pointer stays valid until the second snapshot reload
-	// after that copy was taken.
+	// swapped by SetTree while CheckTx reads on another ABCI connection. A mounted
+	// store gets a new unpinned copy every WorkingHash and Commit, never the live
+	// tree flush mutates in place, so a reader on an older pointer stays valid until
+	// the second snapshot reload after that copy was taken.
 	tree   atomic.Pointer[memiavl.Tree]
 	logger log.Logger
 
