@@ -25,23 +25,16 @@ import (
 func OpenWAL(dir string, opts *wal.Options) (*wal.Log, error) {
 	log, err := wal.Open(dir, opts)
 	if errors.Is(err, wal.ErrCorrupt) {
-		// try to truncate corrupted tail
-		fis, readErr := os.ReadDir(dir)
-		if readErr != nil {
-			return nil, fmt.Errorf("read wal dir fail: %w", readErr)
+		// try to truncate the corrupted tail: the last segment by wal.Open's naming rules,
+		// so a stray file sorting after it is never truncated.
+		segments, listErr := listWALSegments(dir)
+		if listErr != nil {
+			return nil, fmt.Errorf("read wal dir fail: %w", listErr)
 		}
-		var lastSeg string
-		for _, fi := range fis {
-			if fi.IsDir() || len(fi.Name()) < 20 {
-				continue
-			}
-			lastSeg = fi.Name()
-		}
-
-		if len(lastSeg) == 0 {
+		if len(segments) == 0 {
 			return nil, err
 		}
-		if err = truncateCorruptedTail(filepath.Join(dir, lastSeg), opts.LogFormat); err != nil {
+		if err = truncateCorruptedTail(segments[len(segments)-1].path, opts.LogFormat); err != nil {
 			return nil, fmt.Errorf("truncate corrupted tail fail: %w", err)
 		}
 
