@@ -173,7 +173,8 @@ func OpenSnapshot(snapshotDir string) (snapshot *Snapshot, err error) {
 	return snapshot, nil
 }
 
-// Close closes the file and mmap handles, clears the buffers.
+// Close drops one reference; the last one closes the file and mmap handles and
+// clears the buffers.
 func (snapshot *Snapshot) Close() error {
 	if snapshot.copies.Add(-1) >= 0 {
 		return nil
