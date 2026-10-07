@@ -1669,7 +1669,7 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
 	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	require.Equal(t, db.earliestSnapshotCache.Load(), cp.earliestSnapshotCache.Load())
+	require.Same(t, db.earliestSnapshotCache, cp.earliestSnapshotCache)
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
