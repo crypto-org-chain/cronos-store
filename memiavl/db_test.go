@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zbiljic/go-filelock"
 )
 
 const TestAppChainID = "test_chain"
@@ -907,16 +908,22 @@ func TestExclusiveLock(t *testing.T) {
 
 	fdsBefore := countOpenFDs(t)
 	_, err = Load(dir, Options{}, TestAppChainID)
-	require.Error(t, err)
+	require.ErrorIs(t, err, filelock.ErrLocked)
 	require.Equal(t, fdsBefore, countOpenFDs(t), "a failed lock attempt must close the lock file")
 
-	_, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	// closing the failed attempt's lock file must not release the open DB's lock.
+	_, err = Load(dir, Options{}, TestAppChainID)
+	require.ErrorIs(t, err, filelock.ErrLocked)
+
+	roDB, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, roDB.Close())
 
 	require.NoError(t, db.Close())
 
-	_, err = Load(dir, Options{}, TestAppChainID)
+	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 }
 
 func TestFastCommit(t *testing.T) {
