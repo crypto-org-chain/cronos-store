@@ -903,8 +903,8 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return err
 	}
 
-	// rebuild before installing db so a failure leaves rs.db untouched. A store an
-	// upgrade after target added has no tree yet; that upgrade re-adds it on restart.
+	// a store an upgrade after target added has no tree yet; that upgrade re-adds
+	// it on restart.
 	keys := make([]types.StoreKey, 0, len(rs.storesParams))
 	for key, params := range rs.storesParams {
 		if params.typ == types.StoreTypeIAVL && db.TreeByName(key.Name()) == nil {
