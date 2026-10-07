@@ -329,6 +329,32 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestCopyDuringReload(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	errs := make(chan error, 1)
+	go func() {
+		var err error
+		for i := 0; i < 50 && err == nil; i++ {
+			err = db.Copy().Close()
+		}
+		errs <- err
+	}()
+	for i := 0; i < 50; i++ {
+		require.NoError(t, db.Reload())
+	}
+	require.NoError(t, <-errs)
+}
+
 func TestUnpinnedCopyTakesNoReference(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,

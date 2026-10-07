@@ -798,7 +798,10 @@ func (db *DB) waitAsyncCommit() error {
 // Copy returns a read-only view of the current state that shares the live
 // snapshot's mmap. It stays valid across reloads; Close it when done.
 func (db *DB) Copy() *DB {
-	return db.CopyWithCacheSize(db.cacheSize)
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	return db.copy(db.cacheSize, true)
 }
 
 // CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
@@ -892,8 +895,9 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 		}
 	}
 
-	// retain the outgoing generation for one reload cycle: copies and lock-free
-	// readers may still hold PersistedNodes into its mmap'd snapshot.
+	// retain the outgoing generation for one reload cycle: readers of the live
+	// trees may still hold PersistedNodes into its mmap'd snapshot. Copies hold
+	// their own reference.
 	old := db.MultiTree
 	db.MultiTree = *mtree
 	db.retiredMultiTree = &old
