@@ -1289,7 +1289,7 @@ func TestEarliestVersionFallbackNotCached(t *testing.T) {
 		wantEarliest int64
 	}{
 		{name: "snapshot-0 pruned", keepRecent: 0, wantCache: 102, wantEarliest: 102},
-		// a zero cache here would make every query copy rescan until snapshot-0 is pruned
+		// a zero cache here would force a snapshot dir rescan after every prune
 		{name: "snapshot-0 kept", keepRecent: 1, wantCache: onlyGenesisSnapshot, wantEarliest: 100},
 	}
 	for _, tc := range testCases {
