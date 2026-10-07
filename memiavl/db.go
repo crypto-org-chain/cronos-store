@@ -211,12 +211,12 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		wl, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, mtree.Close())
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.CatchupWAL(wl, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wl.Close())
+			return nil, errors.Join(err, wl.Close(), mtree.Close())
 		}
 	}
 

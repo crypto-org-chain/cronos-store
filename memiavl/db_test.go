@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	fmt "fmt"
@@ -1634,6 +1635,67 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 	}
 }
 
+func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, dir string, db *DB) uint32
+	}{
+		{
+			name: "wal open fails",
+			malleate: func(t *testing.T, dir string, _ *DB) uint32 {
+				t.Helper()
+				// a pending TruncateFront and TruncateBack at once is corrupt.
+				for _, name := range []string{"00000000000000000002.START", "00000000000000000002.END"} {
+					require.NoError(t, os.WriteFile(filepath.Join(walPath(dir), name), nil, 0o600))
+				}
+				return 0
+			},
+		},
+		{
+			name: "wal replay fails",
+			malleate: func(t *testing.T, _ string, db *DB) uint32 {
+				t.Helper()
+				return uint32(corruptTrailingWALEntry(t, db))
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			for i := 0; i < 3; i++ {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+				_, err := db.Commit()
+				require.NoError(t, err)
+			}
+			// the genesis snapshot is empty and maps no files.
+			require.NoError(t, db.RewriteSnapshot())
+			require.NoError(t, db.Reload())
+			require.NoError(t, db.WaitAsyncCommit())
+			targetVersion := tc.malleate(t, dir, db)
+			require.NoError(t, db.Close())
+
+			openFDs := func() int {
+				fdDir, err := os.Open("/dev/fd")
+				require.NoError(t, err)
+				defer fdDir.Close()
+				names, err := fdDir.Readdirnames(-1)
+				require.NoError(t, err)
+				return len(names)
+			}
+			// a GC-run finalizer could close a leaked fd and hide the leak.
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
+			before := openFDs()
+
+			_, err = Load(dir, Options{ReadOnly: true, TargetVersion: targetVersion}, TestAppChainID)
+			require.Error(t, err)
+			require.Equal(t, before, openFDs(), "the loaded snapshot's files must be closed")
+		})
+	}
+}
+
 // errorLogger records Error messages, e.g. a failed WAL TruncateFront in the prune goroutine.
 type errorLogger struct {
 	nopLogger
@@ -1672,11 +1734,14 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	})
 
 	var (
-		wg       sync.WaitGroup
-		done     = make(chan struct{})
-		latest   atomic.Int64
-		loads    atomic.Int64
-		loadErrs sync.Map
+		wg         sync.WaitGroup
+		done       = make(chan struct{})
+		latest     atomic.Int64
+		hashes     sync.Map // version -> root hash
+		loads      atomic.Int64
+		loaded     atomic.Int64
+		loadErrs   sync.Map
+		mismatches sync.Map
 	)
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -1699,9 +1764,16 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 					loadErrs.Store(err.Error(), struct{}{})
 					continue
 				}
+				want, _ := hashes.Load(v)
+				if got := ro.TreeByName(testStoreName).RootHash(); ro.Version() != v || !bytes.Equal(want.([]byte), got) {
+					mismatches.Store(fmt.Sprintf("Load(%d): version %d, hash %X, want %X", v, ro.Version(), got, want), struct{}{})
+				}
+				loaded.Add(1)
 				_ = ro.Close()
-				if _, err := GetLatestVersion(dir); err != nil {
+				if latestVersion, err := GetLatestVersion(dir); err != nil {
 					loadErrs.Store(err.Error(), struct{}{})
+				} else if latestVersion < v {
+					mismatches.Store(fmt.Sprintf("GetLatestVersion: %d, want >= %d", latestVersion, v), struct{}{})
 				}
 			}
 		}()
@@ -1724,15 +1796,24 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 		_, err := db.Commit()
 		require.NoError(t, err, "commit version %d", v)
 		require.NoError(t, db.waitCommittedVersion(int64(v), walCatchupTimeout))
+		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
 		latest.Store(int64(v))
 	}
 	stopReaders()
 
-	t.Logf("read-only loads: %d", loads.Load())
+	t.Logf("read-only loads: %d, succeeded: %d", loads.Load(), loaded.Load())
+	// a load can still fail if pruning removes its snapshot mid-load; it must never return wrong state.
 	loadErrs.Range(func(k, _ any) bool {
 		t.Log("read-only load error:", k)
 		return true
 	})
+	var wrong []string
+	mismatches.Range(func(k, _ any) bool {
+		wrong = append(wrong, k.(string))
+		return true
+	})
+	require.Empty(t, wrong)
+	require.Positive(t, loaded.Load())
 
 	lastHash := db.TreeByName(testStoreName).RootHash()
 	writerClosed = true
