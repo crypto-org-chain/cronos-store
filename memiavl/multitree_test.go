@@ -651,3 +651,18 @@ func TestMultiTreeWriteSnapshotCancelsRemainingTreesOnFailure(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled, "store2 must be canceled once store1 fails")
 }
+
+func TestWriteSnapshotFailsOnPanickingTree(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	// a persisted node without a snapshot makes writeRecursive panic on a nil dereference.
+	mtree.TreeByName(store1Name).root = PersistedNode{}
+
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	snapshotDir := t.TempDir()
+	err := mtree.WriteSnapshotWithContext(context.Background(), snapshotDir, pool)
+	require.ErrorContains(t, err, "panic in worker task")
+	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
+}
