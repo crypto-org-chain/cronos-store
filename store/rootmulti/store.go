@@ -214,6 +214,32 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 type querySnapshot struct {
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
+	// one for the publish slot plus one per reader; db is closed at zero.
+	refs atomic.Int64
+}
+
+func newQuerySnapshot(db *memiavl.DB, lastCommitInfo *types.CommitInfo) *querySnapshot {
+	snap := &querySnapshot{db: db, lastCommitInfo: lastCommitInfo}
+	snap.refs.Store(1)
+	return snap
+}
+
+func (s *querySnapshot) release() error {
+	if s.refs.Add(-1) == 0 {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// snapshotCloser releases a reader's reference once, however often Close is called.
+type snapshotCloser struct {
+	once sync.Once
+	snap *querySnapshot
+}
+
+func (c *snapshotCloser) Close() (err error) {
+	c.once.Do(func() { err = c.snap.release() })
+	return err
 }
 
 const CommitInfoFileName = "commit_infos"
@@ -266,22 +292,43 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 }
 
 func (rs *Store) publishQuerySnapshot() {
-	rs.querySnapshot.Store(&querySnapshot{
-		// no node cache: the snapshot is replaced every Commit, so it never warms up.
-		db:             rs.db.CopyWithCacheSize(0),
-		lastCommitInfo: rs.lastCommitInfo,
-	})
+	// no node cache: the snapshot is replaced every Commit, so it never warms up.
+	rs.replaceQuerySnapshot(newQuerySnapshot(rs.db.CopyWithCacheSize(0), rs.lastCommitInfo))
 }
 
-// latestDB never falls back to rs.db: closeDB nils it concurrently with readers.
-func (rs *Store) latestDB() *memiavl.DB {
-	if snap := rs.querySnapshot.Load(); snap != nil {
-		return snap.db
+// replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
+// reference on the previous one; readers still holding it keep it mapped.
+func (rs *Store) replaceQuerySnapshot(snap *querySnapshot) {
+	if old := rs.querySnapshot.Swap(snap); old != nil {
+		rs.releaseQuerySnapshot(old)
 	}
-	return nil
 }
 
-// latestCommitInfo follows the same no-fallback rule as latestDB.
+func (rs *Store) releaseQuerySnapshot(snap *querySnapshot) {
+	if err := snap.release(); err != nil {
+		rs.logger.Error("failed to close query snapshot", "err", err)
+	}
+}
+
+// acquireQuerySnapshot returns the published snapshot with a reference the
+// caller must release, or nil when none is published.
+func (rs *Store) acquireQuerySnapshot() *querySnapshot {
+	for {
+		snap := rs.querySnapshot.Load()
+		if snap == nil {
+			return nil
+		}
+		for n := snap.refs.Load(); n > 0; n = snap.refs.Load() {
+			if snap.refs.CompareAndSwap(n, n+1) {
+				return snap
+			}
+		}
+		// released between Load and CompareAndSwap, so a newer one is already published.
+	}
+}
+
+// latestCommitInfo never falls back to rs.lastCommitInfo: closeDB nils it
+// concurrently with readers.
 func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.lastCommitInfo
@@ -365,9 +412,8 @@ func (rs *Store) Close() error {
 
 // closeDB is a no-op once rs.db is nil (repeat Close, failed reload).
 func (rs *Store) closeDB() error {
-	// unpublish first: the snapshot shares rs.db's mmap, so a reader must not
-	// load it after the close.
-	rs.querySnapshot.Store(nil)
+	// readers still holding the snapshot keep its trees mapped past this close.
+	rs.replaceQuerySnapshot(nil)
 	if rs.db == nil {
 		return nil
 	}
@@ -459,8 +505,7 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
-// cacheMultiStoreFromDB takes closer=nil for a query snapshot, which shares
-// rs.db's mmap and must never be closed on its own.
+// closer runs when the caller closes the returned store.
 func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
@@ -489,13 +534,15 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 //
 // version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	snap := rs.querySnapshot.Load()
+	snap := rs.acquireQuerySnapshot()
 	if snap == nil {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		return rs.cacheMultiStoreFromDB(snap.db, nil), nil
+		// the caller's Close releases the snapshot, so it outlives later reloads.
+		return rs.cacheMultiStoreFromDB(snap.db, &snapshotCloser{snap: snap}), nil
 	}
+	rs.releaseQuerySnapshot(snap)
 
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
@@ -546,19 +593,21 @@ func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
 
 // LatestVersion Implements interface MultiStore
 func (rs *Store) LatestVersion() int64 {
-	db := rs.latestDB()
-	if db == nil {
+	info := rs.latestCommitInfo()
+	if info == nil {
 		return 0
 	}
-	return db.Version()
+	return info.Version
 }
 
 // EarliestVersion Implements interface CommitMultiStore
 func (rs *Store) EarliestVersion() int64 {
-	db := rs.latestDB()
-	if db == nil {
+	snap := rs.acquireQuerySnapshot()
+	if snap == nil {
 		return 0
 	}
+	defer rs.releaseQuerySnapshot(snap)
+	db := snap.db
 	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
 	// earliest queryable version is the version of that snapshot.
 	v, err := db.EarliestVersion()
@@ -784,7 +833,11 @@ func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 // SetInitialVersion Implements interface CommitMultiStore
 // used by InitChain when the initial height is bigger than 1
 func (rs *Store) SetInitialVersion(version int64) error {
-	return rs.db.SetInitialVersion(version)
+	if err := rs.db.SetInitialVersion(version); err != nil {
+		return err
+	}
+	rs.publishQuerySnapshot()
+	return nil
 }
 
 // SetIAVLCacheSize Implements interface CommitMultiStore
@@ -893,7 +946,10 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 
 // Query Implements interface Queryable
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
-	snap := rs.querySnapshot.Load()
+	snap := rs.acquireQuerySnapshot()
+	if snap != nil {
+		defer rs.releaseQuerySnapshot(snap)
+	}
 
 	version := req.Height
 	if version == 0 {
