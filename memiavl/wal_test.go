@@ -19,26 +19,33 @@ func TestCorruptedTail(t *testing.T) {
 	opts := &wal.Options{
 		LogFormat: wal.JSON,
 	}
-	dir := t.TempDir()
 
 	testCases := []struct {
 		name      string
 		logs      []byte
 		lastIndex uint64
+		// a non-segment file that sorts after the tail and must be left alone
+		strayFile string
 	}{
-		{"failure-1", []byte("\n"), 0},
-		{"failure-2", []byte(`{}` + "\n"), 0},
-		{"failure-3", []byte(`{"index":"1"}` + "\n"), 0},
-		{"failure-4", []byte(`{"index":"1","data":"?"}`), 0},
-		{"failure-5", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1},
+		{"failure-1", []byte("\n"), 0, ""},
+		{"failure-2", []byte(`{}` + "\n"), 0, ""},
+		{"failure-3", []byte(`{"index":"1"}` + "\n"), 0, ""},
+		{"failure-4", []byte(`{"index":"1","data":"?"}`), 0, ""},
+		{"failure-5", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1, ""},
 		// entry is 23 bytes (including newline); tail is also 23 bytes to exercise pos == len(tail) parity.
-		{"failure-6-equal-length-tail", []byte(`{"index":1,"data":"?"}` + "\n" + strings.Repeat("?", 23)), 1},
+		{"failure-6-equal-length-tail", []byte(`{"index":1,"data":"?"}` + "\n" + strings.Repeat("?", 23)), 1, ""},
+		{"failure-7-stray-file-after-tail", []byte(`{"index":1,"data":"?"}` + "\n" + `{"index":"1","data":"?"}`), 1, "zzzzzzzzzzzzzzzzzzzz"},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
 			err := os.WriteFile(filepath.Join(dir, "00000000000000000001"), tc.logs, 0o600)
 			require.NoError(t, err)
+			stray := []byte("not a segment")
+			if tc.strayFile != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, tc.strayFile), stray, 0o600))
+			}
 
 			_, err = wal.Open(dir, opts)
 			require.Equal(t, wal.ErrCorrupt, err)
@@ -49,6 +56,13 @@ func TestCorruptedTail(t *testing.T) {
 			lastIndex, err := log.LastIndex()
 			require.NoError(t, err)
 			require.Equal(t, tc.lastIndex, lastIndex)
+			require.NoError(t, log.Close())
+
+			if tc.strayFile != "" {
+				got, err := os.ReadFile(filepath.Join(dir, tc.strayFile))
+				require.NoError(t, err)
+				require.Equal(t, stray, got)
+			}
 		})
 	}
 }
@@ -166,6 +180,22 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 		{
 			name:     "truncate front writing temp file",
 			malleate: func() { s.Require().NoError(os.WriteFile(filepath.Join(s.dir, "TEMP"), []byte("partial"), 0o600)) },
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
+			name:     "empty tail after a segment cycle",
+			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), nil, 0o600)) },
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
+			name: "non-segment names skipped",
+			malleate: func() {
+				for _, name := range []string{"0000000000000000000x", "00000000000000000000"} {
+					s.Require().NoError(os.WriteFile(filepath.Join(s.dir, name), []byte("junk"), 0o600))
+				}
+			},
 			expFirst: 1,
 			expLast:  roWALEntries,
 		},
