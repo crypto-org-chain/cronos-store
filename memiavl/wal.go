@@ -29,7 +29,7 @@ func OpenWAL(dir string, opts *wal.Options) (*wal.Log, error) {
 		// so a stray file sorting after it is never truncated.
 		segments, listErr := listWALSegments(dir)
 		if listErr != nil {
-			return nil, fmt.Errorf("read wal dir fail: %w", listErr)
+			return nil, listErr
 		}
 		if len(segments) == 0 {
 			return nil, err
