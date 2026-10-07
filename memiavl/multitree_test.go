@@ -578,3 +578,23 @@ func TestMultiTreeWriteSnapshotWaitsForInFlightWorkers(t *testing.T) {
 		t.Fatal("WriteSnapshotWithContext did not return after the worker was released")
 	}
 }
+
+func TestMultiTreeWriteSnapshotCancelsRemainingTreesOnFailure(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	mtree.TreeByName(store2Name).set([]byte("k"), []byte("v"))
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	// one worker runs the writes in tree order, so store2 starts only after store1 failed.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	snapshotDir := t.TempDir()
+	// a file where store1's snapshot directory belongs makes its write fail.
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, store1Name), nil, 0o600))
+
+	err = mtree.WriteSnapshotWithContext(context.Background(), snapshotDir, pool)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled, "store2 must be canceled once store1 fails")
+}
