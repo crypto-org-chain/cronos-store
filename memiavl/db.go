@@ -1102,7 +1102,8 @@ func (db *DB) EarliestVersion() (int64, error) {
 			v = 1
 		}
 	}
-	db.earliestSnapshotCache.Store(v)
+	// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
+	db.earliestSnapshotCache.CompareAndSwap(0, v)
 	return v, nil
 }
 
