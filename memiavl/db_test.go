@@ -1224,7 +1224,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 
 // TestEarliestVersion verifies that EarliestVersion returns the earliest
 // retained snapshot version (not the WAL FirstVersion), and that the cache
-// is refreshed by pruneSnapshots.
+// is refreshed by pruneSnapshots, also for existing copies.
 func TestEarliestVersion(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:    true,
@@ -1246,6 +1246,10 @@ func TestEarliestVersion(t *testing.T) {
 		require.NoError(t, db.Reload())
 	}
 
+	// a copy published before the prune must not keep reporting a pruned version.
+	cp := db.CopyWithCacheSize(0)
+	defer func() { require.NoError(t, cp.Close()) }()
+
 	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
 	// Lock acquisition blocks until the prune goroutine releases; nothing
@@ -1263,6 +1267,10 @@ func TestEarliestVersion(t *testing.T) {
 	// cache without a directory scan.
 	require.EqualValues(t, 2, db.earliestSnapshotCache.Load(),
 		"cache should be populated by pruneSnapshots, not lazy-load")
+
+	cpEarliest, err := cp.EarliestVersion()
+	require.NoError(t, err)
+	require.Equal(t, earliest, cpEarliest)
 
 	// WAL is truncated past the earliest snapshot, so FirstVersion (WAL-based)
 	// must be strictly later than EarliestVersion.
