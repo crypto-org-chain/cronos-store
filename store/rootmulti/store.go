@@ -979,31 +979,26 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 
 // Query Implements interface Queryable
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
-	snap := rs.acquireQuerySnapshot()
-	if snap != nil {
-		defer rs.releaseQuerySnapshot(snap)
-	}
-
 	version := req.Height
-	if version == 0 {
-		if snap == nil {
-			return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
-		}
-		version = snap.lastCommitInfo.Version
-	}
-
-	if version < 0 || version > math.MaxUint32 {
-		return nil, fmt.Errorf("version out of range: %d", version)
-	}
 
 	// latest height reads the snapshot; older heights load from disk.
 	var db *memiavl.DB
-	var borrowedEntry *historicalDBEntry
-	if snap != nil && version == snap.lastCommitInfo.Version {
+	snap := rs.acquireQuerySnapshot()
+	if snap != nil && (version == 0 || version == snap.lastCommitInfo.Version) {
+		defer rs.releaseQuerySnapshot(snap)
 		db = snap.db
 	} else {
-		var err error
-		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
+		if snap != nil {
+			// a historical load can queue; don't keep the latest generation mapped meanwhile.
+			rs.releaseQuerySnapshot(snap)
+		}
+		if version == 0 {
+			return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+		}
+		if version < 0 || version > math.MaxUint32 {
+			return nil, fmt.Errorf("version out of range: %d", version)
+		}
+		borrowedEntry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
 			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 		})
 		if err != nil {
