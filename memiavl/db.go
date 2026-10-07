@@ -78,8 +78,9 @@ type DB struct {
 	walQuit     chan error
 	// once set, every Commit fails with it.
 	walErr error
-	// walSync fsyncs db.wal; overridable per-instance in tests.
-	walSync func(writeAheadLog) error
+	// walSync and walDirSync fsync the wal segment and directory; overridable per-instance in tests.
+	walSync    func(writeAheadLog) error
+	walDirSync func(dir string) error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -303,6 +304,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		snapshotWriterPool:     workerPool,
 		ownsWriterPool:         true,
 		walSync:                writeAheadLog.Sync,
+		walDirSync:             fsyncDir,
 		earliestSnapshotCache:  new(atomic.Int64),
 	}
 	ownershipMoved = true
@@ -895,6 +897,7 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                db.dir,
 		snapshotWriterPool: db.snapshotWriterPool,
 		walSync:            db.walSync,
+		walDirSync:         db.walDirSync,
 	}
 	// shared so a prune after this copy is taken still reaches its readers.
 	cloned.earliestSnapshotCache = db.earliestSnapshotCache
@@ -1603,7 +1606,7 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 	}
 	// walSync only fsyncs the segment file; a freshly cycled segment also needs
 	// its directory entry durable.
-	return fsyncDir(walPath(db.dir))
+	return db.walDirSync(walPath(db.dir))
 }
 
 // writeEntry reports whether it added entry to batch.

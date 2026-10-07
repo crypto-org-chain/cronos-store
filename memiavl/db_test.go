@@ -1075,11 +1075,15 @@ func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
 		require.NoError(t, db.Close())
 	}()
 
-	original := db.walSync
-	var syncCalls atomic.Int32
+	original, originalDir := db.walSync, db.walDirSync
+	var syncCalls, dirSyncCalls atomic.Int32
 	db.walSync = func(w writeAheadLog) error {
 		syncCalls.Add(1)
 		return original(w)
+	}
+	db.walDirSync = func(dir string) error {
+		dirSyncCalls.Add(1)
+		return originalDir(dir)
 	}
 
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
@@ -1087,39 +1091,47 @@ func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+	require.EqualValues(t, 1, dirSyncCalls.Load(), "Commit must fsync the wal directory before returning")
 }
 
 func TestCommitFailsWhenWALSyncFails(t *testing.T) {
-	for _, asyncCommit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
-			testCommitFailsWhenWALSyncFails(t, asyncCommit)
-		})
-	}
-}
-
-func testCommitFailsWhenWALSyncFails(t *testing.T, asyncCommit bool) {
-	t.Helper()
-
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{testStoreName},
-		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
-	}, TestAppChainID)
-	require.NoError(t, err)
-
 	syncErr := errors.New("simulated fsync failure")
-	db.walSync = func(writeAheadLog) error {
-		return syncErr
+	testCases := []struct {
+		name     string
+		malleate func(db *DB)
+	}{
+		{
+			name:     "segment",
+			malleate: func(db *DB) { db.walSync = func(writeAheadLog) error { return syncErr } },
+		},
+		{
+			name:     "directory",
+			malleate: func(db *DB) { db.walDirSync = func(string) error { return syncErr } },
+		},
 	}
 
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+	for _, tc := range testCases {
+		for _, asyncCommit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/asyncCommit=%v", tc.name, asyncCommit), func(t *testing.T) {
+				db, err := Load(t.TempDir(), Options{
+					CreateIfMissing:   true,
+					InitialStores:     []string{testStoreName},
+					AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+				}, TestAppChainID)
+				require.NoError(t, err)
+				tc.malleate(db)
 
-	v, err := db.Commit()
-	require.ErrorIs(t, err, syncErr)
-	require.Zero(t, v)
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
 
-	// both paths must latch the error so Close still surfaces it.
-	require.ErrorIs(t, db.Close(), syncErr)
+				v, err := db.Commit()
+				require.ErrorIs(t, err, syncErr)
+				require.Zero(t, v)
+
+				// both paths must latch the error so Close still surfaces it.
+				require.ErrorIs(t, db.Close(), syncErr)
+			})
+		}
+	}
 }
 
 // newDBWithDeadAsyncWALWriter kills the async wal writer by closing the wal out
