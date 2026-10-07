@@ -1,6 +1,6 @@
 # Changelog
 
-- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): keep the loaded snapshot alive for verify workers and dedup the store list. Without `--target-version` every store is now advanced to the same final version, so `verified-*` files written by earlier releases no longer match under `--check` and must be regenerated.
+- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores. Without `--target-version` every store is now advanced to the same final version, so `verified-*` files written by earlier releases no longer match under `--check` and must be regenerated.
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
 - [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
