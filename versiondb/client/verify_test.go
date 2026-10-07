@@ -209,16 +209,13 @@ func TestNormalizeStores(t *testing.T) {
 	}
 }
 
-// A store carried in from --load-snapshot has no change sets to replay, but it's
-// still part of the store set: dropping it would change the app hash and leave the
-// written metadata inconsistent with the trees beside it.
-// writeBaseSnapshot writes a snapshot holding "foo" and "bar" at version 1, with
-// one key in "foo", and returns its directory.
-func writeBaseSnapshot(t *testing.T) string {
+// writeBaseSnapshot writes a snapshot holding "foo" and "bar" at their first version
+// (initialVersion, or 1 if that's 0), with one key in "foo", and returns its directory.
+func writeBaseSnapshot(t *testing.T, initialVersion uint32) string {
 	t.Helper()
 	baseDir := filepath.Join(t.TempDir(), "base")
 
-	mtree := memiavl.NewEmptyMultiTree(0, 0, "")
+	mtree := memiavl.NewEmptyMultiTree(initialVersion, 0, "")
 	require.NoError(t, mtree.ApplyUpgrades([]*memiavl.TreeNameUpgrade{{Name: fooStore}, {Name: barStore}}))
 	require.NoError(t, mtree.ApplyChangeSet(fooStore, memiavl.ChangeSet{
 		Pairs: []*memiavl.KVPair{{Key: []byte("key"), Value: []byte("value")}},
@@ -234,32 +231,52 @@ func writeBaseSnapshot(t *testing.T) string {
 }
 
 func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
-	changeSetDir := t.TempDir()
-	baseDir := writeBaseSnapshot(t)
-	outDir := filepath.Join(t.TempDir(), "out")
+	testCases := []struct {
+		name           string
+		initialVersion uint32
+		baseVersion    int64
+	}{
+		{name: "no initial version", initialVersion: 0, baseVersion: 1},
+		{name: "initial version above one", initialVersion: 100, baseVersion: 100},
+	}
 
-	// Only "foo" has change sets past the snapshot; "bar" has none at all.
-	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			changeSetDir := t.TempDir()
+			baseDir := writeBaseSnapshot(t, tc.initialVersion)
+			outDir := filepath.Join(t.TempDir(), "out")
+			finalVersion := tc.baseVersion + 2
 
-	cmd := VerifyChangeSetCmd(nil)
-	cmd.SetArgs([]string{
-		changeSetDir,
-		"--" + flagStores, "foo bar",
-		"--" + flagLoadSnapshot, baseDir,
-		"--" + flagSaveSnapshot, outDir,
-		"--" + flagSave,
-	})
-	require.NoError(t, cmd.Execute())
+			// Only "foo" has change sets past the snapshot; "bar" has none at all.
+			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{tc.baseVersion + 1, finalVersion})
 
-	loaded, err := memiavl.LoadMultiTree(outDir, false, 0, "")
-	require.NoError(t, err)
-	defer loaded.Close()
+			cmd := VerifyChangeSetCmd(nil)
+			cmd.SetArgs([]string{
+				changeSetDir,
+				"--" + flagStores, "foo bar",
+				"--" + flagLoadSnapshot, baseDir,
+				"--" + flagSaveSnapshot, outDir,
+				"--" + flagSave,
+			})
+			require.NoError(t, cmd.Execute())
 
-	require.Equal(t, int64(3), loaded.Version())
-	for _, name := range []string{fooStore, barStore} {
-		tree := loaded.TreeByName(name)
-		require.NotNil(t, tree, "%s must survive into the written snapshot", name)
-		require.Equal(t, int64(3), tree.Version())
+			loaded, err := memiavl.LoadMultiTree(outDir, false, 0, "")
+			require.NoError(t, err)
+			defer loaded.Close()
+
+			require.Equal(t, finalVersion, loaded.Version())
+			for _, name := range []string{fooStore, barStore} {
+				tree := loaded.TreeByName(name)
+				require.NotNil(t, tree, "%s must survive into the written snapshot", name)
+				require.Equal(t, finalVersion, tree.Version())
+			}
+
+			bz, err := os.ReadFile(filepath.Join(outDir, memiavl.MetadataFileName))
+			require.NoError(t, err)
+			var metadata memiavl.MultiTreeMetadata
+			require.NoError(t, metadata.Unmarshal(bz))
+			require.EqualValues(t, tc.initialVersion, metadata.InitialVersion)
+		})
 	}
 }
 
@@ -268,7 +285,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 // "foo/" would add a second store over the same change-set and snapshot directories.
 func TestVerifyDedupsStoresWithLoadedSnapshot(t *testing.T) {
 	changeSetDir := t.TempDir()
-	baseDir := writeBaseSnapshot(t)
+	baseDir := writeBaseSnapshot(t, 0)
 	outDir := filepath.Join(t.TempDir(), "out")
 
 	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
