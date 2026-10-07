@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -121,8 +122,8 @@ type Options struct {
 	TriggerStateSyncExport func(height int64)
 	// load the target version instead of latest version
 	TargetVersion uint32
-	// Buffer size for the asynchronous commit queue, -1 means synchronous commit,
-	// default to 0.
+	// Buffer size for the asynchronous wal writer's queue, -1 writes the wal on the
+	// committing goroutine, default to 0. Commit waits for the fsync either way.
 	AsyncCommitBuffer int
 	// ZeroCopy if true, the get and iterator methods could return a slice pointing to mmaped blob files.
 	ZeroCopy bool
@@ -1562,20 +1563,19 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 
 	written := false
 	for _, entry := range entries {
-		ok, err := writeEntry(batch, db.logger, lastIndex, entry)
+		ok, err := writeEntry(batch, db.wal, lastIndex, entry)
 		if err != nil {
 			return err
 		}
 		written = written || ok
 	}
-	if !written {
-		// every entry was already durable (replay after a restart), nothing to sync.
-		return nil
+	if written {
+		if err := db.wal.WriteBatch(batch); err != nil {
+			return err
+		}
 	}
-
-	if err := db.wal.WriteBatch(batch); err != nil {
-		return err
-	}
+	// sync even a pure replay: the process that wrote those entries may have
+	// crashed before its own fsync.
 	if err := db.walSync(db.wal); err != nil {
 		return err
 	}
@@ -1585,15 +1585,22 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 }
 
 // writeEntry reports whether it added entry to batch.
-func writeEntry(batch *wal.Batch, logger Logger, lastIndex uint64, entry *walEntry) (bool, error) {
+func writeEntry(batch *wal.Batch, log *wal.Log, lastIndex uint64, entry *walEntry) (bool, error) {
 	bz, err := entry.data.Marshal()
 	if err != nil {
 		return false, err
 	}
 
-	// already durable; happens on replay after a restart.
+	// replay after loading a lower target version: the wal keeps its entry, so
+	// a different one would ack an app hash that a restart can't reproduce.
 	if entry.index <= lastIndex {
-		logger.Info("commit old version idempotently", "lastIndex", lastIndex, "version", entry.index)
+		existing, err := log.Read(entry.index)
+		if err != nil {
+			return false, fmt.Errorf("read wal entry %d to check the replayed commit: %w", entry.index, err)
+		}
+		if !bytes.Equal(existing, bz) {
+			return false, fmt.Errorf("replayed commit differs from wal entry %d", entry.index)
+		}
 		return false, nil
 	}
 	batch.Write(entry.index, bz)

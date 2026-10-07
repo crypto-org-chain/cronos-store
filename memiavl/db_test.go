@@ -710,9 +710,9 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	require.NoError(t, db.RewriteSnapshot())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
-	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
-	// reported version or checkBackgroundSnapshotRewrite rejects the rewrite for
-	// being behind the last commit before it ever reads the corrupt entry.
+	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to the wal's version;
+	// otherwise the rewrite is already current and is adopted without catching up
+	// through the corrupt entry.
 	db.lastCommitInfo.Version = corruptVersion
 
 	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
@@ -1312,6 +1312,20 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
 	require.Equal(t, commitInfo, *db.LastCommitInfo())
+	require.NoError(t, db.Close())
+
+	// a replay that differs from the wal must fail, not ack a hash a restart can't reproduce.
+	db, err = Load(dir, Options{TargetVersion: 5, AsyncCommitBuffer: asyncCommitBuffer}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSets(changes[0]))
+	_, err = db.Commit()
+	require.ErrorContains(t, err, "differs from wal entry")
+	_ = db.Close() // returns the latched commit error
+
+	db, err = Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	require.Equal(t, commitInfo, *db.LastCommitInfo())
+	require.NoError(t, db.Close())
 }
 
 func TestDBCloseIsIdempotent(t *testing.T) {
