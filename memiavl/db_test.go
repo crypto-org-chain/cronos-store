@@ -225,7 +225,54 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	// the copy must still read correctly from the retained generation
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
+	// the DB drops that generation at the next reload; the copy's reference keeps it mapped.
+	snapshot := cp.TreeByName(testStoreName).snapshot
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k3", "v3")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+
+	// the last holder unmaps it.
+	require.NotNil(t, snapshot.nodesMap)
+	require.NoError(t, cp.Close())
+	require.Nil(t, snapshot.nodesMap)
+
 	require.NoError(t, db.Close())
+}
+
+func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	rewriteAndReload := func(key string) {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+	rewriteAndReload("k1")
+	snapshot := db.TreeByName(testStoreName).snapshot
+
+	// a new version so the background rewrite writes a new snapshot; its clone holds
+	// a reference on this generation, and adopting the result retires it.
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k1b", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshotBackground())
+	for db.snapshotRewriteChan != nil {
+		require.NoError(t, db.checkAsyncTasks())
+	}
+
+	// the next reload drops the DB's reference, which unmaps it only if the clone released its own.
+	rewriteAndReload("k2")
+	require.Nil(t, snapshot.nodesMap)
 }
 
 func TestCloseDuringSnapshotPrune(t *testing.T) {

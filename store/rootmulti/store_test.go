@@ -735,10 +735,8 @@ func TestReadPathsWithClosedDB(t *testing.T) {
 	require.NoError(t, rs.LoadLatestVersion())
 	rs.Commit()
 
-	// mirror Restore's teardown.
-	rs.querySnapshot.Store(nil)
-	require.NoError(t, rs.db.Close())
-	rs.db = nil
+	// Restore's teardown.
+	require.NoError(t, rs.closeDB())
 
 	require.NotPanics(t, func() {
 		require.Zero(t, rs.LatestVersion())
@@ -790,6 +788,72 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
 }
 
+func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, rs *Store, key types.StoreKey)
+	}{
+		{
+			// the DB unmaps a generation at the second reload after retiring it.
+			name: "two snapshot reloads",
+			malleate: func(t *testing.T, rs *Store, key types.StoreKey) {
+				t.Helper()
+				for i := 0; i < 2; i++ {
+					rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
+					rs.Commit()
+					require.NoError(t, rs.db.RewriteSnapshot())
+					require.NoError(t, rs.db.Reload())
+				}
+			},
+		},
+		{
+			name: "store close",
+			malleate: func(t *testing.T, rs *Store, _ types.StoreKey) {
+				t.Helper()
+				require.NoError(t, rs.Close())
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			key := types.NewKVStoreKey(testStoreName)
+			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			require.NoError(t, rs.LoadLatestVersion())
+			t.Cleanup(func() { rs.Close() })
+
+			const numKeys = 20
+			for i := 0; i < numKeys; i++ {
+				rs.GetKVStore(key).Set([]byte(fmt.Sprintf("k%02d", i)), []byte("v"))
+			}
+			rs.Commit()
+			// publish a snapshot whose trees read from the mmap'd snapshot files.
+			require.NoError(t, rs.db.RewriteSnapshot())
+			require.NoError(t, rs.db.Reload())
+			rs.Commit()
+
+			cms, err := rs.CacheMultiStoreWithVersion(0)
+			require.NoError(t, err)
+			snap := rs.querySnapshot.Load()
+
+			tc.malleate(t, rs, key)
+
+			it := cms.GetKVStore(key).Iterator([]byte("k"), []byte("l"))
+			n := 0
+			for ; it.Valid(); it.Next() {
+				n++
+			}
+			require.NoError(t, it.Close())
+			require.Equal(t, numKeys, n)
+
+			require.EqualValues(t, 1, snap.refs.Load(), "only the reader should hold it")
+			require.NoError(t, cms.(io.Closer).Close())
+			require.Zero(t, snap.refs.Load())
+		})
+	}
+}
+
 // closeDB runs on the state-sync goroutine while ABCI queries keep arriving.
 func TestReadPathsRaceAgainstClose(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
@@ -806,7 +870,11 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		func() { rs.EarliestVersion() },
 		func() { rs.LastCommitID() },
 		func() { _, _ = rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")}) },
-		func() { _, _ = rs.CacheMultiStoreWithVersion(0) },
+		func() {
+			if cms, err := rs.CacheMultiStoreWithVersion(0); err == nil {
+				_ = cms.(io.Closer).Close()
+			}
+		},
 	}
 	for _, read := range readers {
 		wg.Add(1)
