@@ -719,6 +719,8 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
+	// reads go through copies that get their own cache; the live trees are only written.
+	opts.CacheSize = 0
 	// a previously loaded db holds the directory lock memiavl.Load needs.
 	rs.closeDBForReload()
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
