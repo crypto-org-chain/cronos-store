@@ -415,6 +415,37 @@ func TestCloseDuringSnapshotPrune(t *testing.T) {
 	}
 }
 
+func TestCloseDuringSnapshotRewrite(t *testing.T) {
+	stores := []string{"a", "b", "c", "d"}
+	changeSets := make([]*NamedChangeSet, 0, len(stores))
+	for _, name := range stores {
+		pairs := make([]*KVPair, 0, 3000)
+		for i := 0; i < 3000; i++ {
+			pairs = append(pairs, &KVPair{Key: []byte(fmt.Sprintf("k%06d", i)), Value: []byte("v")})
+		}
+		changeSets = append(changeSets, &NamedChangeSet{Name: name, Changeset: ChangeSet{Pairs: pairs}})
+	}
+
+	// Close cancels the rewrite at varying points; it must not unmap the snapshot
+	// until every tree's writer has stopped reading it.
+	for delay := time.Duration(0); delay < 8*time.Millisecond; delay += time.Millisecond {
+		db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: stores}, TestAppChainID)
+		require.NoError(t, err)
+		require.NoError(t, db.ApplyChangeSets(changeSets))
+		_, err = db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(stores[0], "k", "v")))
+		_, err = db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshotBackground())
+		time.Sleep(delay)
+		require.NoError(t, db.Close())
+	}
+}
+
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName, "delete"}}, TestAppChainID)

@@ -978,6 +978,74 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialStores []string
+		mountedStores []string
+		upgrades      *types.StoreUpgrades
+	}{
+		{
+			name:          "add",
+			initialStores: []string{testStoreName},
+			mountedStores: []string{addedStoreName, testStoreName},
+			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
+		},
+		{
+			name:          "delete",
+			initialStores: []string{deletedStoreName, testStoreName},
+			mountedStores: []string{testStoreName},
+			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
+		},
+		{
+			name:          "rename",
+			initialStores: []string{oldStoreName, testStoreName},
+			mountedStores: []string{newStoreName, testStoreName},
+			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
+				OldKey: oldStoreName,
+				NewKey: newStoreName,
+			}}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			open := func(names []string) *Store {
+				rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+				for _, name := range names {
+					rs.MountStoreWithDB(types.NewKVStoreKey(name), types.StoreTypeIAVL, nil)
+				}
+				return rs
+			}
+
+			rs := open(tc.initialStores)
+			require.NoError(t, rs.LoadLatestVersion())
+			rs.Commit()
+			require.NoError(t, rs.Close())
+
+			rs = open(tc.mountedStores)
+			require.NoError(t, rs.LoadLatestVersionAndUpgrade(tc.upgrades))
+			rs.Commit()
+			require.NoError(t, rs.Close())
+
+			// the rollback CLI loads the app at the latest height, so the mounted
+			// stores match the upgraded tree set, not the one at the target.
+			rs = open(tc.mountedStores)
+			require.NoError(t, rs.LoadLatestVersion())
+			require.NoError(t, rs.RollbackToVersion(1))
+			require.Equal(t, int64(1), rs.LastCommitID().Version)
+			require.NoError(t, rs.Close())
+
+			// the next start runs the upgrade again.
+			rs = open(tc.mountedStores)
+			require.NoError(t, rs.LoadLatestVersionAndUpgrade(tc.upgrades))
+			require.Equal(t, int64(1), rs.LastCommitID().Version)
+			require.NoError(t, rs.Close())
+		})
+	}
+}
+
 // WorkingHash flushes the next block into the live tree before Commit.
 func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
 	store, versions := newTestStore(t, 1)
@@ -999,6 +1067,7 @@ func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
 		cms, err := store.CacheMultiStoreWithVersion(v)
 		require.NoError(t, err)
 		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
+		require.NoError(t, cms.(io.Closer).Close())
 	}
 	// baseapp's finalize state reads through the mounted stores until Commit.
 	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
