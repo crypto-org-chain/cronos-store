@@ -1918,7 +1918,7 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 	}
 }
 
-func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
+func TestLoadReleasesResourcesOnWALFailure(t *testing.T) {
 	testCases := []struct {
 		name     string
 		malleate func(t *testing.T, dir string, db *DB) uint32
@@ -1944,38 +1944,44 @@ func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
-			require.NoError(t, err)
-			for i := 0; i < 3; i++ {
-				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
-				_, err := db.Commit()
+		for _, readOnly := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/readOnly=%v", tc.name, readOnly), func(t *testing.T) {
+				dir := t.TempDir()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
 				require.NoError(t, err)
-			}
-			// the genesis snapshot is empty and maps no files.
-			require.NoError(t, db.RewriteSnapshot())
-			require.NoError(t, db.Reload())
-			require.NoError(t, db.WaitAsyncCommit())
-			targetVersion := tc.malleate(t, dir, db)
-			require.NoError(t, db.Close())
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				// the genesis snapshot is empty and maps no files.
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Reload())
+				require.NoError(t, db.WaitAsyncCommit())
+				targetVersion := tc.malleate(t, dir, db)
+				require.NoError(t, db.Close())
 
-			openFDs := func() int {
-				fdDir, err := os.Open("/dev/fd")
-				require.NoError(t, err)
-				defer fdDir.Close()
-				names, err := fdDir.Readdirnames(-1)
-				require.NoError(t, err)
-				return len(names)
-			}
-			// a GC-run finalizer could close a leaked fd and hide the leak.
-			defer debug.SetGCPercent(debug.SetGCPercent(-1))
-			before := openFDs()
+				openFDs := func() int {
+					fdDir, err := os.Open("/dev/fd")
+					require.NoError(t, err)
+					defer fdDir.Close()
+					names, err := fdDir.Readdirnames(-1)
+					require.NoError(t, err)
+					return len(names)
+				}
+				// a GC-run finalizer could close a leaked fd and hide the leak.
+				defer debug.SetGCPercent(debug.SetGCPercent(-1))
+				before := openFDs()
 
-			_, err = Load(dir, Options{ReadOnly: true, TargetVersion: targetVersion}, TestAppChainID)
-			require.Error(t, err)
-			require.Equal(t, before, openFDs(), "the loaded snapshot's files must be closed")
-		})
+				_, err = Load(dir, Options{ReadOnly: readOnly, TargetVersion: targetVersion}, TestAppChainID)
+				require.Error(t, err)
+				require.Equal(t, before, openFDs(), "the loaded snapshot, wal and lock files must be closed")
+
+				lock, err := LockFile(filepath.Join(dir, LockFileName))
+				require.NoError(t, err, "a failed Load must release the db lock")
+				require.NoError(t, errors.Join(lock.Unlock(), lock.Destroy()))
+			})
+		}
 	}
 }
 
