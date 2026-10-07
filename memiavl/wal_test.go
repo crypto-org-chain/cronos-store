@@ -109,20 +109,37 @@ func (s *ReadOnlyWALTestSuite) snapshotDir() map[string][]byte {
 	s.Require().NoError(err)
 	files := make(map[string][]byte, len(entries))
 	for _, e := range entries {
-		files[e.Name()], err = os.ReadFile(filepath.Join(s.dir, e.Name()))
+		path := filepath.Join(s.dir, e.Name())
+		if e.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			s.Require().NoError(err)
+			files[e.Name()] = []byte("-> " + target)
+			continue
+		}
+		files[e.Name()], err = os.ReadFile(path)
 		s.Require().NoError(err)
 	}
 	return files
 }
 
 func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
+	readErrIn := func(from, to uint64, err error) func(uint64) error {
+		return func(index uint64) error {
+			if index >= from && index <= to {
+				return err
+			}
+			return nil
+		}
+	}
+
 	testCases := []struct {
-		name      string
-		malleate  func()
-		afterOpen func()
-		expFirst  uint64
-		expLast   uint64
-		expErr    error
+		name       string
+		malleate   func()
+		afterOpen  func()
+		expFirst   uint64
+		expLast    uint64
+		expErr     error
+		expReadErr func(index uint64) error
 	}{
 		{
 			name:     "missing dir",
@@ -143,6 +160,12 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 				s.Require().NoError(err)
 				s.Require().NoError(f.Close())
 			},
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
+			name:     "truncate front writing temp file",
+			malleate: func() { s.Require().NoError(os.WriteFile(filepath.Join(s.dir, "TEMP"), []byte("partial"), 0o600)) },
 			expFirst: 1,
 			expLast:  roWALEntries,
 		},
@@ -184,6 +207,45 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			expLast:  12,
 		},
 		{
+			name: "second truncate back ignored",
+			malleate: func() {
+				s.writeSegment(s.segmentPath(11, walEndSuffix), 11, 12)
+				s.writeSegment(s.segmentPath(16, walEndSuffix), 16, 17)
+			},
+			expFirst: 1,
+			expLast:  12,
+		},
+		{
+			name: "tail removed on every attempt",
+			malleate: func() {
+				s.Require().NoError(os.Symlink(filepath.Join(s.dir, "gone"), s.segmentPath(99, "")))
+			},
+			expErr: fs.ErrNotExist,
+		},
+		{
+			name:       "older segment removed after open",
+			malleate:   func() {},
+			afterOpen:  func() { s.removeSegments(6) },
+			expFirst:   1,
+			expLast:    roWALEntries,
+			expReadErr: readErrIn(6, 10, fs.ErrNotExist),
+		},
+		{
+			// only the tail can hold an entry still being written.
+			name:       "older segment torn",
+			malleate:   func() { s.Require().NoError(os.Truncate(s.segmentPath(6, ""), 47)) },
+			expFirst:   1,
+			expLast:    roWALEntries,
+			expReadErr: readErrIn(6, 10, wal.ErrCorrupt),
+		},
+		{
+			name:       "older segment short",
+			malleate:   func() { s.Require().NoError(os.Truncate(s.segmentPath(6, ""), 30)) },
+			expFirst:   1,
+			expLast:    roWALEntries,
+			expReadErr: readErrIn(9, 10, wal.ErrCorrupt),
+		},
+		{
 			name: "truncate front and back",
 			malleate: func() {
 				s.writeSegment(s.segmentPath(13, walStartSuffix), 13, 15)
@@ -219,6 +281,10 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			s.Require().Equal(tc.expLast, last)
 			for i := tc.expFirst; i != 0 && i <= tc.expLast; i++ {
 				data, err := l.Read(i)
+				if tc.expReadErr != nil && tc.expReadErr(i) != nil {
+					s.Require().ErrorIs(err, tc.expReadErr(i), "index %d", i)
+					continue
+				}
 				s.Require().NoError(err, "index %d", i)
 				s.Require().Equal(roWALEntry(i), data, "index %d", i)
 			}
