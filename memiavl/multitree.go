@@ -82,15 +82,15 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 			continue
 		}
 		name := e.Name()
-		treeNames = append(treeNames, name)
 		snapshot, err := OpenSnapshot(filepath.Join(dir, name))
 		if err != nil {
 			errs := []error{err}
-			for _, tree := range treeMap {
-				errs = append(errs, tree.Close())
+			for _, opened := range treeNames {
+				errs = append(errs, treeMap[opened].Close())
 			}
 			return nil, errors.Join(errs...)
 		}
+		treeNames = append(treeNames, name)
 		treeMap[name] = NewFromSnapshot(snapshot, zeroCopy, cacheSize)
 	}
 
