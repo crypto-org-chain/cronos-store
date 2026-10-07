@@ -115,7 +115,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					// the store don't exist before target version, don't affect the commit info and app hash.
 					return nil
 				}
-				verified[i] = verifiedStore{name: store, tree: tree}
+				// Hashed here so stores hash in parallel; the version bump below only saves
+				// empty versions, which leaves the root hash unchanged.
+				verified[i] = verifiedStore{name: store, tree: tree, hash: tree.RootHash()}
 				return nil
 			})
 			if err != nil {
@@ -145,7 +147,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				}
 				storeInfos = append(storeInfos, storetypes.StoreInfo{
 					Name:     entry.name,
-					CommitId: lastCommitID(entry.tree),
+					CommitId: storetypes.CommitID{Version: entry.tree.Version(), Hash: entry.hash},
 				})
 			}
 
@@ -221,11 +223,13 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 	return cmd
 }
 
-// verifiedStore pairs a replayed tree with its store name; the tree is still open so its
-// version can be bumped and its snapshot written once the final version is known.
+// verifiedStore pairs a replayed tree with its store name and root hash; the tree is
+// still open so its version can be bumped and its snapshot written once the final
+// version is known.
 type verifiedStore struct {
 	name string
 	tree *memiavl.Tree
+	hash []byte
 }
 
 // verifyOneStore is safe to run in parallel with other stores. Reports false without
