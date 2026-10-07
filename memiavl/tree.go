@@ -237,8 +237,8 @@ func (t *Tree) Copy(cacheSize int) *Tree {
 	return t.copy(cacheSize, true)
 }
 
-// copy with pin false takes no snapshot reference: the copy needs no Close but
-// is only valid while the owning DB keeps the snapshot mapped.
+// copy with pin false takes no snapshot reference, so it is only valid while the
+// owning DB keeps the snapshot mapped.
 func (t *Tree) copy(cacheSize int, pin bool) *Tree {
 	if root, ok := t.root.(*MemNode); ok {
 		// protect every existing MemNode from in-place mutation, including ones
@@ -250,6 +250,11 @@ func (t *Tree) copy(cacheSize int, pin bool) *Tree {
 		t.snapshot.copies.Add(1)
 	}
 	newTree := *t
+	if !pin {
+		// so Close can't release a reference the copy never took; reads go through
+		// the PersistedNodes, which keep their own snapshot pointer.
+		newTree.snapshot = nil
+	}
 	// recreate cache for the copy to keep eviction state independent per tree
 	newTree.cache = NewCache(cacheSize)
 	return &newTree

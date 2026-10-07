@@ -813,9 +813,9 @@ func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 	return db.copy(cacheSize, true)
 }
 
-// UnpinnedCopy is CopyWithCacheSize without a snapshot reference: it needs no
-// Close, but is only valid until the DB unmaps the generation at the second
-// reload after retiring it. Suits readers that move to a fresh copy every block.
+// UnpinnedCopy is CopyWithCacheSize without a snapshot reference, so it needs no
+// Close. It is only valid until the second reload after it is taken, when the DB
+// unmaps that generation. Suits readers that move to a fresh copy every block.
 func (db *DB) UnpinnedCopy(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -896,8 +896,8 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 	}
 
 	// retain the outgoing generation for one reload cycle: readers of the live
-	// trees may still hold PersistedNodes into its mmap'd snapshot. Copies hold
-	// their own reference.
+	// trees and unpinned copies may still hold PersistedNodes into its mmap'd
+	// snapshot. Pinned copies hold their own reference.
 	old := db.MultiTree
 	db.MultiTree = *mtree
 	db.retiredMultiTree = &old

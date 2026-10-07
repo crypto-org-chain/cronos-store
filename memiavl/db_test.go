@@ -376,6 +376,10 @@ func TestUnpinnedCopyTakesNoReference(t *testing.T) {
 	cp := db.UnpinnedCopy(0)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
 
+	// closing one must not release the reference it never took.
+	require.NoError(t, db.UnpinnedCopy(0).Close())
+	require.NotNil(t, snapshot.nodesMap)
+
 	// an outstanding unpinned copy must not keep the generation mapped.
 	rewriteAndReload("k2")
 	rewriteAndReload("k3")
