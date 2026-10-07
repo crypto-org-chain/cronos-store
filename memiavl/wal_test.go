@@ -170,6 +170,12 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			expLast:  roWALEntries,
 		},
 		{
+			name:     "empty tail after a segment cycle",
+			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), nil, 0o600)) },
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
 			name: "non-segment names skipped",
 			malleate: func() {
 				for _, name := range []string{"0000000000000000000x", "00000000000000000000"} {

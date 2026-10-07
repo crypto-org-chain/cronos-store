@@ -180,6 +180,7 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 	// a torn last entry is one the writer hasn't finished appending.
 	tail.entries, _ = parseWALEntries(data)
 	l.firstIndex = segments[0].index
+	// an empty tail (just cycled) ends the log at the previous segment; 0 means an empty log, as in wal.Log.
 	l.lastIndex = tail.index + uint64(len(tail.entries)) - 1
 	return l, nil
 }
@@ -199,7 +200,7 @@ func listWALSegments(dir string) ([]*walSegment, error) {
 		segments         []*walSegment
 		hasStart, hasEnd bool
 	)
-	// sorted by name: ascending index, and "N" before "N.END" before "N.START".
+	// os.ReadDir sorts by name: ascending index, and "N" before "N.END" before "N.START".
 	for _, e := range dirEntries {
 		name := e.Name()
 		if e.IsDir() || len(name) < 20 {
