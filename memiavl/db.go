@@ -1103,8 +1103,9 @@ func (db *DB) EarliestVersion() (int64, error) {
 		}
 		// Cache the marker, not the fallback: SetInitialVersion can still change the
 		// fallback, and pruneSnapshots replaces the marker once snapshot-0 is gone.
+		// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
 		v = earliestCacheValue(snapshotVersion)
-		db.earliestSnapshotCache.Store(v)
+		db.earliestSnapshotCache.CompareAndSwap(0, v)
 	}
 	if v > 0 {
 		return v, nil
