@@ -341,6 +341,29 @@ func TestCloseDuringSnapshotPrune(t *testing.T) {
 	}
 }
 
+func TestCloseReleasesFinishedSnapshotRewrite(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
+	require.NoError(t, err)
+
+	// a rewrite that finished before Close cancels it still hands back its loaded tree
+	injectSnapshotRewriteResult(db, mtree)
+
+	require.NoError(t, db.Close())
+	// MultiTree.Close nils out t.trees unconditionally, so this is a reliable witness that Close ran.
+	require.Nil(t, mtree.trees, "Close must release the tree handed back by a finished rewrite")
+}
+
 func TestWAL(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName, "delete"}}, TestAppChainID)
