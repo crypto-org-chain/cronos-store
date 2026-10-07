@@ -1047,7 +1047,7 @@ func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
 }
 
 // WorkingHash flushes the next block into the live tree before Commit.
-func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
+func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	store, versions := newTestStore(t, 1)
 	defer store.Close()
 	key := store.keysByName[testStoreName]
