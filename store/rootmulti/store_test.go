@@ -103,15 +103,18 @@ func TestLoadVersionAndUpgradeAllowsHistoricalMemiAVLTreeMembershipWithEmptyUpgr
 	require.NoError(t, store.Close())
 }
 
-func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T) {
-	tests := []struct {
-		name          string
-		initialStores []string
-		mountedStores []string
-		upgrades      *types.StoreUpgrades
-		dataStore     string
-		loadedStore   string
-	}{
+type storeUpgradeCase struct {
+	name          string
+	initialStores []string
+	mountedStores []string
+	upgrades      *types.StoreUpgrades
+	dataStore     string
+	loadedStore   string
+}
+
+// storeUpgradeCases adds, deletes or renames one store beside testStoreName.
+func storeUpgradeCases() []storeUpgradeCase {
+	return []storeUpgradeCase{
 		{
 			name:          "add",
 			initialStores: []string{testStoreName},
@@ -136,8 +139,10 @@ func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T)
 			loadedStore: newStoreName,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func TestLoadLatestVersionAndUpgradeValidatesMemiAVLTreeMembership(t *testing.T) {
+	for _, tc := range storeUpgradeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			db, err := memiavl.Load(dir, memiavl.Options{
@@ -1001,36 +1006,7 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 }
 
 func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
-	tests := []struct {
-		name          string
-		initialStores []string
-		mountedStores []string
-		upgrades      *types.StoreUpgrades
-	}{
-		{
-			name:          "add",
-			initialStores: []string{testStoreName},
-			mountedStores: []string{addedStoreName, testStoreName},
-			upgrades:      &types.StoreUpgrades{Added: []string{addedStoreName}},
-		},
-		{
-			name:          "delete",
-			initialStores: []string{deletedStoreName, testStoreName},
-			mountedStores: []string{testStoreName},
-			upgrades:      &types.StoreUpgrades{Deleted: []string{deletedStoreName}},
-		},
-		{
-			name:          "rename",
-			initialStores: []string{oldStoreName, testStoreName},
-			mountedStores: []string{newStoreName, testStoreName},
-			upgrades: &types.StoreUpgrades{Renamed: []types.StoreRename{{
-				OldKey: oldStoreName,
-				NewKey: newStoreName,
-			}}},
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range storeUpgradeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			open := func(names []string) *Store {
