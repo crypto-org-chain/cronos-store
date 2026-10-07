@@ -1096,7 +1096,7 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// copies have no wal, and Close is idempotent: only wal would panic on a second close.
+	// copies have no wal; nil it so a second Close doesn't return wal.ErrClosed.
 	if db.wal != nil {
 		errs = append(errs, db.wal.Close())
 		db.wal = nil
