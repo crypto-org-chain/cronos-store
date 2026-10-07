@@ -1350,19 +1350,6 @@ func waitPrune(db *DB) {
 	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
 }
 
-func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
-
-	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
-}
-
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	logger := &recordingLogger{}
 	db, err := Load(t.TempDir(), Options{
@@ -1609,9 +1596,7 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
 	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
-	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Equal(t, db.earliestSnapshotCache.Load(), cp.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))

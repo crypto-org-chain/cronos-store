@@ -338,16 +338,7 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	if err := initEmptyDB(db.dir, db.initialVersion, db.chainId); err != nil {
-		return err
-	}
-
-	// the earliest version follows the initial version, so re-warm the cache Load filled.
-	db.earliestSnapshotCache.Store(0)
-	if _, err := db.EarliestVersion(); err != nil {
-		db.logger.Error("failed to cache earliest version", "err", err)
-	}
-	return nil
+	return initEmptyDB(db.dir, db.initialVersion, db.chainId)
 }
 
 // ApplyUpgrades wraps MultiTree.ApplyUpgrades, it also append the upgrades in a pending log,
