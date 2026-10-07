@@ -72,14 +72,14 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         *wal.Log
+	wal         writeAheadLog
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
 	// once set, every Commit fails with it.
 	walErr error
 	// walSync fsyncs db.wal; overridable per-instance in tests.
-	walSync func(*wal.Log) error
+	walSync func(writeAheadLog) error
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -184,7 +184,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		err      error
 		fileLock FileLock
 		mtree    *MultiTree
-		walLog   *wal.Log
+		walLog   writeAheadLog
 	)
 	// until the DB takes ownership, an early return would leak the lock, mmaps
 	// and wal fds, and a retried Load could never re-lock the dir.
@@ -231,10 +231,18 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
-	walLog, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	var wl writeAheadLog
+	if opts.ReadOnly {
+		// a live writer may own the WAL, so it must not be repaired from here.
+		wl, err = openReadOnlyWAL(walPath(dir))
+	} else {
+		wl, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	}
 	if err != nil {
 		return nil, err
 	}
+	// assigned only on success: a typed nil would pass the cleanup's nil check.
+	walLog = wl
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.CatchupWAL(walLog, int64(opts.TargetVersion)); err != nil {
@@ -294,7 +302,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
 		ownsWriterPool:         true,
-		walSync:                (*wal.Log).Sync,
+		walSync:                writeAheadLog.Sync,
 	}
 	ownershipMoved = true
 	db.attachTraverseStateChanges()
@@ -1244,7 +1252,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
+func (db *DB) walStateForRead() (writeAheadLog, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
@@ -1254,7 +1262,7 @@ func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
 	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+func waitForWALVersion(walLog writeAheadLog, initialVersion uint32, targetVersion, snapshotVersion int64) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1524,15 +1532,15 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true})
+	wl, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := wl.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wal.Close())
+		return 0, errors.Join(err, wl.Close())
 	}
-	if err := wal.Close(); err != nil {
+	if err := wl.Close(); err != nil {
 		return 0, err
 	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
@@ -1589,7 +1597,7 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 }
 
 // writeEntry reports whether it added entry to batch.
-func writeEntry(batch *wal.Batch, log *wal.Log, lastIndex uint64, entry *walEntry) (bool, error) {
+func writeEntry(batch *wal.Batch, log writeAheadLog, lastIndex uint64, entry *walEntry) (bool, error) {
 	bz, err := entry.data.Marshal()
 	if err != nil {
 		return false, err
