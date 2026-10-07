@@ -454,10 +454,16 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 		names[i] = entry.Name
 	}
 
-	// write the snapshots in parallel and wait all jobs done
+	// one failed tree cancels the rest; RunWorkerGroup still waits for every task.
+	taskCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if err := RunWorkerGroup(wp, names, func(i int) error {
 		entry := t.trees[i]
-		return entry.WriteSnapshotWithContext(ctx, filepath.Join(dir, entry.Name))
+		err := entry.WriteSnapshotWithContext(taskCtx, filepath.Join(dir, entry.Name))
+		if err != nil {
+			cancel()
+		}
+		return err
 	}); err != nil {
 		return err
 	}
