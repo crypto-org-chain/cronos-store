@@ -878,98 +878,147 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 }
 
 func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
-	dir := t.TempDir()
-	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, store.LoadLatestVersion())
-	defer store.Close()
-	for i := 0; i < 200; i++ {
-		store.GetKVStore(key).Set([]byte(fmt.Sprintf("p%03d", i)), []byte("v"))
+	testCases := []struct {
+		name string
+		opts memiavl.Options
+		// reloadEvery > 0 rewrites and reloads the snapshot before every n-th block, outside
+		// Commit; otherwise db.Commit reloads in the background and publishQuerySnapshot
+		// repoints right after, as in production.
+		reloadEvery int
+	}{
+		{name: "explicit reloads", reloadEvery: 5},
+		{name: "background reloads inside Commit", opts: memiavl.Options{SnapshotInterval: 1, CacheSize: 100}},
 	}
-	store.Commit()
 
-	const commits = 30
-	done := make(chan struct{})
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(done)
-		for i := 0; i < commits; i++ {
-			if i%5 == 4 {
-				// readers walk mmap'd nodes across reloads; like Commit's, each is
-				// followed by a publish before the next.
-				if err := store.db.RewriteSnapshot(); err != nil {
-					t.Error(err)
-					return
-				}
-				if err := store.db.Reload(); err != nil {
-					t.Error(err)
-					return
-				}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			store.SetMemIAVLOptions(tc.opts)
+			key := types.NewKVStoreKey(testStoreName)
+			store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			require.NoError(t, store.LoadLatestVersion())
+			defer store.Close()
+			for i := 0; i < 200; i++ {
+				store.GetKVStore(key).Set([]byte(fmt.Sprintf("p%03d", i)), []byte("v"))
 			}
-			kv := store.GetKVStore(key)
-			kv.Set([]byte("k"), []byte{byte(i)})
-			store.WorkingHash()
-			// a write after WorkingHash lands in the same version as the working copy.
-			kv.Set([]byte("late"), []byte{byte(i)})
 			store.Commit()
-		}
-	}()
 
-	// baseapp's CheckTx state: branched once, read while commits flush.
-	checkState := store.CacheMultiStore()
+			const (
+				commits    = 30
+				minReloads = 5
+				maxCommits = 10000
+			)
+			done := make(chan struct{})
+			// CheckTx-style readers never span a reload, as under CometBFT's mempool lock
+			// around Commit: an unpinned copy is unmapped at the second reload after it is taken.
+			var mempool sync.RWMutex
 
-	readers := []func(){
-		func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
-		func() {
-			// iterate, since a Get would be served from the branch's cache after the first read.
-			it := checkState.GetKVStore(key).Iterator(nil, nil)
-			for ; it.Valid(); it.Next() {
-			}
-			_ = it.Close()
-		},
-		func() { store.GetKVStore(key).Get([]byte("k")) },
-		func() {
-			cms, err := store.CacheMultiStoreWithVersion(0)
-			if err == nil {
-				cms.GetKVStore(key).Get([]byte("k"))
-				if closer, ok := cms.(io.Closer); ok {
-					_ = closer.Close()
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer close(done)
+				// background rewrites finish on their own clock, so commit until enough have reloaded.
+				for i, reloads := 0, 0; i < commits || reloads < minReloads; i++ {
+					if i == maxCommits {
+						t.Errorf("%d reloads in %d commits", reloads, i)
+						return
+					}
+					snapshotVersion := store.db.SnapshotVersion()
+					if tc.reloadEvery > 0 && i%tc.reloadEvery == tc.reloadEvery-1 {
+						// readers walk mmap'd nodes across reloads; like Commit's, each is
+						// followed by a publish before the next.
+						if err := store.db.RewriteSnapshot(); err != nil {
+							t.Error(err)
+							return
+						}
+						mempool.Lock()
+						err := store.db.Reload()
+						mempool.Unlock()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+					}
+					kv := store.GetKVStore(key)
+					kv.Set([]byte("k"), []byte{byte(i)})
+					store.WorkingHash()
+					// a write after WorkingHash lands in the same version as the working copy.
+					kv.Set([]byte("late"), []byte{byte(i)})
+					if tc.reloadEvery > 0 {
+						// this Commit can't reload, so readers also run through its flush of the late write.
+						store.Commit()
+					} else {
+						mempool.Lock()
+						store.Commit()
+						mempool.Unlock()
+					}
+					if store.db.SnapshotVersion() != snapshotVersion {
+						reloads++
+					}
 				}
-			}
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
-		},
-		func() { store.LatestVersion() },
-		func() { store.EarliestVersion() },
-	}
+			}()
 
-	for _, read := range readers {
-		wg.Add(1)
-		go func(read func()) {
-			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
+			// baseapp's CheckTx state: branched once, read while commits flush.
+			checkState := store.CacheMultiStore()
+			checkTx := func(read func()) func() {
+				return func() {
+					mempool.RLock()
+					defer mempool.RUnlock()
 					read()
 				}
 			}
-		}(read)
-	}
 
-	wg.Wait()
+			readers := []func(){
+				checkTx(func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) }),
+				checkTx(func() {
+					// iterate, since a Get would be served from the branch's cache after the first read.
+					it := checkState.GetKVStore(key).Iterator(nil, nil)
+					for ; it.Valid(); it.Next() {
+					}
+					_ = it.Close()
+				}),
+				checkTx(func() { store.GetKVStore(key).Get([]byte("k")) }),
+				func() {
+					cms, err := store.CacheMultiStoreWithVersion(0)
+					if err == nil {
+						cms.GetKVStore(key).Get([]byte("k"))
+						if closer, ok := cms.(io.Closer); ok {
+							_ = closer.Close()
+						}
+					}
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
+				},
+				func() { store.LatestVersion() },
+				func() { store.EarliestVersion() },
+			}
+
+			for _, read := range readers {
+				wg.Add(1)
+				go func(read func()) {
+					defer wg.Done()
+					for {
+						select {
+						case <-done:
+							return
+						default:
+							read()
+						}
+					}
+				}(read)
+			}
+
+			wg.Wait()
+		})
+	}
 }
 
 func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
