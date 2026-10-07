@@ -912,6 +912,13 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
 	}
+	// a store an upgrade after target added has no tree to repoint to; that
+	// upgrade re-adds it on restart.
+	for key, store := range rs.stores {
+		if _, ok := store.(*memiavlstore.Store); ok && rs.db.TreeByName(key.Name()) == nil {
+			delete(rs.stores, key)
+		}
+	}
 	rs.publishQuerySnapshot()
 
 	return nil
