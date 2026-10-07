@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/alitto/pond"
 	"github.com/tidwall/wal"
@@ -179,10 +180,14 @@ func (t *MultiTree) SetZeroCopy(zeroCopy bool) {
 
 // Copy returns a snapshot of the tree which won't be corrupted by further modifications on the main tree.
 func (t *MultiTree) Copy(cacheSize int) *MultiTree {
+	return t.copy(cacheSize, true)
+}
+
+func (t *MultiTree) copy(cacheSize int, pin bool) *MultiTree {
 	trees := make([]NamedTree, len(t.trees))
 	treesByName := make(map[string]int, len(t.trees))
 	for i, entry := range t.trees {
-		tree := entry.Copy(cacheSize)
+		tree := entry.copy(cacheSize, pin)
 		trees[i] = NamedTree{Tree: tree, Name: entry.Name}
 		treesByName[entry.Name] = i
 	}
@@ -415,18 +420,32 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 		return err
 	}
 
-	// write the snapshots in parallel and wait all jobs done
-	// group, _ := wp.GroupContext(context.Background())
-	group, _ := wp.GroupContext(ctx)
-
+	// Write the trees in parallel and wait for every task, even after a failure:
+	// callers close the trees once this returns, and pond's GroupContext.Wait
+	// returns on the first error while other tasks are still reading them.
+	taskCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		errOnce  sync.Once
+		firstErr error
+	)
+	group := wp.Group()
 	for _, entry := range t.trees {
 		tree, name := entry.Tree, entry.Name
-		group.Submit(func() error {
-			return tree.WriteSnapshotWithContext(ctx, filepath.Join(dir, name))
+		group.Submit(func() {
+			if err := tree.WriteSnapshotWithContext(taskCtx, filepath.Join(dir, name)); err != nil {
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
 		})
 	}
-
-	if err := group.Wait(); err != nil {
+	group.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 

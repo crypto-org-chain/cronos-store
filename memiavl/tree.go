@@ -230,16 +230,24 @@ func (t *Tree) setInitialVersion(initialVersion uint32) {
 // Copy returns a snapshot of the tree which won't be modified by further modifications on the main tree,
 // the returned new tree can be accessed concurrently with the main tree.
 //
-// The copy shares the source's mmap'd snapshot rather than duplicating it. The DB
-// retains the previous generation for one reload cycle, so a copy stays valid
-// across at most one reload of its source and must not be used after that.
-// Copying a copy does not extend this window — it stays tied to the same snapshot.
+// The copy shares the source's mmap'd snapshot and holds a reference to it, so the
+// snapshot stays mapped across reloads until every tree sharing it is closed.
+// Close the copy when done with it, or the snapshot is never unmapped.
 func (t *Tree) Copy(cacheSize int) *Tree {
+	return t.copy(cacheSize, true)
+}
+
+// copy with pin false takes no snapshot reference: the copy needs no Close but
+// is only valid while the owning DB keeps the snapshot mapped.
+func (t *Tree) copy(cacheSize int, pin bool) *Tree {
 	if root, ok := t.root.(*MemNode); ok {
 		// protect every existing MemNode from in-place mutation, including ones
 		// written in the uncommitted working version: the root always carries the
 		// highest node version. After a commit this equals t.version, as before.
 		t.cowVersion = max(t.cowVersion, t.version, root.version)
+	}
+	if pin && t.snapshot != nil {
+		t.snapshot.copies.Add(1)
 	}
 	newTree := *t
 	// recreate cache for the copy to keep eviction state independent per tree
