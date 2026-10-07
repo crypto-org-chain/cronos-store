@@ -1,7 +1,7 @@
 name: Run Lint
 # Lint runs golangci-lint over the entire cronos repository This workflow is
 # run on every pull request and push to master The `golangci` will pass without
-# running if no *.{go, mod, sum} files have been changed.
+# running if no *.go, go.{mod,sum}, .golangci.yml or lint.yml files changed.
 on:
   merge_group:
   pull_request:
@@ -31,6 +31,8 @@ jobs:
             **/*.go
             **/go.mod
             **/go.sum
+            .golangci.yml
+            .github/workflows/lint.yml
       - name: install golangci-lint
         if: steps.changed-files.outputs.any_changed == 'true'
         run: curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2

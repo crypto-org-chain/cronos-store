@@ -32,6 +32,8 @@ jobs:
             **/*.go
             **/go.mod
             **/go.sum
+            Makefile
+            .github/workflows/build.yml
       - name: install rocksDB dependencies
         run: |
           sudo apt-get update
