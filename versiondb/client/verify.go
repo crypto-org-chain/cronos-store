@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/alitto/pond"
 	"github.com/cosmos/gogoproto/jsonpb"
@@ -54,6 +55,13 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A repeated or aliased name would otherwise produce a duplicate store entry
+			// in the commit info and hand one change-set or snapshot directory to two
+			// workers; with --load-snapshot, the same tree too.
+			stores, err = normalizeStores(stores)
+			if err != nil {
+				return err
+			}
 
 			chainId, err := cmd.Flags().GetString(flagChainId)
 			if err != nil {
@@ -90,11 +98,6 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					return err
 				}
 			}
-
-			// A repeated name would otherwise produce a duplicate store entry in the
-			// commit info and, with --load-snapshot, hand the same tree to two workers
-			// that replay change sets into it concurrently.
-			stores = dedupStores(stores)
 
 			verified := make([]verifiedStore, len(stores))
 			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
@@ -313,20 +316,28 @@ func verifyOneStore(ctx context.Context, tree *memiavl.Tree, store, changeSetDir
 	return true, nil
 }
 
-// dedupStores builds a new slice rather than compacting in place: with --stores
-// unset, GetStoresOrDefault hands back the caller's own defaultStores slice, and
+// normalizeStores cleans each name and drops repeats. A store name is a single
+// directory under the change-set and snapshot dirs, so anything that isn't one
+// after cleaning is rejected rather than resolved to some other store's files.
+//
+// It builds a new slice rather than compacting in place: with --stores unset,
+// GetStoresOrDefault hands back the caller's own defaultStores slice, and
 // reordering plus tail-zeroing it would corrupt that shared value.
-func dedupStores(stores []string) []string {
+func normalizeStores(stores []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(stores))
-	deduped := make([]string, 0, len(stores))
+	normalized := make([]string, 0, len(stores))
 	for _, store := range stores {
-		if _, ok := seen[store]; ok {
+		name := filepath.Clean(store)
+		if name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
+			return nil, fmt.Errorf("invalid store name %q: must be a single directory name", store)
+		}
+		if _, ok := seen[name]; ok {
 			continue
 		}
-		seen[store] = struct{}{}
-		deduped = append(deduped, store)
+		seen[name] = struct{}{}
+		normalized = append(normalized, name)
 	}
-	return deduped
+	return normalized, nil
 }
 
 // advanceTreeVersion saves empty versions up to `target`, applying no changeset, so a

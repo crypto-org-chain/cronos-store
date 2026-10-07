@@ -156,8 +156,57 @@ func TestVerifyStopsAfterFirstFailedStore(t *testing.T) {
 	require.NotContains(t, err.Error(), "not a directory", `"b" must be skipped once "a" failed`)
 }
 
-func TestDedupStores(t *testing.T) {
-	require.Equal(t, []string{fooStore, barStore}, dedupStores([]string{fooStore, barStore, fooStore, barStore, fooStore}))
+func TestNormalizeStores(t *testing.T) {
+	testCases := []struct {
+		name      string
+		stores    []string
+		expStores []string
+		expErr    string
+	}{
+		{
+			name:      "drops repeats",
+			stores:    []string{fooStore, barStore, fooStore, barStore, fooStore},
+			expStores: []string{fooStore, barStore},
+		},
+		{
+			name:      "folds path aliases into one store",
+			stores:    []string{fooStore, "foo/", "./foo", "foo//", barStore},
+			expStores: []string{fooStore, barStore},
+		},
+		{
+			// what a double space in --stores splits into
+			name:   "rejects an empty name",
+			stores: []string{fooStore, "", barStore},
+			expErr: `invalid store name ""`,
+		},
+		{
+			name:   "rejects the current directory",
+			stores: []string{"./"},
+			expErr: `invalid store name "./"`,
+		},
+		{
+			name:   "rejects the parent directory",
+			stores: []string{".."},
+			expErr: `invalid store name ".."`,
+		},
+		{
+			name:   "rejects nested paths",
+			stores: []string{"../foo"},
+			expErr: `invalid store name "../foo"`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			stores, err := normalizeStores(tc.stores)
+			if tc.expErr != "" {
+				require.ErrorContains(t, err, tc.expErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expStores, stores)
+		})
+	}
 }
 
 // A store carried in from --load-snapshot has no change sets to replay, but it's
@@ -215,7 +264,8 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 }
 
 // With --load-snapshot a repeated store name resolves to the same loaded tree, so
-// two workers would replay into it concurrently; run under -race.
+// two workers would replay into it concurrently (run under -race). An alias such as
+// "foo/" would add a second store over the same change-set and snapshot directories.
 func TestVerifyDedupsStoresWithLoadedSnapshot(t *testing.T) {
 	changeSetDir := t.TempDir()
 	baseDir := writeBaseSnapshot(t)
@@ -226,7 +276,7 @@ func TestVerifyDedupsStoresWithLoadedSnapshot(t *testing.T) {
 	cmd := VerifyChangeSetCmd(nil)
 	cmd.SetArgs([]string{
 		changeSetDir,
-		"--" + flagStores, "foo foo bar foo",
+		"--" + flagStores, "foo foo/ bar ./foo foo",
 		"--" + flagLoadSnapshot, baseDir,
 		"--" + flagSaveSnapshot, outDir,
 		"--" + flagSave,
