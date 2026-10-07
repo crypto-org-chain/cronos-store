@@ -879,6 +879,10 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
 	require.NoError(t, store.LoadLatestVersion())
 	defer store.Close()
+	for i := 0; i < 200; i++ {
+		store.GetKVStore(key).Set([]byte(fmt.Sprintf("p%03d", i)), []byte("v"))
+	}
+	store.Commit()
 
 	const commits = 30
 	done := make(chan struct{})
@@ -889,6 +893,18 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		defer wg.Done()
 		defer close(done)
 		for i := 0; i < commits; i++ {
+			if i%5 == 4 {
+				// readers walk mmap'd nodes across reloads; like Commit's, each is
+				// followed by a publish before the next.
+				if err := store.db.RewriteSnapshot(); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := store.db.Reload(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
 			kv := store.GetKVStore(key)
 			kv.Set([]byte("k"), []byte{byte(i)})
 			store.WorkingHash()
@@ -903,7 +919,13 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 
 	readers := []func(){
 		func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
-		func() { checkState.GetKVStore(key).Get([]byte("k")) },
+		func() {
+			// iterate, since a Get would be served from the branch's cache after the first read.
+			it := checkState.GetKVStore(key).Iterator(nil, nil)
+			for ; it.Valid(); it.Next() {
+			}
+			_ = it.Close()
+		},
 		func() { store.GetKVStore(key).Get([]byte("k")) },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
