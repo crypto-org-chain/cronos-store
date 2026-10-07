@@ -170,6 +170,16 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			expLast:  roWALEntries,
 		},
 		{
+			name: "non-segment names skipped",
+			malleate: func() {
+				for _, name := range []string{"0000000000000000000x", "00000000000000000000"} {
+					s.Require().NoError(os.WriteFile(filepath.Join(s.dir, name), []byte("junk"), 0o600))
+				}
+			},
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
 			name:     "truncate front started",
 			malleate: func() { s.writeSegment(s.segmentPath(13, walStartSuffix), 13, 15) },
 			expFirst: 13,
