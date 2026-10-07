@@ -577,6 +577,22 @@ func TestInitialVersion(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTruncatedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
+	db, err := Load(dir, opts, TestAppChainID)
+	require.NoError(t, err)
+	// SetInitialVersion rewrites snapshot-0/__metadata in place.
+	require.NoError(t, db.SetInitialVersion(100))
+	require.NoError(t, db.Close())
+
+	// A crash mid-rewrite leaves the file empty, which unmarshals cleanly with no commit info.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
+
+	_, err = Load(dir, opts, TestAppChainID)
+	require.ErrorContains(t, err, "missing commit info")
+}
+
 func TestLoadVersion(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
