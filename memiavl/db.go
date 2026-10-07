@@ -562,6 +562,15 @@ func (db *DB) latchWalErr(err error) error {
 	return db.latchFatalErr(fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err))
 }
 
+// unlike latchWalErr, a quit without an error still fails the commit, since its
+// entry will never be synced. Callers hold db.mtx.
+func (db *DB) latchWriterQuit(err error) error {
+	if err == nil {
+		err = errors.New("no error reported")
+	}
+	return db.latchWalErr(err)
+}
+
 // latchFatalErr keeps the first error: the tree is already ahead of the wal, so
 // later commits must fail. Callers hold db.mtx.
 func (db *DB) latchFatalErr(err error) error {
@@ -776,16 +785,17 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case err := <-db.walQuit:
-				if err == nil {
-					// a quit without an error must still fail the commit.
-					err = errors.New("async wal writing goroutine quit unexpectedly")
-				}
-				return 0, db.latchWalErr(err)
+				return 0, db.latchWriterQuit(err)
 			}
 
-			// the writer accepted the entry, so done always fires.
-			if err := <-done; err != nil {
-				return 0, db.latchFatalErr(err)
+			// a buffered send can succeed after the writer quit, so done may never fire.
+			select {
+			case err := <-done:
+				if err != nil {
+					return 0, db.latchFatalErr(err)
+				}
+			case err := <-db.walQuit:
+				return 0, db.latchWriterQuit(err)
 			}
 		} else {
 			if err := db.writeAndSyncWAL(&db.wbatch, []*walEntry{&entry}); err != nil {

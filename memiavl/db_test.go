@@ -1162,26 +1162,54 @@ func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
 }
 
 func TestCommitAfterDeadAsyncWriterDoesNotHang(t *testing.T) {
-	dir := t.TempDir()
-	db := newDBWithDeadAsyncWALWriter(t, dir)
+	testCases := []struct {
+		name     string
+		malleate func(db *DB)
+		commits  int
+	}{
+		{
+			name:     "writer error latched",
+			malleate: func(*DB) {},
+			commits:  1,
+		},
+		{
+			// the buffered send and the closed walQuit are both ready, so each
+			// commit has an even chance of queueing an entry nobody will sync.
+			name:     "writer quit without latched error",
+			malleate: func(db *DB) { db.walErr = nil },
+			commits:  20,
+		},
+	}
 
-	require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
-		{Name: testStoreName, Changeset: ChangeSet{
-			Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
-		}},
-	}))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newDBWithDeadAsyncWALWriter(t, t.TempDir())
 
-	result := make(chan error, 1)
-	go func() {
-		_, err := db.Commit()
-		result <- err
-	}()
+			require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+				{Name: testStoreName, Changeset: ChangeSet{
+					Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
+				}},
+			}))
 
-	select {
-	case err := <-result:
-		require.Error(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("second Commit call deadlocked waiting on a dead async wal writer")
+			result := make(chan error, 1)
+			go func() {
+				for i := 0; i < tc.commits; i++ {
+					tc.malleate(db)
+					if _, err := db.Commit(); err == nil {
+						result <- fmt.Errorf("commit %d succeeded with a dead wal writer", i)
+						return
+					}
+				}
+				result <- nil
+			}()
+
+			select {
+			case err := <-result:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Commit deadlocked waiting on a dead async wal writer")
+			}
+		})
 	}
 }
 
