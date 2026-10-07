@@ -201,7 +201,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 		{
 			name: "non-segment names skipped",
 			malleate: func() {
-				for _, name := range []string{"0000000000000000000x", "00000000000000000000"} {
+				for _, name := range []string{"0000000000000000000x", "00000000000000000000", "99999999999999999999"} {
 					s.Require().NoError(os.WriteFile(filepath.Join(s.dir, name), []byte("junk"), 0o600))
 				}
 			},
