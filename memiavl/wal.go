@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/tidwall/gjson"
@@ -130,12 +131,14 @@ var (
 // are a truncation in progress, so both are interpreted as wal.Open would
 // recover them instead of being repaired.
 type readOnlyWAL struct {
-	mu         sync.Mutex
-	closed     bool
+	// fixed at open
 	segments   []*walSegment // ascending by first index
-	cached     *walSegment   // most recently read non-tail segment
 	firstIndex uint64
 	lastIndex  uint64
+	closed     atomic.Bool
+
+	mu     sync.Mutex  // guards loading and evicting non-tail segment entries
+	cached *walSegment // most recently read non-tail segment
 }
 
 type walSegment struct {
@@ -144,15 +147,13 @@ type walSegment struct {
 	entries [][]byte // loaded only for the tail and cached segments
 }
 
-func openReadOnlyWAL(dir string) (*readOnlyWAL, error) {
-	var err error
+func openReadOnlyWAL(dir string) (l *readOnlyWAL, err error) {
 	for range readOnlyWALOpenAttempts {
-		var l *readOnlyWAL
 		if l, err = tryOpenReadOnlyWAL(dir); !errors.Is(err, fs.ErrNotExist) {
-			return l, err
+			break
 		}
 	}
-	return nil, err
+	return l, err
 }
 
 func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
@@ -166,12 +167,10 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 	}
 
 	tail := segments[len(segments)-1]
-	data, err := readWALSegment(tail.path)
-	if err != nil {
+	// a torn last entry is one the writer hasn't finished appending.
+	if tail.entries, _, err = readWALEntries(tail.path); err != nil {
 		return nil, err
 	}
-	// a torn last entry is one the writer hasn't finished appending.
-	tail.entries, _ = parseWALEntries(data)
 	l.firstIndex = segments[0].index
 	// an empty tail (just cycled) ends the log at the previous segment; 0 means an empty log, as in wal.Log.
 	l.lastIndex = tail.index + uint64(len(tail.entries)) - 1
@@ -231,34 +230,31 @@ func listWALSegments(dir string) ([]*walSegment, error) {
 	return segments, nil
 }
 
-// readWALSegment falls back to the final name once the writer's TruncateFront renames a .START segment.
-func readWALSegment(path string) ([]byte, error) {
+// readWALEntries splits a binary-format segment into entries; torn reports trailing
+// bytes that don't form a complete entry. A .START segment the writer's TruncateFront
+// has since renamed is read under its final name.
+func readWALEntries(path string) (entries [][]byte, torn bool, err error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) && strings.HasSuffix(path, walStartSuffix) {
-		return os.ReadFile(strings.TrimSuffix(path, walStartSuffix))
+		data, err = os.ReadFile(strings.TrimSuffix(path, walStartSuffix))
 	}
-	return data, err
-}
-
-// parseWALEntries splits binary-format segment data into entries; torn reports
-// trailing bytes that don't form a complete entry.
-func parseWALEntries(data []byte) (entries [][]byte, torn bool) {
+	if err != nil {
+		return nil, false, err
+	}
 	for len(data) > 0 {
 		n, err := loadNextBinaryEntry(data)
 		if err != nil {
-			return entries, true
+			return entries, true, nil
 		}
 		_, header := binary.Uvarint(data)
 		entries = append(entries, data[header:n:n])
 		data = data[n:]
 	}
-	return entries, false
+	return entries, false, nil
 }
 
 func (l *readOnlyWAL) FirstIndex() (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed.Load() {
 		return 0, wal.ErrClosed
 	}
 	if l.lastIndex == 0 {
@@ -268,9 +264,7 @@ func (l *readOnlyWAL) FirstIndex() (uint64, error) {
 }
 
 func (l *readOnlyWAL) LastIndex() (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed.Load() {
 		return 0, wal.ErrClosed
 	}
 	return l.lastIndex, nil
@@ -278,21 +272,29 @@ func (l *readOnlyWAL) LastIndex() (uint64, error) {
 
 // Read returns a slice of the segment buffer, which must not be modified.
 func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed.Load() {
 		return nil, wal.ErrClosed
 	}
 	if index == 0 || index < l.firstIndex || index > l.lastIndex {
 		return nil, wal.ErrNotFound
 	}
+	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
 
-	i := sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index }) - 1
-	seg := l.segments[i]
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if seg.entries == nil {
-		if err := l.loadSegment(seg); err != nil {
+		entries, torn, err := readWALEntries(seg.path)
+		if err != nil {
 			return nil, err
 		}
+		if torn {
+			// only the tail can hold an entry the writer is still appending.
+			return nil, wal.ErrCorrupt
+		}
+		if l.cached != nil {
+			l.cached.entries = nil
+		}
+		seg.entries, l.cached = entries, seg
 	}
 	offset := index - seg.index
 	if offset >= uint64(len(seg.entries)) {
@@ -301,36 +303,13 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	return seg.entries[offset], nil
 }
 
-// loadSegment loads a non-tail segment, evicting the previously cached one.
-func (l *readOnlyWAL) loadSegment(seg *walSegment) error {
-	data, err := readWALSegment(seg.path)
-	if err != nil {
-		return err
-	}
-	entries, torn := parseWALEntries(data)
-	if torn {
-		// only the tail can hold an entry the writer is still appending.
-		return wal.ErrCorrupt
-	}
-	if l.cached != nil {
-		l.cached.entries = nil
-	}
-	seg.entries = entries
-	l.cached = seg
-	return nil
-}
-
 func (*readOnlyWAL) WriteBatch(*wal.Batch) error { return errReadOnly }
 func (*readOnlyWAL) TruncateFront(uint64) error  { return errReadOnly }
 func (*readOnlyWAL) TruncateBack(uint64) error   { return errReadOnly }
 
 func (l *readOnlyWAL) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
+	if !l.closed.CompareAndSwap(false, true) {
 		return wal.ErrClosed
 	}
-	l.closed = true
-	l.segments, l.cached = nil, nil
 	return nil
 }
