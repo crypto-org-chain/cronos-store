@@ -882,8 +882,7 @@ func (rs *Store) SetMemIAVLOptions(opts memiavl.Options) {
 }
 
 // RollbackToVersion delete the versions after `target` and update the latest version.
-// it should only be called in standalone cli commands: it closes rs.db outright,
-// invalidating any querySnapshot published before this call.
+// it should only be called in standalone cli commands.
 func (rs *Store) RollbackToVersion(target int64) error {
 	if target <= 0 {
 		return fmt.Errorf("invalid rollback height target: %d", target)
