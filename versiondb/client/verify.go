@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -96,7 +97,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			stores = dedupStores(stores)
 
 			verified := make([]verifiedStore, len(stores))
-			err = memiavl.RunWorkerGroup(pool, stores, func(i int) error {
+			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
 				store := stores[i]
 				tree := mtree.TreeByName(store)
 				// A store loaded from --load-snapshot exists even with no change sets to
@@ -106,7 +107,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				if tree == nil {
 					tree = memiavl.New(0)
 				}
-				exists, err := verifyOneStore(tree, store, changeSetDir, targetVersion)
+				exists, err := verifyOneStore(ctx, tree, store, changeSetDir, targetVersion)
 				if err != nil {
 					return err
 				}
@@ -155,9 +156,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				for i, entry := range verified {
 					names[i] = entry.name
 				}
-				if err := memiavl.RunWorkerGroup(pool, names, func(i int) error {
+				if err := memiavl.RunWorkerGroup(cmd.Context(), pool, names, func(ctx context.Context, i int) error {
 					entry := verified[i]
-					return entry.tree.WriteSnapshot(filepath.Join(saveSnapshot, entry.name))
+					return entry.tree.WriteSnapshotWithContext(ctx, filepath.Join(saveSnapshot, entry.name))
 				}); err != nil {
 					return err
 				}
@@ -229,7 +230,7 @@ type verifiedStore struct {
 
 // verifyOneStore is safe to run in parallel with other stores. Reports false without
 // error if the store doesn't exist before `targetVersion`.
-func verifyOneStore(tree *memiavl.Tree, store, changeSetDir string, targetVersion int64) (bool, error) {
+func verifyOneStore(ctx context.Context, tree *memiavl.Tree, store, changeSetDir string, targetVersion int64) (bool, error) {
 	filesWithVersion, err := scanChangeSetFiles(changeSetDir, store)
 	if err != nil {
 		return false, err
@@ -255,6 +256,9 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir string, targetVersio
 
 		err = withChangeSetFile(file.FileName, func(reader Reader) error {
 			_, err := IterateChangeSets(reader, func(version int64, changeSet *iavl.ChangeSet) (bool, error) {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
 				if version <= tree.Version() {
 					// skip old change sets
 					return true, nil

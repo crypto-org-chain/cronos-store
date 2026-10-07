@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,32 +50,58 @@ func writeStoreChangeSet(t *testing.T, changeSetDir, store string, versions []in
 	}
 }
 
-func TestVerifyOneStoreBumpsVersionOnGaps(t *testing.T) {
-	dir := t.TempDir()
+func TestVerifyOneStore(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	// "foo" only changed at versions 1 and 3, skipping version 2 entirely - as would happen for
-	// a store that had no writes in block 2.
-	writeStoreChangeSet(t, dir, fooStore, []int64{1, 3})
+	testCases := []struct {
+		name          string
+		ctx           context.Context
+		versions      []int64
+		targetVersion int64
+		expErr        error
+		expVersion    int64
+	}{
+		{
+			// "foo" skips version 2 entirely, as a store with no writes in block 2 would.
+			name:          "bumps version on gaps",
+			ctx:           context.Background(),
+			versions:      []int64{1, 3},
+			targetVersion: 3,
+			expVersion:    3,
+		},
+		{
+			name:          "catches up to target version",
+			ctx:           context.Background(),
+			versions:      []int64{1},
+			targetVersion: 5,
+			expVersion:    5,
+		},
+		{
+			name:       "stops replaying once canceled",
+			ctx:        canceled,
+			versions:   []int64{1, 2},
+			expErr:     context.Canceled,
+			expVersion: 0,
+		},
+	}
 
-	tree := memiavl.New(0)
-	exists, err := verifyOneStore(tree, fooStore, dir, 3)
-	require.NoError(t, err)
-	require.True(t, exists)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStoreChangeSet(t, dir, fooStore, tc.versions)
 
-	require.Equal(t, int64(3), tree.Version())
-}
-
-func TestVerifyOneStoreCatchesUpToTargetVersion(t *testing.T) {
-	dir := t.TempDir()
-
-	writeStoreChangeSet(t, dir, fooStore, []int64{1})
-
-	tree := memiavl.New(0)
-	exists, err := verifyOneStore(tree, fooStore, dir, 5)
-	require.NoError(t, err)
-	require.True(t, exists)
-
-	require.Equal(t, int64(5), tree.Version())
+			tree := memiavl.New(0)
+			exists, err := verifyOneStore(tc.ctx, tree, fooStore, dir, tc.targetVersion)
+			if tc.expErr != nil {
+				require.ErrorIs(t, err, tc.expErr)
+			} else {
+				require.NoError(t, err)
+				require.True(t, exists)
+			}
+			require.Equal(t, tc.expVersion, tree.Version())
+		})
+	}
 }
 
 // Without --target-version each store stops at its own last changeset, but a multitree
@@ -106,6 +133,27 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 		require.NotNil(t, tree)
 		require.Equal(t, int64(3), tree.Version())
 	}
+}
+
+func TestVerifyStopsAfterFirstFailedStore(t *testing.T) {
+	changeSetDir := t.TempDir()
+
+	// "a" fails on its garbage change-set file. "b" is a file where its directory
+	// belongs, so it fails too, but only if its task runs.
+	require.NoError(t, os.MkdirAll(filepath.Join(changeSetDir, "a"), os.ModePerm))
+	require.NoError(t, os.WriteFile(filepath.Join(changeSetDir, "a", "block-1"), []byte("garbage"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(changeSetDir, "b"), nil, 0o600))
+
+	cmd := VerifyChangeSetCmd(nil)
+	cmd.SetArgs([]string{
+		changeSetDir,
+		"--" + flagStores, "a b",
+		// one worker runs the stores in order, so "b" is still queued when "a" fails.
+		"--" + flagConcurrency, "1",
+	})
+	err := cmd.Execute()
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotContains(t, err.Error(), "not a directory", `"b" must be skipped once "a" failed`)
 }
 
 func TestDedupStores(t *testing.T) {

@@ -415,6 +415,10 @@ func (t *MultiTree) WriteSnapshot(dir string, wp *pond.WorkerPool) error {
 // for all of them, and joins their errors. labels name the tasks for error
 // reporting.
 //
+// The first failing task cancels the ctx handed to the rest. Tasks that start after
+// ctx is done are skipped with its error, so a failure (or the caller's cancel)
+// doesn't wait out every queued task.
+//
 // A panicking fn becomes an error. pond's worker recovers task panics itself and
 // only logs them, so without this the group's Wait would return normally and the
 // caller would promote whatever half-finished output the task left behind.
@@ -422,26 +426,40 @@ func (t *MultiTree) WriteSnapshot(dir string, wp *pond.WorkerPool) error {
 // A plain group is used instead of pond's GroupContext: the latter's Wait returns
 // as soon as its context is canceled, so the caller would resume — and may free
 // what the tasks are reading — while workers are still running.
-func RunWorkerGroup(wp *pond.WorkerPool, labels []string, fn func(i int) error) error {
+func RunWorkerGroup(
+	ctx context.Context,
+	wp *pond.WorkerPool,
+	labels []string,
+	fn func(ctx context.Context, i int) error,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	group := wp.Group()
 	// Each worker owns exactly one index, so no synchronization is needed to write it.
 	errs := make([]error, len(labels))
 	for i := range errs {
 		group.Submit(func() {
-			errs[i] = runWorkerTask(labels[i], i, fn)
+			if err := ctx.Err(); err != nil {
+				errs[i] = err
+				return
+			}
+			if errs[i] = runWorkerTask(ctx, labels[i], i, fn); errs[i] != nil {
+				cancel()
+			}
 		})
 	}
 	group.Wait()
 	return errors.Join(errs...)
 }
 
-func runWorkerTask(label string, i int, fn func(i int) error) (err error) {
+func runWorkerTask(ctx context.Context, label string, i int, fn func(ctx context.Context, i int) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in worker task %q: %v\n%s", label, r, debug.Stack())
 		}
 	}()
-	return fn(i)
+	return fn(ctx, i)
 }
 
 func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp *pond.WorkerPool) error {
@@ -454,21 +472,14 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 		names[i] = entry.Name
 	}
 
-	// one failed tree cancels the rest; RunWorkerGroup still waits for every task.
-	taskCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if err := RunWorkerGroup(wp, names, func(i int) error {
+	if err := RunWorkerGroup(ctx, wp, names, func(ctx context.Context, i int) error {
 		entry := t.trees[i]
-		err := entry.WriteSnapshotWithContext(taskCtx, filepath.Join(dir, entry.Name))
-		if err != nil {
-			cancel()
-		}
-		return err
+		return entry.WriteSnapshotWithContext(ctx, filepath.Join(dir, entry.Name))
 	}); err != nil {
 		return err
 	}
-	// RunWorkerGroup doesn't watch ctx itself, so a caller that canceled ctx
-	// during (or before) the write must be told, even if every write succeeded.
+	// A caller that canceled ctx after the last write started must still be told,
+	// even if every write succeeded.
 	if err := ctx.Err(); err != nil {
 		return err
 	}

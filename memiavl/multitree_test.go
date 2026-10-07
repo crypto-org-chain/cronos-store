@@ -477,57 +477,110 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 	}
 }
 
-func TestRunWorkerGroupConvertsPanicToError(t *testing.T) {
-	pool := pond.New(2, 10)
-	defer pool.StopAndWait()
-
-	var ran atomic.Int32
-	err := RunWorkerGroup(pool, []string{store1Name, store2Name}, func(i int) error {
-		ran.Add(1)
-		if i == 0 {
-			panic("boom")
-		}
-		return nil
-	})
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "boom")
-	require.Contains(t, err.Error(), store1Name)
-	// A panicking task must not take down its siblings.
-	require.EqualValues(t, 2, ran.Load())
-}
-
-func TestRunWorkerGroupWaitsForEveryTask(t *testing.T) {
-	// One worker for three tasks, so two are still queued when Wait is entered.
-	pool := pond.New(1, 10)
-	defer pool.StopAndWait()
-
-	var finished atomic.Int32
+func TestRunWorkerGroup(t *testing.T) {
 	labels := []string{store1Name, store2Name, store3Name}
-	err := RunWorkerGroup(pool, labels, func(int) error {
-		time.Sleep(10 * time.Millisecond)
-		finished.Add(1)
-		return nil
-	})
-
-	require.NoError(t, err)
-	require.EqualValues(t, len(labels), finished.Load())
-}
-
-func TestRunWorkerGroupJoinsEveryError(t *testing.T) {
-	pool := pond.New(3, 10)
-	defer pool.StopAndWait()
-
-	err := RunWorkerGroup(pool, []string{store1Name, store2Name, store3Name}, func(i int) error {
-		if i == 1 {
-			return nil
+	// Holds every task until all have started, so a failing task can't cancel a
+	// sibling before it runs.
+	allStarted := func() func() {
+		var started sync.WaitGroup
+		started.Add(len(labels))
+		return func() {
+			started.Done()
+			started.Wait()
 		}
-		return fmt.Errorf("task %d failed", i)
-	})
+	}
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "task 0 failed")
-	require.Contains(t, err.Error(), "task 2 failed")
+	testCases := []struct {
+		name    string
+		workers int
+		// newTask is called once per case, so the tasks can share per-case state.
+		newTask     func() func(ctx context.Context, i int) error
+		expErrs     []string
+		expFinished int32
+	}{
+		{
+			name: "waits for every task",
+			// one worker for three tasks, so two are still queued when Wait is entered.
+			workers: 1,
+			newTask: func() func(context.Context, int) error {
+				return func(context.Context, int) error {
+					time.Sleep(10 * time.Millisecond)
+					return nil
+				}
+			},
+			expFinished: 3,
+		},
+		{
+			name:    "panic becomes an error without taking down running siblings",
+			workers: 3,
+			newTask: func() func(context.Context, int) error {
+				wait := allStarted()
+				return func(_ context.Context, i int) error {
+					wait()
+					if i == 0 {
+						panic("boom")
+					}
+					return nil
+				}
+			},
+			expErrs:     []string{"boom", store1Name},
+			expFinished: 2,
+		},
+		{
+			name:    "joins every error",
+			workers: 3,
+			newTask: func() func(context.Context, int) error {
+				wait := allStarted()
+				return func(_ context.Context, i int) error {
+					wait()
+					if i == 1 {
+						return nil
+					}
+					return fmt.Errorf("task %d failed", i)
+				}
+			},
+			expErrs:     []string{"task 0 failed", "task 2 failed"},
+			expFinished: 3,
+		},
+		{
+			name: "first failure skips queued tasks",
+			// one worker runs the tasks in order, so the rest are still queued when task 0 fails.
+			workers: 1,
+			newTask: func() func(context.Context, int) error {
+				return func(_ context.Context, i int) error {
+					if i == 0 {
+						return fmt.Errorf("task %d failed", i)
+					}
+					return nil
+				}
+			},
+			expErrs:     []string{"task 0 failed", context.Canceled.Error()},
+			expFinished: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := pond.New(tc.workers, 10)
+			defer pool.StopAndWait()
+
+			var finished atomic.Int32
+			task := tc.newTask()
+			err := RunWorkerGroup(context.Background(), pool, labels, func(ctx context.Context, i int) error {
+				err := task(ctx, i)
+				finished.Add(1)
+				return err
+			})
+
+			if len(tc.expErrs) == 0 {
+				require.NoError(t, err)
+			}
+			for _, expErr := range tc.expErrs {
+				require.ErrorContains(t, err, expErr)
+			}
+			require.Equal(t, tc.expFinished, finished.Load())
+		})
+	}
 }
 
 // WriteSnapshotWithContext must not return while a tree write is still running:
