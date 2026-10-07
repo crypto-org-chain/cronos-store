@@ -1048,10 +1048,67 @@ func TestFastCommit(t *testing.T) {
 }
 
 func TestCommitFsyncsWALBeforeReturning(t *testing.T) {
-	for _, asyncCommit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("asyncCommit=%v", asyncCommit), func(t *testing.T) {
-			testCommitFsyncsWALBeforeReturning(t, asyncCommit)
-		})
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, db *DB) uint32
+	}{
+		{
+			name:     "new entry",
+			malleate: func(*testing.T, *DB) uint32 { return 0 },
+		},
+		{
+			name: "replayed entry",
+			malleate: func(t *testing.T, db *DB) uint32 {
+				t.Helper()
+				// version 2 matches the commit under test, so that commit replays it.
+				for _, value := range []string{"before", "world"} {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", value)))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				return 1
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, asyncCommit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/asyncCommit=%v", tc.name, asyncCommit), func(t *testing.T) {
+				dir := t.TempDir()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				targetVersion := tc.malleate(t, db)
+				require.NoError(t, db.Close())
+
+				db, err = Load(dir, Options{
+					InitialStores:     []string{testStoreName},
+					TargetVersion:     targetVersion,
+					AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+				}, TestAppChainID)
+				require.NoError(t, err)
+				defer func() {
+					require.NoError(t, db.Close())
+				}()
+
+				original, originalDir := db.walSync, db.walDirSync
+				var syncCalls, dirSyncCalls atomic.Int32
+				db.walSync = func(w writeAheadLog) error {
+					syncCalls.Add(1)
+					return original(w)
+				}
+				db.walDirSync = func(dir string) error {
+					dirSyncCalls.Add(1)
+					return originalDir(dir)
+				}
+
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+				_, err = db.Commit()
+				require.NoError(t, err)
+				require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+				require.EqualValues(t, 1, dirSyncCalls.Load(), "Commit must fsync the wal directory before returning")
+			})
+		}
 	}
 }
 
@@ -1060,38 +1117,6 @@ func asyncCommitBufferFor(asyncCommit bool) int {
 		return 10
 	}
 	return -1
-}
-
-func testCommitFsyncsWALBeforeReturning(t *testing.T, asyncCommit bool) {
-	t.Helper()
-
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{testStoreName},
-		AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, db.Close())
-	}()
-
-	original, originalDir := db.walSync, db.walDirSync
-	var syncCalls, dirSyncCalls atomic.Int32
-	db.walSync = func(w writeAheadLog) error {
-		syncCalls.Add(1)
-		return original(w)
-	}
-	db.walDirSync = func(dir string) error {
-		dirSyncCalls.Add(1)
-		return originalDir(dir)
-	}
-
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
-
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
-	require.EqualValues(t, 1, dirSyncCalls.Load(), "Commit must fsync the wal directory before returning")
 }
 
 func TestCommitFailsWhenWALSyncFails(t *testing.T) {
