@@ -29,9 +29,18 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
-// onlyGenesisSnapshot is the earliestSnapshotCache marker for "only snapshot-0
-// exists"; a real earliest version is always positive and zero means uncached.
+// onlyGenesisSnapshot is the earliestSnapshotCache marker for "the earliest
+// kept snapshot is snapshot-0"; a real earliest version is always positive and
+// zero means uncached.
 const onlyGenesisSnapshot = -1
+
+// earliestCacheValue keeps snapshot-0 distinct from the uncached zero.
+func earliestCacheValue(snapshotVersion int64) int64 {
+	if snapshotVersion == 0 {
+		return onlyGenesisSnapshot
+	}
+	return snapshotVersion
+}
 
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
@@ -98,8 +107,8 @@ type DB struct {
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory. onlyGenesisSnapshot means the scan found nothing
-	// but snapshot-0, so the initialVersion fallback applies.
+	// scanning the directory. onlyGenesisSnapshot means the earliest kept
+	// snapshot is snapshot-0, so the initialVersion fallback applies.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
@@ -658,7 +667,7 @@ func (db *DB) pruneSnapshots() {
 			db.logger.Error("failed to find first snapshot", "err", err)
 			return
 		}
-		db.earliestSnapshotCache.Store(earliestVersion)
+		db.earliestSnapshotCache.Store(earliestCacheValue(earliestVersion))
 
 		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
 		// the genesis placeholder snapshot has no corresponding wal entries yet.
@@ -1088,16 +1097,13 @@ func (db *DB) FirstVersion() (int64, error) {
 func (db *DB) EarliestVersion() (int64, error) {
 	v := db.earliestSnapshotCache.Load()
 	if v == 0 {
-		var err error
-		if v, err = firstSnapshotVersion(db.dir); err != nil {
+		snapshotVersion, err := firstSnapshotVersion(db.dir)
+		if err != nil {
 			return 0, err
 		}
-		// Cache the genesis-only state, not the fallback value: the fallback isn't a
-		// snapshot version, and pruneSnapshots overwrites this marker once a real
-		// snapshot exists, so it can't go stale the way a cached fallback would.
-		if v == 0 {
-			v = onlyGenesisSnapshot
-		}
+		// Cache the marker, not the fallback: SetInitialVersion can still change the
+		// fallback, and pruneSnapshots replaces the marker once snapshot-0 is gone.
+		v = earliestCacheValue(snapshotVersion)
 		db.earliestSnapshotCache.Store(v)
 	}
 	if v > 0 {

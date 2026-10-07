@@ -1265,46 +1265,60 @@ func TestEarliestVersion(t *testing.T) {
 }
 
 func TestEarliestVersionFallbackNotCached(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:    true,
-		InitialStores:      []string{testStoreName},
-		SnapshotKeepRecent: 0,
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-
-	// Only the genesis placeholder snapshot-0 exists, so EarliestVersion
-	// falls back to initialVersion.
-	fallback, err := db.EarliestVersion()
-	require.NoError(t, err)
-	require.EqualValues(t, 1, fallback)
-	// The genesis-only state must still be cached: this runs on the query hot
-	// path and a miss costs a directory scan.
-	require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
-
-	// InitChain sets the initial version after the store is loaded; a cached
-	// fallback value would keep reporting 1 here.
-	require.NoError(t, db.SetInitialVersion(100))
-	got, err := db.EarliestVersion()
-	require.NoError(t, err)
-	require.EqualValues(t, 100, got)
-
-	for i := 0; i < 3; i++ {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", fmt.Sprintf("v%d", i))))
-		_, err = db.Commit()
-		require.NoError(t, err)
+	testCases := []struct {
+		name       string
+		keepRecent uint32
+		// cache and earliest version after the first background rewrite and prune
+		wantCache    int64
+		wantEarliest int64
+	}{
+		{name: "snapshot-0 pruned", keepRecent: 0, wantCache: 102, wantEarliest: 102},
+		// a zero cache here would make every query copy rescan until snapshot-0 is pruned
+		{name: "snapshot-0 kept", keepRecent: 1, wantCache: onlyGenesisSnapshot, wantEarliest: 100},
 	}
-	// A background rewrite prunes snapshot-0 (keep-recent is 0) and refreshes
-	// the cache with the first real snapshot version.
-	require.NoError(t, db.RewriteSnapshotBackground())
-	for db.snapshotRewriteChan != nil {
-		require.NoError(t, db.checkAsyncTasks())
-	}
-	waitPrune(db)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := Load(t.TempDir(), Options{
+				CreateIfMissing:    true,
+				InitialStores:      []string{testStoreName},
+				SnapshotKeepRecent: tc.keepRecent,
+			}, TestAppChainID)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
 
-	got, err = db.EarliestVersion()
-	require.NoError(t, err)
-	require.EqualValues(t, 102, got)
+			// Only the genesis placeholder snapshot-0 exists, so EarliestVersion
+			// falls back to initialVersion.
+			fallback, err := db.EarliestVersion()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, fallback)
+			// The genesis-only state must still be cached: this runs on the query hot
+			// path and a miss costs a directory scan.
+			require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
+
+			// InitChain sets the initial version after the store is loaded; a cached
+			// fallback value would keep reporting 1 here.
+			require.NoError(t, db.SetInitialVersion(100))
+			got, err := db.EarliestVersion()
+			require.NoError(t, err)
+			require.EqualValues(t, 100, got)
+
+			for i := 0; i < 3; i++ {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", fmt.Sprintf("v%d", i))))
+				_, err = db.Commit()
+				require.NoError(t, err)
+			}
+			require.NoError(t, db.RewriteSnapshotBackground())
+			for db.snapshotRewriteChan != nil {
+				require.NoError(t, db.checkAsyncTasks())
+			}
+			waitPrune(db)
+
+			require.Equal(t, tc.wantCache, db.earliestSnapshotCache.Load())
+			got, err = db.EarliestVersion()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEarliest, got)
+		})
+	}
 }
 
 func TestEarliestVersionDuringSetInitialVersion(t *testing.T) {
