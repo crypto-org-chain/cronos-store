@@ -354,12 +354,10 @@ func advanceTreeVersion(tree *memiavl.Tree, target int64) error {
 
 // lastCommitID build `CommitID` from a memiavl tree.
 func lastCommitID(tree *memiavl.Tree) storetypes.CommitID {
-	// copy out the hash in case it's relied on mmap-ed file.
-	var hash [memiavl.SizeHash]byte
-	copy(hash[:], tree.RootHash())
+	// RootHash clones mmap-ed bytes, so the hash outlives the snapshot.
 	return storetypes.CommitID{
 		Version: tree.Version(),
-		Hash:    hash[:],
+		Hash:    tree.RootHash(),
 	}
 }
 
