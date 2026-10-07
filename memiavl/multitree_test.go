@@ -480,11 +480,11 @@ func TestLoadMultiTreeRejectsCorruptSnapshot(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, WriteFileSync(filepath.Join(snapshotDir, MetadataFileName), bz))
 
-			fdsBefore := countOpenFDs(t)
+			fdsBefore := countOpenFDsUnder(t, snapshotDir)
 			_, err = LoadMultiTree(snapshotDir, false, 0, TestAppChainID)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)
-			require.Equal(t, fdsBefore, countOpenFDs(t), "stores opened before the failure must be closed")
+			require.Equal(t, fdsBefore, countOpenFDsUnder(t, snapshotDir), "stores opened before the failure must be closed")
 		})
 	}
 }

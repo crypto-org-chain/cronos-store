@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -694,19 +695,42 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	return walVersion(corruptIndex, db.initialVersion)
 }
 
-func countOpenFDs(t *testing.T) int {
+// Scoped to dir so descriptors that other tests open or close can't skew the count.
+func countOpenFDsUnder(t *testing.T, dir string) int {
 	t.Helper()
 
-	dir, err := os.Open("/dev/fd")
+	var files []*syscall.Stat_t
+	require.NoError(t, filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		files = append(files, info.Sys().(*syscall.Stat_t))
+		return nil
+	}))
+
+	fdDir, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Skipf("cannot list open file descriptors: %v", err)
 	}
-	defer dir.Close()
+	names, err := fdDir.Readdirnames(-1)
+	require.NoError(t, errors.Join(err, fdDir.Close()))
 
-	// names only: stat'ing each entry fails on macOS for the descriptor used by the listing itself.
-	names, err := dir.Readdirnames(-1)
-	require.NoError(t, err)
-	return len(names)
+	count := 0
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		require.NoError(t, err)
+
+		// fstat, not stat on /dev/fd/N: on macOS that reports the fd filesystem's device.
+		// Fails for the listing's own descriptor, which is closed by now.
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) != nil {
+			continue
+		}
+		if slices.ContainsFunc(files, func(f *syscall.Stat_t) bool { return f.Dev == st.Dev && f.Ino == st.Ino }) {
+			count++
+		}
+	}
+	return count
 }
 
 // injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
@@ -906,10 +930,10 @@ func TestExclusiveLock(t *testing.T) {
 	db, err := Load(dir, Options{CreateIfMissing: true}, TestAppChainID)
 	require.NoError(t, err)
 
-	fdsBefore := countOpenFDs(t)
+	fdsBefore := countOpenFDsUnder(t, dir)
 	_, err = Load(dir, Options{}, TestAppChainID)
 	require.ErrorIs(t, err, filelock.ErrLocked)
-	require.Equal(t, fdsBefore, countOpenFDs(t), "a failed lock attempt must close the lock file")
+	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "a failed lock attempt must close the lock file")
 
 	// closing the failed attempt's lock file must not release the open DB's lock.
 	_, err = Load(dir, Options{}, TestAppChainID)
