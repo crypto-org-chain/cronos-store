@@ -1356,7 +1356,8 @@ func TestEarliestVersionDuringSetInitialVersion(t *testing.T) {
 			}
 		}
 	}()
-	for v := int64(100); v < 120; v++ {
+	const lastVersion = 119
+	for v := int64(100); v <= lastVersion; v++ {
 		require.NoError(t, db.SetInitialVersion(v))
 	}
 	close(stop)
@@ -1364,7 +1365,7 @@ func TestEarliestVersionDuringSetInitialVersion(t *testing.T) {
 
 	got, err := db.EarliestVersion()
 	require.NoError(t, err)
-	require.EqualValues(t, 119, got)
+	require.EqualValues(t, lastVersion, got)
 }
 
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
