@@ -136,16 +136,16 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			// it on load. With --target-version unset every store stops at its own last
 			// changeset, so bump the laggards here the way the live path does each block.
 			// Only known once every store has been replayed, hence after Wait.
-			lastestVersion := targetVersion
+			latestVersion := targetVersion
 			for _, entry := range verified {
-				if v := entry.tree.Version(); v > lastestVersion {
-					lastestVersion = v
+				if v := entry.tree.Version(); v > latestVersion {
+					latestVersion = v
 				}
 			}
 
 			storeInfos := make([]storetypes.StoreInfo, 0, len(verified))
 			for _, entry := range verified {
-				if err := advanceTreeVersion(entry.tree, lastestVersion); err != nil {
+				if err := advanceTreeVersion(entry.tree, latestVersion); err != nil {
 					return err
 				}
 				storeInfos = append(storeInfos, storetypes.StoreInfo{
@@ -154,7 +154,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				})
 			}
 
-			commitInfo := buildCommitInfo(storeInfos, lastestVersion)
+			commitInfo := buildCommitInfo(storeInfos, latestVersion)
 
 			if len(saveSnapshot) > 0 {
 				names := make([]string, len(verified))
