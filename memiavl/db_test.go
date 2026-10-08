@@ -792,7 +792,10 @@ func TestRewriteSnapshotBackgroundKeepsCurrentWhenTreeWritePanics(t *testing.T) 
 	require.NoError(t, db.RewriteSnapshotBackground())
 	tree.root = root
 
+	// bounded so a rewrite that never reports back fails the test instead of hanging it.
+	deadline := time.Now().Add(10 * time.Second)
 	for db.snapshotRewriteChan != nil {
+		require.True(t, time.Now().Before(deadline), "background rewrite never reported back")
 		_, err = db.Commit()
 		require.NoError(t, err)
 		time.Sleep(time.Millisecond)
