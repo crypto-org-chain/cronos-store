@@ -139,7 +139,7 @@ func (c *historicalDBCache) loadEntry(version int64, inflight *historicalDBLoad,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.loading, version)
-	defer close(inflight.done)
+	defer close(inflight.done) // runs after inflight.entry/err are set below; waiters read them once done closes
 
 	if err == nil && c.closed {
 		toClose, err = db, fmt.Errorf("historicalDBCache: cache is closed")
@@ -187,13 +187,13 @@ func (c *historicalDBCache) release(e *historicalDBEntry) {
 
 // onCommit evicts entries unused for historicalDBIdleCommits commits. Like memiavl's own
 // retired-snapshot close, their unmap runs on the commit path, outside c.mu.
-func (c *historicalDBCache) onCommit() {
+func (c *historicalDBCache) onCommit() error {
 	c.mu.Lock()
 	c.commits++
 	var idle []*memiavl.DB
 	kept := c.entries[:0]
 	for _, e := range c.entries {
-		if e.refs == 0 && c.commits-e.lastUsed > historicalDBIdleCommits {
+		if e.refs == 0 && c.commits-e.lastUsed >= historicalDBIdleCommits {
 			e.evicted = true
 			idle = append(idle, e.db)
 			continue
@@ -204,7 +204,7 @@ func (c *historicalDBCache) onCommit() {
 	c.entries = kept
 	c.mu.Unlock()
 
-	_ = closeDBs(idle)
+	return closeDBs(idle)
 }
 
 func closeDBs(dbs []*memiavl.DB) error {
@@ -365,7 +365,9 @@ func (rs *Store) Commit() types.CommitID {
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
 	}
-	rs.historicalDBCache.onCommit()
+	if err := rs.historicalDBCache.onCommit(); err != nil {
+		rs.logger.Error("failed to close idle historical memiavl dbs", "err", err)
+	}
 	return rs.lastCommitInfo.CommitID()
 }
 

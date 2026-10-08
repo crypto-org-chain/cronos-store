@@ -598,17 +598,17 @@ func TestHistoricalDBCacheEvictsIdleEntries(t *testing.T) {
 	held, err := cache.borrow(versions[1], loadVersionFn(store, versions[1]))
 	require.NoError(t, err)
 
-	for i := 0; i < historicalDBIdleCommits; i++ {
-		cache.onCommit()
+	for i := 0; i < historicalDBIdleCommits-1; i++ {
+		require.NoError(t, cache.onCommit())
 	}
 	require.False(t, idle.evicted, "entry used within the idle window is kept")
 
-	cache.onCommit()
-	require.True(t, idle.evicted, "idle entry is evicted")
+	require.NoError(t, cache.onCommit())
+	require.True(t, idle.evicted, "idle entry is evicted after historicalDBIdleCommits commits")
 	require.False(t, held.evicted, "borrowed entry is kept however long it's held")
 
 	cache.release(held)
-	cache.onCommit()
+	require.NoError(t, cache.onCommit())
 	require.False(t, held.evicted, "release counts as a use")
 	cache.mu.Lock()
 	require.Len(t, cache.entries, 1)
