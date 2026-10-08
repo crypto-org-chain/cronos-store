@@ -574,6 +574,22 @@ func TestInitialVersion(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTruncatedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
+	db, err := Load(dir, opts, TestAppChainID)
+	require.NoError(t, err)
+	// SetInitialVersion rewrites snapshot-0/__metadata in place.
+	require.NoError(t, db.SetInitialVersion(100))
+	require.NoError(t, db.Close())
+
+	// A crash mid-rewrite leaves the file empty, which unmarshals cleanly with no commit info.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
+
+	_, err = Load(dir, opts, TestAppChainID)
+	require.ErrorContains(t, err, "missing commit info")
+}
+
 func TestLoadVersion(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
@@ -823,6 +839,9 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.NoError(t, db.RewriteSnapshot())
+	// the default async writer may not have written the entry yet; corrupting the
+	// wal first would make it fail with "out of order" instead of the catchup.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
 	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
@@ -855,6 +874,9 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the default async writer may not have written the entry yet; corrupting the
+	// wal first would make it fail with "out of order" instead of the catchup.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptTrailingWALEntry(t, db)
 
@@ -1300,6 +1322,99 @@ func TestEarliestVersion(t *testing.T) {
 	require.Equal(t, earliest, earliest2)
 }
 
+func TestEarliestVersionFallbackNotCached(t *testing.T) {
+	testCases := []struct {
+		name       string
+		keepRecent uint32
+		// cache and earliest version after the first background rewrite and prune
+		wantCache    int64
+		wantEarliest int64
+	}{
+		{name: "snapshot-0 pruned", keepRecent: 0, wantCache: 102, wantEarliest: 102},
+		// a zero cache here would force a snapshot dir rescan after every prune
+		{name: "snapshot-0 kept", keepRecent: 1, wantCache: onlyGenesisSnapshot, wantEarliest: 100},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := Load(t.TempDir(), Options{
+				CreateIfMissing:    true,
+				InitialStores:      []string{testStoreName},
+				SnapshotKeepRecent: tc.keepRecent,
+			}, TestAppChainID)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+
+			// Only the genesis placeholder snapshot-0 exists, so EarliestVersion
+			// falls back to initialVersion.
+			fallback, err := db.EarliestVersion()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, fallback)
+			// The genesis-only state must still be cached: this runs on the query hot
+			// path and a miss costs a directory scan.
+			require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
+
+			// InitChain sets the initial version after the store is loaded; a cached
+			// fallback value would keep reporting 1 here.
+			require.NoError(t, db.SetInitialVersion(100))
+			got, err := db.EarliestVersion()
+			require.NoError(t, err)
+			require.EqualValues(t, 100, got)
+
+			for i := 0; i < 3; i++ {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", fmt.Sprintf("v%d", i))))
+				_, err = db.Commit()
+				require.NoError(t, err)
+			}
+			require.NoError(t, db.RewriteSnapshotBackground())
+			for db.snapshotRewriteChan != nil {
+				require.NoError(t, db.checkAsyncTasks())
+			}
+			waitPrune(db)
+
+			require.Equal(t, tc.wantCache, db.earliestSnapshotCache.Load())
+			got, err = db.EarliestVersion()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEarliest, got)
+		})
+	}
+}
+
+func TestEarliestVersionDuringSetInitialVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	stop := make(chan struct{})
+	errs := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				errs <- nil
+				return
+			default:
+			}
+			if _, err := db.EarliestVersion(); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+	const lastVersion = 119
+	for v := int64(100); v <= lastVersion; v++ {
+		require.NoError(t, db.SetInitialVersion(v))
+	}
+	close(stop)
+	require.NoError(t, <-errs)
+
+	got, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, lastVersion, got)
+}
+
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
 // height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestEarliestVersionUnpruned(t *testing.T) {
@@ -1356,19 +1471,6 @@ func waitPrune(db *DB) {
 	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
 }
 
-func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
-
-	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
-}
-
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	logger := &recordingLogger{}
 	db, err := Load(t.TempDir(), Options{
@@ -1388,7 +1490,7 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// seed a sane cache value so we can verify it's left untouched below.
+	// Poison the cache, as if pruning had previously found a real snapshot.
 	db.earliestSnapshotCache.Store(1)
 
 	// remove every snapshot directory so firstSnapshotVersion errors out.
@@ -1407,8 +1509,8 @@ func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
 	require.Contains(t, errs, "failed to find first snapshot")
 	// the truncation path must not have been reached with the bogus zero value.
 	require.NotContains(t, errs, "failed to truncate wal")
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load(),
-		"cache must not be overwritten with the zero value on error")
+	require.Zero(t, db.earliestSnapshotCache.Load(),
+		"cache must be invalidated rather than left pointing at an already-deleted snapshot")
 }
 
 func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
@@ -1433,6 +1535,8 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
+	// the default async writer may not have written the entry FirstVersion reads below.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
@@ -1613,9 +1717,7 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
 	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
-	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Same(t, db.earliestSnapshotCache, cp.earliestSnapshotCache)
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))

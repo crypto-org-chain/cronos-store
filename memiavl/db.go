@@ -29,6 +29,19 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
+// onlyGenesisSnapshot is the earliestSnapshotCache marker for "the earliest
+// kept snapshot is snapshot-0"; a real earliest version is always positive and
+// zero means uncached.
+const onlyGenesisSnapshot = -1
+
+// earliestCacheValue keeps snapshot-0 distinct from the uncached zero.
+func earliestCacheValue(snapshotVersion int64) int64 {
+	if snapshotVersion == 0 {
+		return onlyGenesisSnapshot
+	}
+	return snapshotVersion
+}
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -94,7 +107,8 @@ type DB struct {
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory.
+	// scanning the directory. onlyGenesisSnapshot means the earliest kept
+	// snapshot is snapshot-0, so the initialVersion fallback applies.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
@@ -333,16 +347,7 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	if err := initEmptyDB(db.dir, db.initialVersion, db.chainId); err != nil {
-		return err
-	}
-
-	// the earliest version follows the initial version, so re-warm the cache Load filled.
-	db.earliestSnapshotCache.Store(0)
-	if _, err := db.EarliestVersion(); err != nil {
-		db.logger.Error("failed to cache earliest version", "err", err)
-	}
-	return nil
+	return initEmptyDB(db.dir, db.initialVersion, db.chainId)
 }
 
 // ApplyUpgrades wraps MultiTree.ApplyUpgrades, it also append the upgrades in a pending log,
@@ -650,10 +655,13 @@ func (db *DB) pruneSnapshots() {
 		// truncate WAL until the earliest remaining snapshot
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
+			// The snapshots are already deleted, so a cached version may name one of
+			// them. Invalidate to force readers back to a directory scan.
+			db.earliestSnapshotCache.Store(0)
 			db.logger.Error("failed to find first snapshot", "err", err)
 			return
 		}
-		db.earliestSnapshotCache.Store(earliestVersion)
+		db.earliestSnapshotCache.Store(earliestCacheValue(earliestVersion))
 
 		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
 		// the genesis placeholder snapshot has no corresponding wal entries yet.
@@ -1081,23 +1089,30 @@ func (db *DB) FirstVersion() (int64, error) {
 // this on every height-bound query, so we avoid scanning the snapshot
 // directory on the hot path.
 func (db *DB) EarliestVersion() (int64, error) {
-	if v := db.earliestSnapshotCache.Load(); v > 0 {
+	v := db.earliestSnapshotCache.Load()
+	if v == 0 {
+		snapshotVersion, err := firstSnapshotVersion(db.dir)
+		if err != nil {
+			return 0, err
+		}
+		// Cache the marker, not the fallback: SetInitialVersion can still change the
+		// fallback, and pruneSnapshots replaces the marker once snapshot-0 is gone.
+		// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
+		v = earliestCacheValue(snapshotVersion)
+		db.earliestSnapshotCache.CompareAndSwap(0, v)
+	}
+	if v > 0 {
 		return v, nil
 	}
-	v, err := firstSnapshotVersion(db.dir)
-	if err != nil {
-		return 0, err
-	}
+	// snapshot-0 is the genesis placeholder; the first queryable height is
+	// initialVersion (defaults to 1 for standard chains). On the live DB,
+	// SetInitialVersion and snapshot reloads write it under mtx.
+	db.mtx.Lock()
+	v = int64(db.initialVersion)
+	db.mtx.Unlock()
 	if v == 0 {
-		// snapshot-0 is the genesis placeholder; the first queryable height is
-		// initialVersion (defaults to 1 for standard chains).
-		v = int64(db.initialVersion)
-		if v == 0 {
-			v = 1
-		}
+		v = 1
 	}
-	// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
-	db.earliestSnapshotCache.CompareAndSwap(0, v)
 	return v, nil
 }
 

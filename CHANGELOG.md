@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#106](https://github.com/crypto-org-chain/cronos-store/pull/106) fix(memiavl): reject metadata with no commit info and stop caching the earliest-version fallback
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
 
