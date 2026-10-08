@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
-	"sync"
+	"strings"
 
 	"github.com/alitto/pond"
 	"github.com/cosmos/gogoproto/jsonpb"
@@ -54,6 +55,13 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A repeated or aliased name would otherwise produce a duplicate store entry
+			// in the commit info and hand one change-set or snapshot directory to two
+			// workers; with --load-snapshot, the same tree too.
+			stores, err = normalizeStores(stores)
+			if err != nil {
+				return err
+			}
 
 			chainId, err := cmd.Flags().GetString(flagChainId)
 			if err != nil {
@@ -69,66 +77,101 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 			changeSetDir := args[0]
 
+			// Registered before the pool's StopAndWait so it runs after it (defers are
+			// LIFO): with --load-snapshot the trees read that snapshot's mmap zero-copy,
+			// so the mapping has to outlive every worker touching them.
+			var mtree *memiavl.MultiTree
+			defer func() {
+				if mtree != nil {
+					_ = mtree.Close()
+				}
+			}()
+
 			// create fixed size task pool with big enough buffer.
 			pool := pond.New(concurrency, 0)
 			defer pool.StopAndWait()
-			group, _ := pool.GroupContext(context.Background())
 
-			var (
-				lastestVersion int64
-				storeInfosLock sync.Mutex
-			)
-			storeInfos := []storetypes.StoreInfo{}
-
-			mtree := memiavl.NewEmptyMultiTree(0, 0, chainId)
+			mtree = memiavl.NewEmptyMultiTree(0, 0, chainId)
 			if len(loadSnapshot) > 0 {
-				var err error
 				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId)
 				if err != nil {
 					return err
 				}
 			}
 
-			for _, store := range stores {
+			verified := make([]verifiedStore, len(stores))
+			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
+				store := stores[i]
 				tree := mtree.TreeByName(store)
+				// A store loaded from --load-snapshot exists even with no change sets to
+				// replay; dropping it would shrink the store set, changing the app hash and
+				// leaving the written snapshot's metadata inconsistent with its own trees.
+				fromSnapshot := tree != nil
 				if tree == nil {
 					tree = memiavl.New(0)
 				}
-				group.Submit(func() error {
-					storeInfo, err := verifyOneStore(tree, store, changeSetDir, saveSnapshot, targetVersion)
-					if err != nil {
-						return err
-					}
-					if storeInfo == nil {
-						// the store don't exist before target version, don't affect the commit info and app hash.
-						return nil
-					}
-
-					storeInfosLock.Lock()
-					defer storeInfosLock.Unlock()
-					storeInfos = append(storeInfos, *storeInfo)
-					if storeInfo.CommitId.Version > lastestVersion {
-						lastestVersion = storeInfo.CommitId.Version
-					}
-					return nil
-				})
-			}
-			if err := group.Wait(); err != nil {
-				return err
-			}
-
-			commitInfo := buildCommitInfo(storeInfos, lastestVersion)
-
-			if len(saveSnapshot) > 0 {
-				// write multitree metadata
-				metadata := memiavl.MultiTreeMetadata{
-					CommitInfo: convertCommitInfo(&commitInfo),
-				}
-				bz, err := metadata.Marshal()
+				exists, err := verifyOneStore(ctx, tree, store, changeSetDir, targetVersion)
 				if err != nil {
 					return err
 				}
-				if err := memiavl.WriteFileSync(filepath.Join(saveSnapshot, memiavl.MetadataFileName), bz); err != nil {
+				if !exists && !fromSnapshot {
+					// the store don't exist before target version, don't affect the commit info and app hash.
+					return nil
+				}
+				// Hashed here so stores hash in parallel; the version bump below only saves
+				// empty versions, which leaves the root hash unchanged.
+				verified[i] = verifiedStore{name: store, tree: tree, hash: tree.RootHash()}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			verified = slices.DeleteFunc(verified, func(entry verifiedStore) bool {
+				return entry.tree == nil
+			})
+
+			// All stores must end on the same version: a multitree snapshot records one
+			// commit-info version for the whole set and rejects trees that disagree with
+			// it on load. With --target-version unset every store stops at its own last
+			// changeset, so bump the laggards here the way the live path does each block.
+			// Only known once every store has been replayed, hence after Wait.
+			latestVersion := targetVersion
+			for _, entry := range verified {
+				if v := entry.tree.Version(); v > latestVersion {
+					latestVersion = v
+				}
+			}
+
+			storeInfos := make([]storetypes.StoreInfo, 0, len(verified))
+			for _, entry := range verified {
+				if err := advanceTreeVersion(entry.tree, latestVersion); err != nil {
+					return err
+				}
+				storeInfos = append(storeInfos, storetypes.StoreInfo{
+					Name:     entry.name,
+					CommitId: storetypes.CommitID{Version: entry.tree.Version(), Hash: entry.hash},
+				})
+			}
+
+			commitInfo := buildCommitInfo(storeInfos, latestVersion)
+
+			if len(saveSnapshot) > 0 {
+				names := make([]string, len(verified))
+				for i, entry := range verified {
+					names[i] = entry.name
+				}
+				if err := memiavl.RunWorkerGroup(cmd.Context(), pool, names, func(ctx context.Context, i int) error {
+					entry := verified[i]
+					return entry.tree.WriteSnapshotWithContext(ctx, filepath.Join(saveSnapshot, entry.name))
+				}); err != nil {
+					return err
+				}
+
+				// Written through the multitree so the metadata carries its initial
+				// version too: loadMultiTree derives the version it expects the trees
+				// to be at from that field.
+				if err := mtree.WriteMetadata(saveSnapshot, convertCommitInfo(&commitInfo)); err != nil {
 					return err
 				}
 			}
@@ -183,25 +226,34 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 	return cmd
 }
 
-// verifyOneStore process a single store, can run in parallel with other stores.
-// if the store don't exist before the `targetVersion`, returns nil without error.
-func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string, targetVersion int64) (*storetypes.StoreInfo, error) {
+// verifiedStore pairs a replayed tree with its store name and root hash; the tree is
+// still open so its version can be bumped and its snapshot written once the final
+// version is known.
+type verifiedStore struct {
+	name string
+	tree *memiavl.Tree
+	hash []byte
+}
+
+// verifyOneStore is safe to run in parallel with other stores. Reports false without
+// error if the store doesn't exist before `targetVersion`.
+func verifyOneStore(ctx context.Context, tree *memiavl.Tree, store, changeSetDir string, targetVersion int64) (bool, error) {
 	filesWithVersion, err := scanChangeSetFiles(changeSetDir, store)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
 	if len(filesWithVersion) == 0 {
-		return nil, nil
+		return false, nil
 	}
 	// set the initial version for the store
 	initialVersion := filesWithVersion[0].Version
 	if targetVersion > 0 && initialVersion > uint64(targetVersion) {
-		return nil, nil
+		return false, nil
 	}
 
 	if err := tree.SetInitialVersion(int64(initialVersion)); err != nil {
-		return nil, err
+		return false, err
 	}
 
 	for _, file := range filesWithVersion {
@@ -211,6 +263,9 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 
 		err = withChangeSetFile(file.FileName, func(reader Reader) error {
 			_, err := IterateChangeSets(reader, func(version int64, changeSet *iavl.ChangeSet) (bool, error) {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
 				if version <= tree.Version() {
 					// skip old change sets
 					return true, nil
@@ -248,35 +303,46 @@ func verifyOneStore(tree *memiavl.Tree, store, changeSetDir, saveSnapshot string
 	}
 
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
 	// no more changesets for this store; catch up to targetVersion like the live path would.
 	if targetVersion > 0 {
 		if err := advanceTreeVersion(tree, targetVersion); err != nil {
-			return nil, err
+			return false, err
 		}
 	}
 
-	if len(saveSnapshot) > 0 {
-		snapshotDir := filepath.Join(saveSnapshot, store)
-		if err := os.MkdirAll(snapshotDir, os.ModePerm); err != nil {
-			return nil, err
-		}
-		if err := tree.WriteSnapshot(snapshotDir); err != nil {
-			return nil, err
-		}
-	}
-
-	return &storetypes.StoreInfo{
-		Name:     store,
-		CommitId: lastCommitID(tree),
-	}, nil
+	return true, nil
 }
 
-// advanceTreeVersion bumps `tree` with no-op saves up to `target`, without applying any
-// changeset. Used to keep a store's version in lockstep with the live path, which advances
-// every store's tree version every block regardless of whether it changed.
+// normalizeStores cleans each name and drops repeats. A store name is a single
+// directory under the change-set and snapshot dirs, so anything that isn't one
+// after cleaning is rejected rather than resolved to some other store's files.
+//
+// It builds a new slice rather than compacting in place: with --stores unset,
+// GetStoresOrDefault hands back the caller's own defaultStores slice, and
+// reordering plus tail-zeroing it would corrupt that shared value.
+func normalizeStores(stores []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(stores))
+	normalized := make([]string, 0, len(stores))
+	for _, store := range stores {
+		name := filepath.Clean(store)
+		if name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
+			return nil, fmt.Errorf("invalid store name %q: must be a single directory name", store)
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		normalized = append(normalized, name)
+	}
+	return normalized, nil
+}
+
+// advanceTreeVersion saves empty versions up to `target`, applying no changeset, so a
+// store's version stays in lockstep with the live path, which advances every store's
+// tree version every block regardless of whether it changed.
 func advanceTreeVersion(tree *memiavl.Tree, target int64) error {
 	for tree.Version() < target {
 		if _, _, err := tree.SaveVersion(false); err != nil {
@@ -288,12 +354,10 @@ func advanceTreeVersion(tree *memiavl.Tree, target int64) error {
 
 // lastCommitID build `CommitID` from a memiavl tree.
 func lastCommitID(tree *memiavl.Tree) storetypes.CommitID {
-	// copy out the hash in case it's relied on mmap-ed file.
-	var hash [memiavl.SizeHash]byte
-	copy(hash[:], tree.RootHash())
+	// RootHash clones mmap-ed bytes, so the hash outlives the snapshot.
 	return storetypes.CommitID{
 		Version: tree.Version(),
-		Hash:    hash[:],
+		Hash:    tree.RootHash(),
 	}
 }
 
