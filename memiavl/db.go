@@ -950,7 +950,10 @@ func (db *DB) Close() error {
 
 	if db.snapshotRewriteChan != nil {
 		db.snapshotRewriteCancel()
-		<-db.snapshotRewriteChan
+		// cancel can't stop a rewrite that already finished, so release the tree it loaded.
+		if result := <-db.snapshotRewriteChan; result.mtree != nil {
+			errs = append(errs, result.mtree.Close())
+		}
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	}
