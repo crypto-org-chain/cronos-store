@@ -314,7 +314,80 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	// the copy must still read correctly from the retained generation
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
+	// the DB drops that generation at the next reload; the copy's reference keeps it mapped.
+	snapshot := cp.TreeByName(testStoreName).snapshot
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k3", "v3")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+
+	// the last holder unmaps it.
+	require.NotNil(t, snapshot.nodesMap)
+	require.NoError(t, cp.Close())
+	require.Nil(t, snapshot.nodesMap)
+
 	require.NoError(t, db.Close())
+}
+
+func TestCopyDuringReload(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	errs := make(chan error, 1)
+	go func() {
+		var err error
+		for i := 0; i < 50 && err == nil; i++ {
+			err = db.Copy().Close()
+		}
+		errs <- err
+	}()
+	for i := 0; i < 50; i++ {
+		require.NoError(t, db.Reload())
+	}
+	require.NoError(t, <-errs)
+}
+
+func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	rewriteAndReload := func(key string) {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+	rewriteAndReload("k1")
+	snapshot := db.TreeByName(testStoreName).snapshot
+
+	// a new version so the background rewrite writes a new snapshot; its clone holds
+	// a reference on this generation, and adopting the result retires it.
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k1b", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshotBackground())
+	for db.snapshotRewriteChan != nil {
+		require.NoError(t, db.checkAsyncTasks())
+	}
+
+	// the next reload drops the DB's reference, which unmaps it only if the clone released its own.
+	rewriteAndReload("k2")
+	require.Nil(t, snapshot.nodesMap)
 }
 
 func TestCloseDuringSnapshotPrune(t *testing.T) {
@@ -339,6 +412,37 @@ func TestCloseDuringSnapshotPrune(t *testing.T) {
 			require.NoError(t, db.checkAsyncTasks())
 		}
 
+		require.NoError(t, db.Close())
+	}
+}
+
+func TestCloseDuringSnapshotRewrite(t *testing.T) {
+	stores := []string{"a", "b", "c", "d"}
+	changeSets := make([]*NamedChangeSet, 0, len(stores))
+	for _, name := range stores {
+		pairs := make([]*KVPair, 0, 3000)
+		for i := 0; i < 3000; i++ {
+			pairs = append(pairs, &KVPair{Key: []byte(fmt.Sprintf("k%06d", i)), Value: []byte("v")})
+		}
+		changeSets = append(changeSets, &NamedChangeSet{Name: name, Changeset: ChangeSet{Pairs: pairs}})
+	}
+
+	// Close cancels the rewrite at varying points; it must not unmap the snapshot
+	// until every tree's writer has stopped reading it.
+	for delay := time.Duration(0); delay < 8*time.Millisecond; delay += time.Millisecond {
+		db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: stores}, TestAppChainID)
+		require.NoError(t, err)
+		require.NoError(t, db.ApplyChangeSets(changeSets))
+		_, err = db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(stores[0], "k", "v")))
+		_, err = db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshotBackground())
+		time.Sleep(delay)
 		require.NoError(t, db.Close())
 	}
 }
@@ -1158,7 +1262,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 
 // TestEarliestVersion verifies that EarliestVersion returns the earliest
 // retained snapshot version (not the WAL FirstVersion), and that the cache
-// is refreshed by pruneSnapshots.
+// is refreshed by pruneSnapshots, also for existing copies.
 func TestEarliestVersion(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:    true,
@@ -1180,6 +1284,10 @@ func TestEarliestVersion(t *testing.T) {
 		require.NoError(t, db.Reload())
 	}
 
+	// a copy published before the prune must not keep reporting a pruned version.
+	cp := db.CopyWithCacheSize(0)
+	defer func() { require.NoError(t, cp.Close()) }()
+
 	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
 	// Lock acquisition blocks until the prune goroutine releases; nothing
@@ -1197,6 +1305,10 @@ func TestEarliestVersion(t *testing.T) {
 	// cache without a directory scan.
 	require.EqualValues(t, 2, db.earliestSnapshotCache.Load(),
 		"cache should be populated by pruneSnapshots, not lazy-load")
+
+	cpEarliest, err := cp.EarliestVersion()
+	require.NoError(t, err)
+	require.Equal(t, earliest, cpEarliest)
 
 	// WAL is truncated past the earliest snapshot, so FirstVersion (WAL-based)
 	// must be strictly later than EarliestVersion.
@@ -1265,6 +1377,19 @@ func (l *recordingLogger) Errors() []string {
 func waitPrune(db *DB) {
 	db.pruneSnapshotLock.Lock()
 	db.pruneSnapshotLock.Unlock() //nolint:staticcheck // empty section intentional: Lock blocks until prune goroutine finishes
+}
+
+func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
+
+	require.NoError(t, db.SetInitialVersion(100))
+	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
 }
 
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
@@ -1493,4 +1618,28 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
+}
+
+func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+		CacheSize:       16,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	// Load warms the cache, so a copy inherits it without the live db being queried.
+	cp := db.CopyWithCacheSize(0)
+	require.NotZero(t, cp.earliestSnapshotCache.Load())
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Nil(t, cp.TreeByName(testStoreName).cache)
+	require.NotNil(t, db.TreeByName(testStoreName).cache)
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 }

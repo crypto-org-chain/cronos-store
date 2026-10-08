@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 const (
@@ -50,6 +51,10 @@ type Snapshot struct {
 
 	// nil means empty snapshot
 	root *PersistedNode
+
+	// trees sharing this snapshot besides the one that opened it; each Tree.Copy
+	// adds one, and only the last Close unmaps the files.
+	copies atomic.Int32
 }
 
 func NewEmptySnapshot(version uint32) *Snapshot {
@@ -168,8 +173,13 @@ func OpenSnapshot(snapshotDir string) (snapshot *Snapshot, err error) {
 	return snapshot, nil
 }
 
-// Close closes the file and mmap handles, clears the buffers.
+// Close drops one reference; the last one closes the file and mmap handles and
+// clears the buffers.
 func (snapshot *Snapshot) Close() error {
+	if snapshot.copies.Add(-1) >= 0 {
+		return nil
+	}
+
 	var errs []error
 
 	if snapshot.nodesMap != nil {
@@ -182,8 +192,11 @@ func (snapshot *Snapshot) Close() error {
 		errs = append(errs, snapshot.kvsMap.Close())
 	}
 
-	// reset to an empty tree
-	*snapshot = *NewEmptySnapshot(snapshot.version)
+	// reset to an empty tree; field by field because the counter can't be copied.
+	snapshot.nodesMap, snapshot.leavesMap, snapshot.kvsMap = nil, nil, nil
+	snapshot.nodes, snapshot.leaves, snapshot.kvs = nil, nil, nil
+	snapshot.nodesLayout, snapshot.leavesLayout = Nodes{}, Leaves{}
+	snapshot.root = nil
 	return errors.Join(errs...)
 }
 
