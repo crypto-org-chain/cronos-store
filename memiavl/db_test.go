@@ -228,6 +228,8 @@ func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the default async writer may not have written the entry yet.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	committedVersion, err := db.CommittedVersion()
 	require.NoError(t, err)
