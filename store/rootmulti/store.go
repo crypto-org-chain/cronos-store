@@ -251,6 +251,12 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 	return db, nil
 }
 
+func (rs *Store) historicalLoader(version int64) func() (*memiavl.DB, error) {
+	return func() (*memiavl.DB, error) {
+		return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
+	}
+}
+
 const CommitInfoFileName = "commit_infos"
 
 var (
@@ -444,9 +450,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 	// held until the caller closes the returned store (baseapp does after each query)
-	entry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
-		return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
-	})
+	entry, err := rs.historicalDBCache.borrow(version, rs.historicalLoader(version))
 	if err != nil {
 		return nil, err
 	}
@@ -862,9 +866,7 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	var borrowedEntry *historicalDBEntry
 	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
 		var err error
-		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
-			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
-		})
+		borrowedEntry, err = rs.historicalDBCache.borrow(version, rs.historicalLoader(version))
 		if err != nil {
 			return nil, err
 		}

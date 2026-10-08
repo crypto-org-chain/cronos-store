@@ -414,10 +414,38 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
-func loadVersionFn(store *Store, version int64) func() (*memiavl.DB, error) {
+// newTestCache returns a store committed numVersions times and a separate cache of the given size.
+func newTestCache(t *testing.T, numVersions, size int) (*Store, []int64, *historicalDBCache) {
+	t.Helper()
+	store, versions := newTestStore(t, numVersions)
+	t.Cleanup(func() { store.Close() })
+	cache := newHistoricalDBCache(size)
+	t.Cleanup(func() { _ = cache.close() })
+	return store, versions, cache
+}
+
+// gatedLoad wraps load so its first call signals started, and every call blocks until gate is closed.
+func gatedLoad(load func() (*memiavl.DB, error)) (gated func() (*memiavl.DB, error), started <-chan struct{}, gate chan<- struct{}) {
+	startedCh, gateCh := make(chan struct{}), make(chan struct{})
+	var once sync.Once
 	return func() (*memiavl.DB, error) {
-		return loadAtVersion(store.dir, store.opts, store.chainId, version)
-	}
+		once.Do(func() { close(startedCh) })
+		<-gateCh
+		return load()
+	}, startedCh, gateCh
+}
+
+// borrowAsync borrows version in a goroutine, releasing on success, and reports the error.
+func borrowAsync(cache *historicalDBCache, version int64, load func() (*memiavl.DB, error)) <-chan error {
+	errc := make(chan error, 1)
+	go func() {
+		e, err := cache.borrow(version, load)
+		if err == nil {
+			cache.release(e)
+		}
+		errc <- err
+	}()
+	return errc
 }
 
 // waitForWaiters blocks until n borrowers wait on version's in-flight load.
@@ -432,20 +460,13 @@ func waitForWaiters(t *testing.T, cache *historicalDBCache, version int64, n int
 }
 
 func TestHistoricalDBCacheConcurrentMissesShareLoad(t *testing.T) {
-	store, versions := newTestStore(t, 2)
-	t.Cleanup(func() { store.Close() })
-	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize)
-	t.Cleanup(func() { _ = cache.close() })
+	store, versions, cache := newTestCache(t, 2, defaultHistoricalDBCacheSize)
 
 	var loads atomic.Int32
-	started, gate := make(chan struct{}), make(chan struct{})
-	load := func() (*memiavl.DB, error) {
-		if loads.Add(1) == 1 {
-			close(started)
-		}
-		<-gate
-		return loadVersionFn(store, versions[0])()
-	}
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) {
+		loads.Add(1)
+		return store.historicalLoader(versions[0])()
+	})
 
 	const borrowers = 8
 	entries := make(chan *historicalDBEntry, borrowers)
@@ -487,23 +508,18 @@ func TestHistoricalDBCacheLoadErrorReachesWaiters(t *testing.T) {
 
 	loadErr := fmt.Errorf("pruned")
 	var loads atomic.Int32
-	started, gate := make(chan struct{}), make(chan struct{})
-	load := func() (*memiavl.DB, error) {
-		if loads.Add(1) == 1 {
-			close(started)
-			<-gate
-		}
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) {
+		loads.Add(1)
 		return nil, loadErr
-	}
+	})
 
-	errs := make(chan error, 2)
-	go func() { _, err := cache.borrow(1, load); errs <- err }()
+	leader := borrowAsync(cache, 1, load)
 	<-started
-	go func() { _, err := cache.borrow(1, load); errs <- err }()
+	waiter := borrowAsync(cache, 1, load)
 	waitForWaiters(t, cache, 1, 1)
 	close(gate)
-	require.ErrorIs(t, <-errs, loadErr)
-	require.ErrorIs(t, <-errs, loadErr)
+	require.ErrorIs(t, <-leader, loadErr)
+	require.ErrorIs(t, <-waiter, loadErr)
 	require.Equal(t, int32(1), loads.Load())
 
 	// failures aren't cached
@@ -513,71 +529,36 @@ func TestHistoricalDBCacheLoadErrorReachesWaiters(t *testing.T) {
 }
 
 func TestHistoricalDBCacheLoadPanicReleasesWaiters(t *testing.T) {
-	store, versions := newTestStore(t, 2)
-	t.Cleanup(func() { store.Close() })
-	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize)
-	t.Cleanup(func() { _ = cache.close() })
+	store, versions, cache := newTestCache(t, 2, defaultHistoricalDBCacheSize)
 
-	started, gate := make(chan struct{}), make(chan struct{})
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) { panic("corrupt snapshot") })
 	leaderPanic := make(chan any, 1)
 	go func() {
 		defer func() { leaderPanic <- recover() }() // baseapp recovers query panics
-		_, _ = cache.borrow(versions[0], func() (*memiavl.DB, error) {
-			close(started)
-			<-gate
-			panic("corrupt snapshot")
-		})
+		_, _ = cache.borrow(versions[0], load)
 	}()
 	<-started
 
-	waiter := make(chan error, 1)
-	go func() {
-		_, err := cache.borrow(versions[0], loadVersionFn(store, versions[0]))
-		waiter <- err
-	}()
+	waiter := borrowAsync(cache, versions[0], store.historicalLoader(versions[0]))
 	waitForWaiters(t, cache, versions[0], 1)
 	close(gate)
 	require.Equal(t, "corrupt snapshot", <-leaderPanic)
 	require.ErrorContains(t, <-waiter, "panicked")
 
 	// the version isn't stuck
-	e, err := cache.borrow(versions[0], loadVersionFn(store, versions[0]))
-	require.NoError(t, err)
-	cache.release(e)
+	require.NoError(t, <-borrowAsync(cache, versions[0], store.historicalLoader(versions[0])))
 }
 
 // ABCI queries borrow under CometBFT's consensus lock, so a load must never wait on another version's.
 func TestHistoricalDBCacheLoadsAreNotCapped(t *testing.T) {
-	store, versions := newTestStore(t, 3)
-	t.Cleanup(func() { store.Close() })
-	cache := newHistoricalDBCache(1)
-	t.Cleanup(func() { _ = cache.close() })
+	store, versions, cache := newTestCache(t, 3, 1)
 
-	started, gate := make(chan struct{}), make(chan struct{})
-	slow := make(chan error, 1)
-	go func() {
-		e, err := cache.borrow(versions[0], func() (*memiavl.DB, error) {
-			close(started)
-			<-gate
-			return loadVersionFn(store, versions[0])()
-		})
-		if err == nil {
-			cache.release(e)
-		}
-		slow <- err
-	}()
+	load, started, gate := gatedLoad(store.historicalLoader(versions[0]))
+	slow := borrowAsync(cache, versions[0], load)
 	<-started
 
-	fast := make(chan error, 1)
-	go func() {
-		e, err := cache.borrow(versions[1], loadVersionFn(store, versions[1]))
-		if err == nil {
-			cache.release(e)
-		}
-		fast <- err
-	}()
 	select {
-	case err := <-fast:
+	case err := <-borrowAsync(cache, versions[1], store.historicalLoader(versions[1])):
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("load blocked behind another version's in-flight load")
@@ -587,15 +568,12 @@ func TestHistoricalDBCacheLoadsAreNotCapped(t *testing.T) {
 }
 
 func TestHistoricalDBCacheEvictsIdleEntries(t *testing.T) {
-	store, versions := newTestStore(t, 3)
-	t.Cleanup(func() { store.Close() })
-	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize)
-	t.Cleanup(func() { _ = cache.close() })
+	store, versions, cache := newTestCache(t, 3, defaultHistoricalDBCacheSize)
 
-	idle, err := cache.borrow(versions[0], loadVersionFn(store, versions[0]))
+	idle, err := cache.borrow(versions[0], store.historicalLoader(versions[0]))
 	require.NoError(t, err)
 	cache.release(idle)
-	held, err := cache.borrow(versions[1], loadVersionFn(store, versions[1]))
+	held, err := cache.borrow(versions[1], store.historicalLoader(versions[1]))
 	require.NoError(t, err)
 
 	for i := 0; i < historicalDBIdleCommits-1; i++ {
