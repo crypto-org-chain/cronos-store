@@ -70,7 +70,7 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         *wal.Log
+	wal         writeAheadLog
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -203,14 +203,20 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		return nil, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	var wl writeAheadLog
+	if opts.ReadOnly {
+		// a live writer may own the WAL, so it must not be repaired from here.
+		wl, err = openReadOnlyWAL(walPath(dir))
+	} else {
+		wl, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, mtree.Close())
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.CatchupWAL(wal, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wal.Close())
+		if err := mtree.CatchupWAL(wl, int64(opts.TargetVersion)); err != nil {
+			return nil, errors.Join(err, wl.Close(), mtree.Close())
 		}
 	}
 
@@ -230,7 +236,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 
 		// truncate the WAL
 		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := wal.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
+		if err := wl.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
 			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 
@@ -259,7 +265,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wal,
+		wal:                    wl,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
@@ -1126,7 +1132,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
+func (db *DB) walStateForRead() (writeAheadLog, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
@@ -1136,7 +1142,7 @@ func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
 	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+func waitForWALVersion(walLog writeAheadLog, initialVersion uint32, targetVersion, snapshotVersion int64) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1394,15 +1400,15 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true})
+	wl, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := wl.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wal.Close())
+		return 0, errors.Join(err, wl.Close())
 	}
-	if err := wal.Close(); err != nil {
+	if err := wl.Close(); err != nil {
 		return 0, err
 	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
