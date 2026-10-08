@@ -292,9 +292,34 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot also repoints the mounted iavl stores at a fresh copy:
+// flush mutates the live trees in place while readers branched off rs.stores
+// (CheckTx state on another ABCI connection) may still be reading.
+//
+// The repoint is not atomic across stores. Block execution runs on this
+// goroutine after the publish, so only CheckTx can see a torn view, and that
+// costs it an occasional stale read.
 func (rs *Store) publishQuerySnapshot() {
 	// no node cache: the snapshot is replaced every Commit, so it never warms up.
 	rs.replaceQuerySnapshot(newQuerySnapshot(rs.db.CopyWithCacheSize(0), rs.lastCommitInfo))
+	// block execution reads the mounted stores, so they keep the node cache. Unpinned:
+	// readers hold no reference, so the copy lives as long as the DB maps the generation.
+	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
+}
+
+// setMountedTrees points every mounted iavl store at db's trees.
+func (rs *Store) setMountedTrees(db *memiavl.DB) {
+	for key, store := range rs.stores {
+		memiavlStore, ok := store.(*memiavlstore.Store)
+		if !ok {
+			continue
+		}
+		tree := db.TreeByName(key.Name())
+		if tree == nil {
+			panic(fmt.Sprintf("no memiavl tree for mounted store: %s", key.Name()))
+		}
+		memiavlStore.SetTree(tree)
+	}
 }
 
 // replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
@@ -371,6 +396,9 @@ func (rs *Store) WorkingHash() []byte {
 	if rs.sdk46Compact {
 		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
 	}
+	// reads before Commit (retention height, Precommit) must see this block's
+	// writes. Copied after hashing, so SaveVersion only reads the shared nodes.
+	rs.setMountedTrees(rs.db.UnpinnedCopy(0))
 	return commitInfo.Hash()
 }
 
@@ -391,18 +419,11 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
-
 	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
 	}
+	// also repoints the mounted stores' trees, which db.Commit may have reloaded.
 	rs.publishQuerySnapshot()
 	return rs.lastCommitInfo.CommitID()
 }
@@ -534,6 +555,8 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
+// A Write() on the result is discarded for iavl stores (nothing flushes their
+// change sets) but still reaches the transient and mem stores from rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap := rs.acquireQuerySnapshot()
 	if snap == nil {
@@ -697,6 +720,8 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
+	// reads go through copies that get their own cache; the live trees are only written.
+	opts.CacheSize = 0
 	// a previously loaded db holds the directory lock memiavl.Load needs.
 	rs.closeDBForReload()
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
@@ -889,6 +914,13 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
 	if rs.sdk46Compact {
 		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
+	}
+	// a store an upgrade after target added has no tree to repoint to; that
+	// upgrade re-adds it on restart.
+	for key, store := range rs.stores {
+		if _, ok := store.(*memiavlstore.Store); ok && rs.db.TreeByName(key.Name()) == nil {
+			delete(rs.stores, key)
+		}
 	}
 	rs.publishQuerySnapshot()
 

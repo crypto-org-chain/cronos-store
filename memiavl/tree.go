@@ -234,14 +234,27 @@ func (t *Tree) setInitialVersion(initialVersion uint32) {
 // snapshot stays mapped across reloads until every tree sharing it is closed.
 // Close the copy when done with it, or the snapshot is never unmapped.
 func (t *Tree) Copy(cacheSize int) *Tree {
-	if _, ok := t.root.(*MemNode); ok {
-		// protect the existing `MemNode`s from get modified in-place
-		t.cowVersion = t.version
+	return t.copy(cacheSize, true)
+}
+
+// copy with pin false takes no snapshot reference, so it is only valid while the
+// owning DB keeps the snapshot mapped.
+func (t *Tree) copy(cacheSize int, pin bool) *Tree {
+	if root, ok := t.root.(*MemNode); ok {
+		// protect every existing MemNode from in-place mutation, including ones
+		// written in the uncommitted working version: the root always carries the
+		// highest node version. After a commit this equals t.version, as before.
+		t.cowVersion = max(t.cowVersion, t.version, root.version)
 	}
-	if t.snapshot != nil {
+	if pin && t.snapshot != nil {
 		t.snapshot.copies.Add(1)
 	}
 	newTree := *t
+	if !pin {
+		// so Close can't release a reference the copy never took; reads go through
+		// the PersistedNodes, which keep their own snapshot pointer.
+		newTree.snapshot = nil
+	}
 	// recreate cache for the copy to keep eviction state independent per tree
 	newTree.cache = NewCache(cacheSize)
 	return &newTree

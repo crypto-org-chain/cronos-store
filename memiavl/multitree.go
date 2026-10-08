@@ -180,10 +180,14 @@ func (t *MultiTree) SetZeroCopy(zeroCopy bool) {
 
 // Copy returns a snapshot of the tree which won't be corrupted by further modifications on the main tree.
 func (t *MultiTree) Copy(cacheSize int) *MultiTree {
+	return t.copy(cacheSize, true)
+}
+
+func (t *MultiTree) copy(cacheSize int, pin bool) *MultiTree {
 	trees := make([]NamedTree, len(t.trees))
 	treesByName := make(map[string]int, len(t.trees))
 	for i, entry := range t.trees {
-		tree := entry.Copy(cacheSize)
+		tree := entry.copy(cacheSize, pin)
 		trees[i] = NamedTree{Tree: tree, Name: entry.Name}
 		treesByName[entry.Name] = i
 	}
