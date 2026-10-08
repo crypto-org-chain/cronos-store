@@ -154,6 +154,8 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			return nil
 		}
 	}
+	// a length prefix of 9 followed by only 3 bytes: an entry the writer is still appending.
+	tornEntry := append(binary.AppendUvarint(nil, 9), "ent"...)
 
 	testCases := []struct {
 		name       string
@@ -179,7 +181,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			malleate: func() {
 				f, err := os.OpenFile(s.segmentPath(16, ""), os.O_APPEND|os.O_WRONLY, 0)
 				s.Require().NoError(err)
-				_, err = f.Write(append(binary.AppendUvarint(nil, 9), "ent"...))
+				_, err = f.Write(tornEntry)
 				s.Require().NoError(err)
 				s.Require().NoError(f.Close())
 			},
@@ -197,6 +199,20 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), nil, 0o600)) },
 			expFirst: 1,
 			expLast:  roWALEntries,
+		},
+		{
+			name:     "torn-only tail after a segment cycle",
+			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), tornEntry, 0o600)) },
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
+			// no entry is complete yet, so the log is empty.
+			name: "only segment torn",
+			malleate: func() {
+				s.dir = s.T().TempDir()
+				s.Require().NoError(os.WriteFile(s.segmentPath(1, ""), tornEntry, 0o600))
+			},
 		},
 		{
 			name: "non-segment names skipped",
