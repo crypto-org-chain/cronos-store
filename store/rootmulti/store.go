@@ -28,8 +28,7 @@ import (
 
 const (
 	defaultHistoricalDBCacheSize = 4
-	// unused entries are evicted after this many commits, so an idle cache doesn't pin replayed
-	// trees in memory or snapshot files the live DB has since pruned
+	// so an idle cache doesn't pin replayed trees or snapshot files the live DB has pruned
 	historicalDBIdleCommits = 100
 )
 
@@ -54,8 +53,8 @@ type historicalDBLoad struct {
 // historicalDBCache is a small bounded LRU cache of read-only *memiavl.DB
 // instances keyed by version.
 //
-// Loads aren't capped: ABCI queries borrow under CometBFT's consensus lock, so they must never
-// queue behind gRPC loads. DBs are closed outside c.mu for the same reason: Commit takes c.mu.
+// Loads aren't capped and DBs are closed outside c.mu: ABCI queries borrow under
+// CometBFT's consensus lock, and Commit takes c.mu.
 type historicalDBCache struct {
 	mu      sync.Mutex
 	maxSize int
@@ -116,7 +115,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 // loadEntry runs load outside the lock and caches the result, handing it to the borrowers waiting on inflight.
 func (c *historicalDBCache) loadEntry(version int64, inflight *historicalDBLoad, load func() (*memiavl.DB, error)) (*historicalDBEntry, error) {
-	// if load panics, waiters must still wake: a stuck version would block an ABCI query holding the consensus lock
+	// wake waiters even if load panics: a stuck version blocks ABCI queries under the consensus lock
 	loaded := false
 	defer func() {
 		if !loaded {
@@ -186,8 +185,8 @@ func (c *historicalDBCache) release(e *historicalDBEntry) {
 	}
 }
 
-// onCommit evicts entries unused for historicalDBIdleCommits commits. Their DBs are closed in
-// the background so a large unmap never delays Commit.
+// onCommit evicts entries unused for historicalDBIdleCommits commits. Like memiavl's own
+// retired-snapshot close, their unmap runs on the commit path, outside c.mu.
 func (c *historicalDBCache) onCommit() {
 	c.mu.Lock()
 	c.commits++
@@ -205,13 +204,15 @@ func (c *historicalDBCache) onCommit() {
 	c.entries = kept
 	c.mu.Unlock()
 
-	if len(idle) > 0 {
-		go func() {
-			for _, db := range idle {
-				_ = db.Close()
-			}
-		}()
+	_ = closeDBs(idle)
+}
+
+func closeDBs(dbs []*memiavl.DB) error {
+	errs := make([]error, 0, len(dbs))
+	for _, db := range dbs {
+		errs = append(errs, db.Close())
 	}
+	return stderrors.Join(errs...)
 }
 
 // close drains the cache; entries still borrowed are closed by release() once
@@ -229,13 +230,7 @@ func (c *historicalDBCache) close() error {
 	c.entries = nil
 	c.mu.Unlock()
 
-	var errs []error
-	for _, db := range idle {
-		if err := db.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return stderrors.Join(errs...)
+	return closeDBs(idle)
 }
 
 // loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
@@ -446,18 +441,17 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	if version < 0 || version > math.MaxUint32 {
 		return nil, fmt.Errorf("version out of range: %d", version)
 	}
-	// the borrow is held until the caller closes the returned store (baseapp does after each query)
+	// held until the caller closes the returned store (baseapp does after each query)
 	entry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
 		return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 	})
 	if err != nil {
 		return nil, err
 	}
-	db := entry.db
-	var releaseOnce sync.Once
-	// a second release would drop another borrower's ref and unmap a DB still in use
+	// once only: a second release would drop another borrower's ref and unmap a DB in use
+	var once sync.Once
 	release := cachemulti.CloserFunc(func() error {
-		releaseOnce.Do(func() { rs.historicalDBCache.release(entry) })
+		once.Do(func() { rs.historicalDBCache.release(entry) })
 		return nil
 	})
 
@@ -473,7 +467,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	// add all the iavl stores at the target version. A historical snapshot may
 	// contain trees for stores later deleted/renamed by a StoreUpgrade; skip
 	// those since there's no current StoreKey to expose them under.
-	for _, tree := range db.Trees() {
+	for _, tree := range entry.db.Trees() {
 		key, ok := rs.keysByName[tree.Name]
 		if !ok {
 			continue
