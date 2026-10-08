@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	protoio "github.com/cosmos/gogoproto/io"
@@ -413,37 +414,278 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
-func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+// newTestCache returns a store committed numVersions times and a separate cache of the given size.
+func newTestCache(t *testing.T, numVersions, size int) (*Store, []int64, *historicalDBCache) {
+	t.Helper()
+	store, versions := newTestStore(t, numVersions)
+	t.Cleanup(func() { store.Close() })
+	cache := newHistoricalDBCache(size)
+	t.Cleanup(func() { _ = cache.close() })
+	return store, versions, cache
+}
 
-	key := types.NewKVStoreKey("test")
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+// gatedLoad wraps load so its first call signals started, and every call blocks until gate is closed.
+func gatedLoad(load func() (*memiavl.DB, error)) (gated func() (*memiavl.DB, error), started <-chan struct{}, gate chan<- struct{}) {
+	startedCh, gateCh := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	return func() (*memiavl.DB, error) {
+		once.Do(func() { close(startedCh) })
+		<-gateCh
+		return load()
+	}, startedCh, gateCh
+}
 
-	// Commit version 1 with a key/value.
-	kvStore := rs.GetKVStore(key)
-	kvStore.Set([]byte("k"), []byte("v"))
-	commitID := rs.Commit()
-	require.Equal(t, int64(1), commitID.Version)
+// borrowAsync borrows version in a goroutine, releasing on success, and reports the error.
+func borrowAsync(cache *historicalDBCache, version int64, load func() (*memiavl.DB, error)) <-chan error {
+	errc := make(chan error, 1)
+	go func() {
+		e, err := cache.borrow(version, load)
+		if err == nil {
+			cache.release(e)
+		}
+		errc <- err
+	}()
+	return errc
+}
 
-	// Commit version 2 so that CacheMultiStoreWithVersion(1) must load a
-	// separate read-only memiavl DB rather than returning the live CacheMultiStore.
-	kvStore = rs.GetKVStore(key)
-	kvStore.Set([]byte("k2"), []byte("v2"))
-	commitID = rs.Commit()
-	require.Equal(t, int64(2), commitID.Version)
+// waitForWaiters blocks until n borrowers wait on version's in-flight load.
+func waitForWaiters(t *testing.T, cache *historicalDBCache, version int64, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		inflight, ok := cache.loading[version]
+		return ok && inflight.waiters == n
+	}, 10*time.Second, time.Millisecond)
+}
 
-	cms, err := rs.CacheMultiStoreWithVersion(1)
+func TestHistoricalDBCacheConcurrentMissesShareLoad(t *testing.T) {
+	store, versions, cache := newTestCache(t, 2, defaultHistoricalDBCacheSize)
+
+	var loads atomic.Int32
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) {
+		loads.Add(1)
+		return store.historicalLoader(versions[0])()
+	})
+
+	const borrowers = 8
+	entries := make(chan *historicalDBEntry, borrowers)
+	var wg sync.WaitGroup
+	borrow := func() {
+		defer wg.Done()
+		e, err := cache.borrow(versions[0], load)
+		if err != nil {
+			t.Errorf("borrow: %v", err)
+			return
+		}
+		entries <- e
+	}
+	wg.Add(1)
+	go borrow()
+	<-started
+	for i := 1; i < borrowers; i++ {
+		wg.Add(1)
+		go borrow()
+	}
+	waitForWaiters(t, cache, versions[0], borrowers-1)
+	close(gate)
+	wg.Wait()
+	close(entries)
+
+	require.Equal(t, int32(1), loads.Load())
+	first := <-entries
+	require.Equal(t, borrowers, first.refs)
+	cache.release(first)
+	for e := range entries {
+		require.Same(t, first, e)
+		cache.release(e)
+	}
+}
+
+func TestHistoricalDBCacheLoadErrorReachesWaiters(t *testing.T) {
+	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize)
+	t.Cleanup(func() { _ = cache.close() })
+
+	loadErr := fmt.Errorf("pruned")
+	var loads atomic.Int32
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) {
+		loads.Add(1)
+		return nil, loadErr
+	})
+
+	leader := borrowAsync(cache, 1, load)
+	<-started
+	waiter := borrowAsync(cache, 1, load)
+	waitForWaiters(t, cache, 1, 1)
+	close(gate)
+	require.ErrorIs(t, <-leader, loadErr)
+	require.ErrorIs(t, <-waiter, loadErr)
+	require.Equal(t, int32(1), loads.Load())
+
+	// failures aren't cached
+	_, err := cache.borrow(1, load)
+	require.ErrorIs(t, err, loadErr)
+	require.Equal(t, int32(2), loads.Load())
+}
+
+func TestHistoricalDBCacheLoadPanicReleasesWaiters(t *testing.T) {
+	store, versions, cache := newTestCache(t, 2, defaultHistoricalDBCacheSize)
+
+	load, started, gate := gatedLoad(func() (*memiavl.DB, error) { panic("corrupt snapshot") })
+	leaderPanic := make(chan any, 1)
+	go func() {
+		defer func() { leaderPanic <- recover() }() // baseapp recovers query panics
+		_, _ = cache.borrow(versions[0], load)
+	}()
+	<-started
+
+	waiter := borrowAsync(cache, versions[0], store.historicalLoader(versions[0]))
+	waitForWaiters(t, cache, versions[0], 1)
+	close(gate)
+	require.Equal(t, "corrupt snapshot", <-leaderPanic)
+	require.ErrorContains(t, <-waiter, "panicked")
+
+	// the version isn't stuck
+	require.NoError(t, <-borrowAsync(cache, versions[0], store.historicalLoader(versions[0])))
+}
+
+// ABCI queries borrow under CometBFT's consensus lock, so a load must never wait on another version's.
+func TestHistoricalDBCacheLoadsAreNotCapped(t *testing.T) {
+	store, versions, cache := newTestCache(t, 3, 1)
+
+	load, started, gate := gatedLoad(store.historicalLoader(versions[0]))
+	slow := borrowAsync(cache, versions[0], load)
+	<-started
+
+	select {
+	case err := <-borrowAsync(cache, versions[1], store.historicalLoader(versions[1])):
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("load blocked behind another version's in-flight load")
+	}
+	close(gate)
+	require.NoError(t, <-slow)
+}
+
+func TestHistoricalDBCacheEvictsIdleEntries(t *testing.T) {
+	store, versions, cache := newTestCache(t, 3, defaultHistoricalDBCacheSize)
+
+	idle, err := cache.borrow(versions[0], store.historicalLoader(versions[0]))
+	require.NoError(t, err)
+	cache.release(idle)
+	held, err := cache.borrow(versions[1], store.historicalLoader(versions[1]))
 	require.NoError(t, err)
 
-	closer, ok := cms.(io.Closer)
+	for i := 0; i < historicalDBIdleCommits-1; i++ {
+		require.NoError(t, cache.onCommit())
+	}
+	require.False(t, idle.evicted, "entry used within the idle window is kept")
+
+	require.NoError(t, cache.onCommit())
+	require.True(t, idle.evicted, "idle entry is evicted after historicalDBIdleCommits commits")
+	require.False(t, held.evicted, "borrowed entry is kept however long it's held")
+
+	cache.release(held)
+	require.NoError(t, cache.onCommit())
+	require.False(t, held.evicted, "release counts as a use")
+	cache.mu.Lock()
+	require.Len(t, cache.entries, 1)
+	cache.mu.Unlock()
+}
+
+// cachedHistoricalEntry returns the cached entry for version, or nil.
+func cachedHistoricalEntry(store *Store, version int64) *historicalDBEntry {
+	store.historicalDBCache.mu.Lock()
+	defer store.historicalDBCache.mu.Unlock()
+	for _, e := range store.historicalDBCache.entries {
+		if e.version == version {
+			return e
+		}
+	}
+	return nil
+}
+
+func TestCacheMultiStoreWithVersionSharesHistoricalDB(t *testing.T) {
+	store, versions := newTestStore(t, 2)
+	t.Cleanup(func() { store.Close() })
+	key := store.keysByName["test"]
+	target := versions[0]
+
+	cms1, err := store.CacheMultiStoreWithVersion(target)
+	require.NoError(t, err)
+	cms2, err := store.CacheMultiStoreWithVersion(target)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0}, cms1.GetKVStore(key).Get([]byte("k")))
+	require.Equal(t, []byte{0}, cms2.GetKVStore(key).Get([]byte("k")))
+
+	entry := cachedHistoricalEntry(store, target)
+	require.NotNil(t, entry)
+	require.Equal(t, 2, entry.refs, "both stores borrow one cached DB")
+
+	closer1, ok := cms1.(io.Closer)
 	require.True(t, ok, "CacheMultiStoreWithVersion must return an io.Closer")
+	require.NoError(t, closer1.Close())
+	require.NoError(t, closer1.Close()) // must not drop cms2's ref
+	require.Equal(t, 1, entry.refs)
+	require.Equal(t, []byte{0}, cms2.GetKVStore(key).Get([]byte("k")))
 
-	val := cms.GetKVStore(key).Get([]byte("k"))
-	require.Equal(t, []byte("v"), val)
+	require.NoError(t, cms2.(io.Closer).Close())
+	require.Equal(t, 0, entry.refs)
+	require.False(t, entry.evicted, "released entry stays cached")
+}
 
-	require.NoError(t, closer.Close())
+func TestCacheMultiStoreWithVersionSurvivesEvictionUntilClosed(t *testing.T) {
+	store, versions := newTestStore(t, defaultHistoricalDBCacheSize+2)
+	t.Cleanup(func() { store.Close() })
+	key := store.keysByName["test"]
+
+	held, err := store.CacheMultiStoreWithVersion(versions[0])
+	require.NoError(t, err)
+	entry := cachedHistoricalEntry(store, versions[0])
+	require.NotNil(t, entry)
+
+	for _, v := range versions[1 : defaultHistoricalDBCacheSize+1] {
+		cms, err := store.CacheMultiStoreWithVersion(v)
+		require.NoError(t, err)
+		require.NoError(t, cms.(io.Closer).Close())
+	}
+	require.Nil(t, cachedHistoricalEntry(store, versions[0]), "entry should be evicted")
+
+	// still borrowed, so its DB stays open
+	require.Equal(t, []byte{0}, held.GetKVStore(key).Get([]byte("k")))
+	require.NoError(t, held.(io.Closer).Close())
+	require.True(t, entry.evicted)
+	require.Equal(t, 0, entry.refs)
+}
+
+func TestCacheMultiStoreWithVersionConcurrentReads(t *testing.T) {
+	store, versions := newTestStore(t, 3)
+	t.Cleanup(func() { store.Close() })
+	key := store.keysByName["test"]
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(v int64, want byte) {
+			defer wg.Done()
+			cms, err := store.CacheMultiStoreWithVersion(v)
+			if err != nil {
+				t.Errorf("version %d: %v", v, err)
+				return
+			}
+			defer cms.(io.Closer).Close()
+			kv := cms.GetKVStore(key)
+			if got := kv.Get([]byte("k")); !bytes.Equal(got, []byte{want}) {
+				t.Errorf("version %d: got %x, want %x", v, got, want)
+			}
+			kv.Set([]byte("k"), []byte("scratch")) // stays in this store's cache layer
+			it := kv.Iterator(nil, nil)
+			for ; it.Valid(); it.Next() {
+			}
+			_ = it.Close()
+		}(versions[i%2], byte(i%2))
+	}
+	wg.Wait()
 }
 
 // TestCacheMultiStoreWithVersionFutureHeight verifies that requesting a
