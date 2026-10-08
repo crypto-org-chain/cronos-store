@@ -225,6 +225,8 @@ func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the default async writer may not have written the entry yet.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	committedVersion, err := db.CommittedVersion()
 	require.NoError(t, err)
@@ -764,6 +766,53 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 		db.snapshotRewriteCancel()
 		t.Fatal("timed out waiting for background snapshot rewrite result: goroutine likely hung")
 	}
+}
+
+func TestRewriteSnapshotBackgroundKeepsCurrentWhenTreeWritePanics(t *testing.T) {
+	dir := t.TempDir()
+	logger := &recordingLogger{}
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{test1StoreName, test2StoreName},
+		Logger:          logger,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(test1StoreName, "k", "v")))
+	rewriteVersion, err := db.Commit()
+	require.NoError(t, err)
+	current, err := os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+
+	// A persisted node without a snapshot makes writeRecursive panic. The rewrite's
+	// copy keeps it; the live tree gets its root back so Commit can still hash it.
+	tree := db.TreeByName(test2StoreName)
+	root := tree.root
+	tree.root = PersistedNode{}
+	require.NoError(t, db.RewriteSnapshotBackground())
+	tree.root = root
+
+	// bounded so a rewrite that never reports back fails the test instead of hanging it.
+	deadline := time.Now().Add(10 * time.Second)
+	for db.snapshotRewriteChan != nil {
+		require.True(t, time.Now().Before(deadline), "background rewrite never reported back")
+		_, err = db.Commit()
+		require.NoError(t, err)
+		time.Sleep(time.Millisecond)
+	}
+	require.Contains(t, logger.Errors(), "failed to rewrite snapshot")
+
+	newCurrent, err := os.Readlink(currentPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, current, newCurrent)
+	require.NoDirExists(t, filepath.Join(dir, snapshotName(rewriteVersion)))
+	require.NoDirExists(t, filepath.Join(dir, snapshotName(rewriteVersion)+TmpSuffix))
+
+	require.NoError(t, db.Close())
+	db, err = Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v"), db.TreeByName(test1StoreName).Get([]byte("k")))
+	require.NoError(t, db.Close())
 }
 
 func TestZeroCopy(t *testing.T) {
