@@ -212,6 +212,7 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 // querySnapshot is a copy-on-write view of committed state; latest-height reads
 // use it instead of rs.db, which Commit mutates in place.
 type querySnapshot struct {
+	// a copy of rs.db, not rs.db itself: closing rs.db leaves it open until refs reaches zero.
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
 	// one for the publish slot plus one per reader; db is closed at zero.

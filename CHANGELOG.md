@@ -1,8 +1,14 @@
 # Changelog
 
+## UNRELEASED
+
 - [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fsync WAL entry before acknowledging Commit
-- [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
+- [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
+- [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
+
+## v1.9.0
+
 - [#83](https://github.com/crypto-org-chain/cronos-store/pull/83) fix(memiavl): avoid walIndex underflow when pruning with initialVersion>1
 - [#80](https://github.com/crypto-org-chain/cronos-store/pull/80) fix(memiavl): bound the WAL catch-up wait instead of spinning forever
 - [#110](https://github.com/crypto-org-chain/cronos-store/pull/110) fix(store): disable zero-copy for historical queries so results outlive the DB cache
@@ -19,6 +25,9 @@
 - [#81](https://github.com/crypto-org-chain/cronos-store/pull/81) fix(memiavl): return error instead of panicking on empty-tree membership proof
 - [#75](https://github.com/crypto-org-chain/cronos-store/pull/75) fix(memiavl): abort `Commit` on an async WAL write error instead of deadlocking on the `walChan` send under `db.mtx`; also break the snapshot catch-up loop and free the completed snapshot tree when the writer dies.
 - [#76](https://github.com/crypto-org-chain/cronos-store/pull/76) fix(store): validate memiavl tree membership on load.
+
+## v1.8.0
+
 - [#73](https://github.com/crypto-org-chain/cronos-store/pull/73) fix(memiavl): treat `endVersion == 0` as "to latest" (consistently in `TraverseStateChanges` and `CatchupWAL`) and reject a negative `endVersion` with an error instead of silently traversing nothing.
 - [#74](https://github.com/crypto-org-chain/cronos-store/pull/74) fix(memiavl): honor the early-stop return value in `ScanPostOrder` so the scan stops when the callback returns true, instead of always walking the whole tree.
 - [#72](https://github.com/crypto-org-chain/cronos-store/pull/72) fix(versiondb): mark s/latest only after a clean snapshot read.
