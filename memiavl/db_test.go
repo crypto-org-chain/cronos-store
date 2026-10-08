@@ -1,19 +1,23 @@
 package memiavl
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	fmt "fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/wal"
 )
 
 const TestAppChainID = "test_chain"
@@ -158,98 +162,6 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 
 	// three files: snapshot, current link, wal, LOCK
 	require.Equal(t, 4, len(entries))
-}
-
-func TestWaitCommittedVersionTimesOut(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version that the wal will never reach, simulating a stuck/dead wal writer.
-	unreachableTarget := committedVersion + 1000
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(unreachableTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "timed out waiting for wal to catch up")
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return within the bounded timeout; it is spinning forever")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(committedVersion, 5*time.Second)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitCommittedVersion did not return for an already-caught-up version")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	// the default async writer may not have written the entry yet.
-	require.NoError(t, db.WaitAsyncCommit())
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version the wal has already passed, simulating a concurrent commit
-	// that advanced the wal beyond the target between polls. An exact "==" check would
-	// never match again and spin until timeout; ">=" must succeed immediately.
-	pastTarget := committedVersion - 1
-	require.GreaterOrEqual(t, pastTarget, int64(0))
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(pastTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return promptly when wal already advanced past target")
-	}
 }
 
 func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
@@ -794,7 +706,9 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	corruptIndex := lastIndex + 1
 	// carries an invalid protobuf wire type (field 13, wire type 6, both undefined),
 	// so WALEntry.Unmarshal reliably rejects it as corrupt.
-	require.NoError(t, db.wal.Write(corruptIndex, []byte("not a valid WALEntry")))
+	var batch wal.Batch
+	batch.Write(corruptIndex, []byte("not a valid WALEntry"))
+	require.NoError(t, db.wal.WriteBatch(&batch))
 
 	return walVersion(corruptIndex, db.initialVersion)
 }
@@ -825,8 +739,9 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	require.NoError(t, db.RewriteSnapshot())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
-	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
-	// reported version or checkBackgroundSnapshotRewrite's wait loop spins forever.
+	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to the wal's version;
+	// otherwise the rewrite is already current and is adopted without catching up
+	// through the corrupt entry.
 	db.lastCommitInfo.Version = corruptVersion
 
 	mtree, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
@@ -841,11 +756,97 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	require.Nil(t, mtree.trees, "mtree must be closed on catchup failure, not leaked")
 }
 
-func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+func TestCheckBackgroundSnapshotRewriteDiscardsAheadResult(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
 		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world0")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world1")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	// a rewrite result that caught up past the committed version.
+	ahead, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
+	require.NoError(t, err)
+	require.NoError(t, ahead.CatchupWAL(db.wal, 2))
+	db.lastCommitInfo.Version = ahead.Version() - 1
+	injectSnapshotRewriteResult(db, ahead)
+
+	require.NoError(t, db.checkBackgroundSnapshotRewrite(), "an ahead result must be discarded, not surfaced as a catchup error")
+	require.Nil(t, ahead.trees, "discarded mtree must be closed")
+
+	// the live db's own snapshot must be unaffected by discarding the independent one.
+	require.Equal(t, []byte("world1"), db.TreeByName(testStoreName).Get([]byte("hello")))
+}
+
+func TestCommittedVersionNilWAL(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = db.CommittedVersion()
+	require.Error(t, err)
+}
+
+func TestCommittedVersionConcurrentWithClose(t *testing.T) {
+	// CommittedVersion must take db.mtx: Close nils db.wal under it.
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_, _ = db.CommittedVersion()
+		}
+	}()
+
+	require.NoError(t, db.Close())
+	<-done
+}
+
+func TestCommitAfterCloseAtSnapshotIntervalDoesNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing:  true,
+		InitialStores:    []string{testStoreName},
+		SnapshotInterval: 1,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	require.NotPanics(t, func() {
+		_, _ = db.Commit()
+	})
+}
+
+func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing:     true,
+		InitialStores:       []string{testStoreName},
+		SnapshotWriterLimit: 1,
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
@@ -856,14 +857,31 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	corruptTrailingWALEntry(t, db)
+	// hold the sole snapshot writer so a wal entry can land mid-rewrite, which
+	// the post-rewrite CatchupWAL then trips over.
+	release := make(chan struct{})
+	held := make(chan struct{})
+	db.snapshotWriterPool.Submit(func() {
+		close(held)
+		<-release
+	})
+	<-held
+
+	var loaded *MultiTree
+	db.onCatchupMTreeLoaded = func(mtree *MultiTree) { loaded = mtree }
 
 	require.NoError(t, db.RewriteSnapshotBackground())
+
+	corruptTrailingWALEntry(t, db)
+
+	close(release)
 
 	select {
 	case result := <-db.snapshotRewriteChan:
 		require.Error(t, result.err, "background catchup failure must be reported")
 		require.Nil(t, result.mtree, "no tree handed back on failure, so no way to leak it via the result")
+		require.NotNil(t, loaded, "hook must have observed the loaded mtree before catchup failed")
+		require.Nil(t, loaded.trees, "mtree must be closed on catchup failure, not leaked")
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	case <-time.After(5 * time.Second):
@@ -1076,6 +1094,209 @@ func TestFastCommit(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestCommitFsyncsWALBeforeReturning(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, db *DB) uint32
+	}{
+		{
+			name:     "new entry",
+			malleate: func(*testing.T, *DB) uint32 { return 0 },
+		},
+		{
+			name: "replayed entry",
+			malleate: func(t *testing.T, db *DB) uint32 {
+				t.Helper()
+				// version 2 matches the commit under test, so that commit replays it.
+				for _, value := range []string{"before", "world"} {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", value)))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				return 1
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, asyncCommit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/asyncCommit=%v", tc.name, asyncCommit), func(t *testing.T) {
+				dir := t.TempDir()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				targetVersion := tc.malleate(t, db)
+				require.NoError(t, db.Close())
+
+				db, err = Load(dir, Options{
+					InitialStores:     []string{testStoreName},
+					TargetVersion:     targetVersion,
+					AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+				}, TestAppChainID)
+				require.NoError(t, err)
+				defer func() {
+					require.NoError(t, db.Close())
+				}()
+
+				original, originalDir := db.walSync, db.walDirSync
+				var syncCalls, dirSyncCalls atomic.Int32
+				db.walSync = func(w writeAheadLog) error {
+					syncCalls.Add(1)
+					return original(w)
+				}
+				db.walDirSync = func(dir string) error {
+					dirSyncCalls.Add(1)
+					return originalDir(dir)
+				}
+
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+				_, err = db.Commit()
+				require.NoError(t, err)
+				require.EqualValues(t, 1, syncCalls.Load(), "Commit must fsync the wal entry before returning")
+				require.EqualValues(t, 1, dirSyncCalls.Load(), "Commit must fsync the wal directory before returning")
+			})
+		}
+	}
+}
+
+func asyncCommitBufferFor(asyncCommit bool) int {
+	if asyncCommit {
+		return 10
+	}
+	return -1
+}
+
+func TestCommitFailsWhenWALSyncFails(t *testing.T) {
+	syncErr := errors.New("simulated fsync failure")
+	testCases := []struct {
+		name     string
+		malleate func(db *DB)
+	}{
+		{
+			name:     "segment",
+			malleate: func(db *DB) { db.walSync = func(writeAheadLog) error { return syncErr } },
+		},
+		{
+			name:     "directory",
+			malleate: func(db *DB) { db.walDirSync = func(string) error { return syncErr } },
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, asyncCommit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/asyncCommit=%v", tc.name, asyncCommit), func(t *testing.T) {
+				db, err := Load(t.TempDir(), Options{
+					CreateIfMissing:   true,
+					InitialStores:     []string{testStoreName},
+					AsyncCommitBuffer: asyncCommitBufferFor(asyncCommit),
+				}, TestAppChainID)
+				require.NoError(t, err)
+				tc.malleate(db)
+
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+				v, err := db.Commit()
+				require.ErrorIs(t, err, syncErr)
+				require.Zero(t, v)
+
+				// both paths must latch the error so Close still surfaces it.
+				require.ErrorIs(t, db.Close(), syncErr)
+			})
+		}
+	}
+}
+
+// newDBWithDeadAsyncWALWriter kills the async wal writer by closing the wal out
+// from under it and driving one Commit through the resulting error.
+func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
+	t.Helper()
+
+	db, err := Load(dir, Options{
+		CreateIfMissing:   true,
+		InitialStores:     []string{testStoreName},
+		AsyncCommitBuffer: 10,
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
+
+	// close the wal out from under the writer so its next write fails.
+	require.NoError(t, db.wal.Close())
+
+	v, err := db.Commit()
+	require.ErrorIs(t, err, wal.ErrClosed)
+	require.Zero(t, v)
+
+	// join the writer: it parks its error on walQuit before exiting.
+	<-db.walQuit
+
+	return db
+}
+
+func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
+	dir := t.TempDir()
+	db := newDBWithDeadAsyncWALWriter(t, dir)
+
+	// release the file lock without touching the now-closed wal.
+	db.walChan = nil
+	db.walQuit = nil
+	db.wal = nil
+	require.NoError(t, db.fileLock.Unlock())
+	require.NoError(t, db.fileLock.Destroy())
+}
+
+func TestCommitAfterDeadAsyncWriterDoesNotHang(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(db *DB)
+		commits  int
+	}{
+		{
+			name:     "writer error latched",
+			malleate: func(*DB) {},
+			commits:  1,
+		},
+		{
+			// the buffered send and the closed walQuit are both ready, so each
+			// commit has an even chance of queueing an entry nobody will sync.
+			name:     "writer quit without latched error",
+			malleate: func(db *DB) { db.walErr = nil },
+			commits:  20,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newDBWithDeadAsyncWALWriter(t, t.TempDir())
+
+			require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+				{Name: testStoreName, Changeset: ChangeSet{
+					Pairs: []*KVPair{{Key: []byte("hello2"), Value: []byte("world2")}},
+				}},
+			}))
+
+			result := make(chan error, 1)
+			go func() {
+				for i := 0; i < tc.commits; i++ {
+					tc.malleate(db)
+					if _, err := db.Commit(); err == nil {
+						result <- fmt.Errorf("commit %d succeeded with a dead wal writer", i)
+						return
+					}
+				}
+				result <- nil
+			}()
+
+			select {
+			case err := <-result:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Commit deadlocked waiting on a dead async wal writer")
+			}
+		})
+	}
+}
+
 func TestRepeatedApplyChangeSet(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{test1StoreName, test2StoreName}, SnapshotInterval: 3, AsyncCommitBuffer: 10}, TestAppChainID)
 	require.NoError(t, err)
@@ -1178,10 +1399,7 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	t.Helper()
 	dir := t.TempDir()
 
-	asyncCommitBuffer := -1
-	if asyncCommit {
-		asyncCommitBuffer = 10
-	}
+	asyncCommitBuffer := asyncCommitBufferFor(asyncCommit)
 
 	db, err := Load(dir, Options{
 		CreateIfMissing:   true,
@@ -1235,6 +1453,75 @@ func testIdempotentWrite(t *testing.T, asyncCommit bool) {
 	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
 	require.Equal(t, commitInfo, *db.LastCommitInfo())
+	require.NoError(t, db.Close())
+
+	// a replay that differs from the wal must fail, not ack a hash a restart can't reproduce.
+	db, err = Load(dir, Options{TargetVersion: 5, AsyncCommitBuffer: asyncCommitBuffer}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSets(changes[0]))
+	_, err = db.Commit()
+	require.ErrorContains(t, err, "differs from wal entry")
+	_ = db.Close() // returns the latched commit error
+
+	db, err = Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	require.Equal(t, commitInfo, *db.LastCommitInfo())
+	require.NoError(t, db.Close())
+}
+
+func TestDBCloseIsIdempotent(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Close())
+	require.NoError(t, db.Close())
+}
+
+func TestSnapshotRewriteDuringWALReplay(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", fmt.Sprintf("world%d", i))))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	commitInfo := *db.LastCommitInfo()
+	require.NoError(t, db.Close())
+
+	// tree at version 5, wal still holds 6..10.
+	db, err = Load(dir, Options{TargetVersion: 5}, TestAppChainID)
+	require.NoError(t, err)
+	committedVersion, err := db.CommittedVersion()
+	require.NoError(t, err)
+	require.Equal(t, int64(10), committedVersion)
+	require.Equal(t, int64(5), db.Version())
+
+	// no rewrite may start while the wal is ahead; it would overshoot and be discarded.
+	interval := db.snapshotInterval
+	db.snapshotInterval = 1
+	db.rewriteIfApplicable(db.Version())
+	require.Nil(t, db.snapshotRewriteChan, "no rewrite may start while the wal is ahead")
+	db.snapshotInterval = interval
+
+	// An explicit rewrite must also be refused while the wal is ahead.
+	require.Error(t, db.RewriteSnapshotBackground())
+
+	for i := 5; i < 10; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", fmt.Sprintf("world%d", i))))
+		_, err := db.Commit()
+		require.NoError(t, err, "commit must not fail while the wal is ahead of the tree")
+	}
+	require.Equal(t, commitInfo, *db.LastCommitInfo())
+
+	require.NoError(t, db.Close())
 }
 
 // TestEarliestVersion verifies that EarliestVersion returns the earliest
@@ -1597,6 +1884,31 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	}
 }
 
+func TestCloseStopsSnapshotWriterPool(t *testing.T) {
+	// read-only DBs are opened and closed once per historical query.
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		db, err := Load(t.TempDir(), Options{
+			CreateIfMissing: true,
+			InitialStores:   []string{testStoreName},
+		}, TestAppChainID)
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+	}
+
+	// Goroutine teardown is not instantaneous, so allow a short settle window.
+	var after int
+	for i := 0; i < 100; i++ {
+		after = runtime.NumGoroutine()
+		if after <= before+5 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("goroutines leaked across 20 Load/Close cycles: before=%d after=%d", before, after)
+}
+
 func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -1619,4 +1931,260 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+}
+
+func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+
+	// a half-written entry, as seen while the writer is mid-append.
+	tail := filepath.Join(walPath(dir), "00000000000000000001")
+	f, err := os.OpenFile(tail, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0x80, 0x01, 0x00})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	before, err := os.ReadFile(tail)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name string
+		open func() (int64, error)
+	}{
+		{
+			name: "Load",
+			open: func() (int64, error) {
+				ro, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				if err != nil {
+					return 0, err
+				}
+				return ro.Version(), ro.Close()
+			},
+		},
+		{
+			name: "GetLatestVersion",
+			open: func() (int64, error) { return GetLatestVersion(dir) },
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			version, err := tc.open()
+			require.NoError(t, err)
+			require.EqualValues(t, 3, version)
+
+			after, err := os.ReadFile(tail)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+		})
+	}
+}
+
+func TestLoadReleasesResourcesOnWALFailure(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, dir string, db *DB) uint32
+	}{
+		{
+			name: "wal open fails",
+			malleate: func(t *testing.T, dir string, _ *DB) uint32 {
+				t.Helper()
+				// a pending TruncateFront and TruncateBack at once is corrupt.
+				for _, name := range []string{"00000000000000000002.START", "00000000000000000002.END"} {
+					require.NoError(t, os.WriteFile(filepath.Join(walPath(dir), name), nil, 0o600))
+				}
+				return 0
+			},
+		},
+		{
+			name: "wal replay fails",
+			malleate: func(t *testing.T, _ string, db *DB) uint32 {
+				t.Helper()
+				return uint32(corruptTrailingWALEntry(t, db))
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, readOnly := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/readOnly=%v", tc.name, readOnly), func(t *testing.T) {
+				dir := t.TempDir()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				// the genesis snapshot is empty and maps no files.
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Reload())
+				require.NoError(t, db.WaitAsyncCommit())
+				targetVersion := tc.malleate(t, dir, db)
+				require.NoError(t, db.Close())
+
+				openFDs := func() int {
+					fdDir, err := os.Open("/dev/fd")
+					require.NoError(t, err)
+					defer fdDir.Close()
+					names, err := fdDir.Readdirnames(-1)
+					require.NoError(t, err)
+					return len(names)
+				}
+				// a GC-run finalizer could close a leaked fd and hide the leak.
+				defer debug.SetGCPercent(debug.SetGCPercent(-1))
+				before := openFDs()
+
+				_, err = Load(dir, Options{ReadOnly: readOnly, TargetVersion: targetVersion}, TestAppChainID)
+				require.Error(t, err)
+				require.Equal(t, before, openFDs(), "the loaded snapshot, wal and lock files must be closed")
+
+				lock, err := LockFile(filepath.Join(dir, LockFileName))
+				require.NoError(t, err, "a failed Load must release the db lock")
+				require.NoError(t, errors.Join(lock.Unlock(), lock.Destroy()))
+			})
+		}
+	}
+}
+
+// errorLogger records Error messages, e.g. a failed WAL TruncateFront in the prune goroutine.
+type errorLogger struct {
+	nopLogger
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (l *errorLogger) Error(msg string, keyvals ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.msgs = append(l.msgs, fmt.Sprint(msg, keyvals))
+}
+
+func (l *errorLogger) Messages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.msgs...)
+}
+
+func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
+	dir := t.TempDir()
+	logger := &errorLogger{}
+	db, err := Load(dir, Options{
+		Logger:             logger,
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotInterval:   2,
+		SnapshotKeepRecent: 2,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	writerClosed := false
+	t.Cleanup(func() {
+		if !writerClosed {
+			_ = db.Close()
+		}
+	})
+
+	var (
+		wg         sync.WaitGroup
+		done       = make(chan struct{})
+		latest     atomic.Int64
+		hashes     sync.Map // version -> root hash
+		loads      atomic.Int64
+		loaded     atomic.Int64
+		loadErrs   sync.Map
+		mismatches sync.Map
+	)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				v := latest.Load()
+				if v == 0 {
+					continue
+				}
+				// mirrors rootmulti loadAtVersion
+				ro, err := Load(dir, Options{ReadOnly: true, TargetVersion: uint32(v)}, TestAppChainID)
+				loads.Add(1)
+				if err != nil {
+					loadErrs.Store(err.Error(), struct{}{})
+					continue
+				}
+				want, _ := hashes.Load(v)
+				if got := ro.TreeByName(testStoreName).RootHash(); ro.Version() != v || !bytes.Equal(want.([]byte), got) {
+					mismatches.Store(fmt.Sprintf("Load(%d): version %d, hash %X, want %X", v, ro.Version(), got, want), struct{}{})
+				}
+				loaded.Add(1)
+				_ = ro.Close()
+				if latestVersion, err := GetLatestVersion(dir); err != nil {
+					loadErrs.Store(err.Error(), struct{}{})
+				} else if latestVersion < v {
+					mismatches.Store(fmt.Sprintf("GetLatestVersion: %d, want >= %d", latestVersion, v), struct{}{})
+				}
+			}
+		}()
+	}
+	stopReaders := sync.OnceFunc(func() {
+		close(done)
+		wg.Wait()
+	})
+	t.Cleanup(stopReaders)
+
+	const versions = 300
+	for v := 1; v <= versions; v++ {
+		// Large entries widen the window where a reader sees a half-written tail
+		// entry, and roll WAL segments so pruning exercises TruncateFront.
+		value := make([]byte, 256*1024)
+		value[0] = byte(v)
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err, "commit version %d", v)
+		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
+		latest.Store(int64(v))
+	}
+	stopReaders()
+
+	t.Logf("read-only loads: %d, succeeded: %d", loads.Load(), loaded.Load())
+	// a load can still fail if pruning removes its snapshot mid-load; it must never return wrong state.
+	loadErrs.Range(func(k, _ any) bool {
+		t.Log("read-only load error:", k)
+		return true
+	})
+	var wrong []string
+	mismatches.Range(func(k, _ any) bool {
+		wrong = append(wrong, k.(string))
+		return true
+	})
+	require.Empty(t, wrong)
+	require.Positive(t, loaded.Load())
+
+	lastHash := db.TreeByName(testStoreName).RootHash()
+	writerClosed = true
+	require.NoError(t, db.Close())
+	for _, msg := range logger.Messages() {
+		require.NotContains(t, msg, "failed to truncate wal")
+	}
+
+	reopened, err := Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.Close()) }()
+	require.EqualValues(t, versions, reopened.Version())
+	require.Equal(t, lastHash, reopened.TreeByName(testStoreName).RootHash())
 }
