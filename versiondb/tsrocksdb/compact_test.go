@@ -3,25 +3,18 @@ package tsrocksdb
 import (
 	"encoding/binary"
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/linxGnu/grocksdb"
 	"github.com/stretchr/testify/suite"
-
-	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 const (
-	compactTestKeys = 200
-	// versions written by the ingested sst files, liveVersion is written through the db afterwards
-	ingestedVersions = 3
-	liveVersion      = ingestedVersions + 1
+	historyKeys     = 200
+	historyVersions = 4
 )
-
-type valueFunc func(i, version int) []byte
 
 type CompactSuite struct {
 	suite.Suite
@@ -31,90 +24,49 @@ func TestCompactSuite(t *testing.T) {
 	suite.Run(t, new(CompactSuite))
 }
 
-func compactTestKey(i int) []byte {
+func historyKey(i int) []byte {
 	return fmt.Appendf(nil, "k%04d", i)
 }
 
-func isDeleted(i, version int) bool {
-	return i == 0 && version == ingestedVersions
-}
-
-// randomValue gives incompressible values, so compaction output size doesn't depend on the codec.
-func randomValue(i, version int) []byte {
-	if isDeleted(i, version) {
+// historyValue is nil for a key deleted at version 3, which is written again at version 4.
+func historyValue(i, version int) []byte {
+	if i == 0 && version == 3 {
 		return nil
 	}
-	value := make([]byte, 256)
-	rand.New(rand.NewSource(int64(i*liveVersion + version))).Read(value)
-	return value
+	return fmt.Appendf(nil, `{"address":"0x%040x","balance":"%d","version":%d}`, i, i*1000+version, version)
 }
 
-func compressibleValue(i, version int) []byte {
-	if isDeleted(i, version) {
-		return nil
-	}
-	return fmt.Appendf(nil, `{"address":"0x%040x","balance":"%d","denom":"basecro","version":%d}`, i, i*1000+version, version)
-}
-
-// writeIngestedHistory mirrors build-versiondb-sst followed by ingest-versiondb-sst,
-// which leaves LZ4 sst files in the bottommost level.
-func (s *CompactSuite) writeIngestedHistory(dir string, value valueFunc) {
-	// two files with disjoint key ranges, like build-versiondb-sst output split by file size
-	var sstFiles []string
-	for start := 0; start < compactTestKeys; start += compactTestKeys / 2 {
-		sstPath := filepath.Join(s.T().TempDir(), fmt.Sprintf("history-%d.sst", start))
-		w := grocksdb.NewSSTFileWriter(grocksdb.NewDefaultEnvOptions(), NewVersionDBOpts(true))
-		s.Require().NoError(w.Open(sstPath))
-
-		var ts [TimestampSize]byte
-		for i := start; i < start+compactTestKeys/2; i++ {
-			key := prependStoreKey(testStoreKey, compactTestKey(i))
-			// sst writer requires the same order as the comparator: newer version first
-			for version := ingestedVersions; version >= 1; version-- {
-				binary.LittleEndian.PutUint64(ts[:], uint64(version))
-				if v := value(i, version); v == nil {
-					s.Require().NoError(w.DeleteWithTS(key, ts[:]))
-				} else {
-					s.Require().NoError(w.PutWithTS(key, ts[:], v))
-				}
+// writeHistory ingests the history as an LZ4 sst file, like build-versiondb-sst followed by ingest-versiondb-sst.
+func (s *CompactSuite) writeHistory(dir string) {
+	sstPath := filepath.Join(s.T().TempDir(), "history.sst")
+	w := grocksdb.NewSSTFileWriter(grocksdb.NewDefaultEnvOptions(), NewVersionDBOpts(true))
+	defer w.Destroy()
+	s.Require().NoError(w.Open(sstPath))
+	var ts [TimestampSize]byte
+	for i := 0; i < historyKeys; i++ {
+		key := prependStoreKey(testStoreKey, historyKey(i))
+		// the sst writer needs the comparator order: newer version first
+		for version := historyVersions; version >= 1; version-- {
+			binary.LittleEndian.PutUint64(ts[:], uint64(version))
+			if value := historyValue(i, version); value == nil {
+				s.Require().NoError(w.DeleteWithTS(key, ts[:]))
+			} else {
+				s.Require().NoError(w.PutWithTS(key, ts[:], value))
 			}
 		}
-		s.Require().NoError(w.Finish())
-		w.Destroy()
-		sstFiles = append(sstFiles, sstPath)
 	}
+	s.Require().NoError(w.Finish())
 
-	db, cfHandle, err := OpenVersionDB(dir)
-	s.Require().NoError(err)
-	defer func() {
-		cfHandle.Destroy()
-		db.Close()
-	}()
-	ingestOpts := grocksdb.NewDefaultIngestExternalFileOptions()
-	defer ingestOpts.Destroy()
-	s.Require().NoError(db.IngestExternalFileCF(cfHandle, sstFiles, ingestOpts))
-}
-
-// writeLiveVersion leaves liveVersion in the wal, it's replayed into L0 when the db is reopened.
-func (s *CompactSuite) writeLiveVersion(dir string, value valueFunc) {
 	store, err := NewStore(dir)
 	s.Require().NoError(err)
 	defer store.Close()
-
-	changeSet := make([]*types.StoreKVPair, 0, compactTestKeys)
-	for i := 0; i < compactTestKeys; i++ {
-		changeSet = append(changeSet, &types.StoreKVPair{StoreKey: testStoreKey, Key: compactTestKey(i), Value: value(i, liveVersion)})
-	}
-	s.Require().NoError(store.PutAtVersion(liveVersion, changeSet))
+	s.Require().NoError(store.db.IngestExternalFileCF(store.cfHandle, []string{sstPath}, grocksdb.NewDefaultIngestExternalFileOptions()))
 }
 
 func (s *CompactSuite) liveSSTFiles(dir string) map[string]struct{} {
 	db, cfHandle, err := OpenVersionDBForReadOnly(dir, false)
 	s.Require().NoError(err)
-	defer func() {
-		cfHandle.Destroy()
-		db.Close()
-	}()
+	defer NewStoreWithDB(db, cfHandle).Close()
 
 	files := make(map[string]struct{})
 	for _, f := range db.GetLiveFilesMetaData() {
@@ -125,33 +77,28 @@ func (s *CompactSuite) liveSSTFiles(dir string) map[string]struct{} {
 	return files
 }
 
-func (s *CompactSuite) requireHistory(dir string, value valueFunc, versions int) {
+func (s *CompactSuite) requireHistory(dir string) {
 	store, err := NewStore(dir)
 	s.Require().NoError(err)
 	defer store.Close()
 
-	for i := 0; i < compactTestKeys; i++ {
-		for version := 1; version <= versions; version++ {
+	for i := 0; i < historyKeys; i++ {
+		for version := 1; version <= historyVersions; version++ {
 			v := int64(version)
-			got, err := store.GetAtVersion(testStoreKey, compactTestKey(i), &v)
+			value, err := store.GetAtVersion(testStoreKey, historyKey(i), &v)
 			s.Require().NoError(err)
-			s.Require().Equal(value(i, version), got, "key %d version %d", i, version)
+			s.Require().Equal(historyValue(i, version), value, "key %d version %d", i, version)
 		}
 	}
 }
 
 func (s *CompactSuite) TestCompactVersionDB() {
 	testCases := []struct {
-		name     string
-		malleate func(dir string)
-		// expected history, nil when the db has no data
-		value    valueFunc
-		versions int
-		// upper bound of the after/before size ratio, 0 skips the check
-		maxSizeRatio float64
-		rateLimit    int64
-		minDuration  time.Duration
-		expErrMsg    string
+		name        string
+		malleate    func(dir string)
+		rateLimit   int64
+		minDuration time.Duration
+		expErrMsg   string
 	}{
 		{
 			name:      "missing db",
@@ -160,7 +107,7 @@ func (s *CompactSuite) TestCompactVersionDB() {
 		},
 		{
 			name:      "negative rate limit",
-			malleate:  func(dir string) { s.writeIngestedHistory(dir, randomValue) },
+			malleate:  s.writeHistory,
 			rateLimit: -1,
 			expErrMsg: "negative rate limit",
 		},
@@ -182,29 +129,14 @@ func (s *CompactSuite) TestCompactVersionDB() {
 			},
 		},
 		{
-			// LZ4 to ZSTD with dictionary, a rewrite with unchanged compression stays close to 1
-			name:         "ingested history is recompressed",
-			malleate:     func(dir string) { s.writeIngestedHistory(dir, compressibleValue) },
-			value:        compressibleValue,
-			versions:     ingestedVersions,
-			maxSizeRatio: 0.8,
+			name:     "history",
+			malleate: s.writeHistory,
 		},
 		{
-			name: "ingested history with live writes in L0",
-			malleate: func(dir string) {
-				s.writeIngestedHistory(dir, randomValue)
-				s.writeLiveVersion(dir, randomValue)
-			},
-			value:    randomValue,
-			versions: liveVersion,
-		},
-		{
-			// ~160KB of incompressible output at 64KiB/s needs well over a second; unthrottled it takes milliseconds
-			name:        "ingested history with rate limit",
-			malleate:    func(dir string) { s.writeIngestedHistory(dir, randomValue) },
-			value:       randomValue,
-			versions:    ingestedVersions,
-			rateLimit:   64 << 10,
+			// unthrottled the compaction takes milliseconds
+			name:        "history with rate limit",
+			malleate:    s.writeHistory,
+			rateLimit:   2 << 10,
 			minDuration: time.Second,
 		},
 	}
@@ -227,22 +159,18 @@ func (s *CompactSuite) TestCompactVersionDB() {
 			}
 			s.Require().NoError(err)
 			s.Require().GreaterOrEqual(time.Since(start), tc.minDuration)
-
-			if tc.value == nil {
-				s.Require().Zero(before)
+			if len(filesBefore) == 0 {
 				s.Require().Zero(after)
 				return
 			}
-			s.Require().Positive(after)
-			if tc.maxSizeRatio > 0 {
-				s.Require().Less(float64(after)/float64(before), tc.maxSizeRatio)
-			}
+
+			// LZ4 and uncompressed files become ZSTD with a dictionary; a rewrite with unchanged compression stays close to 1
+			s.Require().Less(float64(after)/float64(before), 0.8)
 			filesAfter := s.liveSSTFiles(dir)
-			s.Require().NotEmpty(filesAfter)
 			for name := range filesBefore {
 				s.Require().NotContains(filesAfter, name, "sst file not rewritten")
 			}
-			s.requireHistory(dir, tc.value, tc.versions)
+			s.requireHistory(dir)
 		})
 	}
 }

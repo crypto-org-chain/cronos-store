@@ -11,8 +11,7 @@ import (
 func CompactVersionDBCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compact-versiondb versiondb-path",
-		Short: "Rewrite all versiondb sst files with the current compression options, the node must be stopped",
-		Long:  "Rewrite all versiondb sst files with the current compression options, e.g. recompress with ZSTD the LZ4 files left by ingest-versiondb-sst or the uncompressed files left by restore-versiondb. The node must be stopped, the db is locked while it runs.",
+		Short: "Recompress all versiondb sst files with the current compression options, the node must be stopped",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rateLimit, err := cmd.Flags().GetUint64(flagRateLimit)
@@ -31,6 +30,6 @@ func CompactVersionDBCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Uint64(flagRateLimit, 0, "max flush and compaction write rate in MiB/s, protects other processes sharing the disk, 0 means unlimited")
+	cmd.Flags().Uint64(flagRateLimit, 0, "max write rate in MiB/s, 0 means unlimited")
 	return cmd
 }

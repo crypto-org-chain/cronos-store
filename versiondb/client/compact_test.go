@@ -34,12 +34,8 @@ func (s *CompactVersionDBCmdSuite) TestCompactVersionDBCmd() {
 			expErrMsg: "does not exist",
 		},
 		{
-			name: "rate limit overflows bytes per second",
-			malleate: func(dir string) {
-				store, err := tsrocksdb.NewStore(dir)
-				s.Require().NoError(err)
-				s.Require().NoError(store.Close())
-			},
+			name:      "rate limit overflows bytes per second",
+			malleate:  func(string) {},
 			args:      []string{"--" + flagRateLimit, fmt.Sprint(uint64(math.MaxInt64>>20) + 1)},
 			expErrMsg: "rate limit too large",
 		},
