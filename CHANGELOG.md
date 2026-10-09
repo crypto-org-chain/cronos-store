@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#137](https://github.com/crypto-org-chain/cronos-store/pull/137) fix(versiondb): compress flushed sst files
 - [#129](https://github.com/crypto-org-chain/cronos-store/pull/129) fix(memiavl): close loaded MultiTree when Close drains a finished snapshot rewrite
 - [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
 
