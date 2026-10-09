@@ -21,12 +21,6 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	opts.SetComparator(CreateTSComparator())
 	opts.IncreaseParallelism(runtime.NumCPU())
 	opts.OptimizeLevelStyleCompaction(512 * 1024 * 1024)
-	// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
-	// (sorted bulk writes like restore-versiondb) are moved down to the bottommost level without a rewrite.
-	opts.SetCompressionPerLevel([]grocksdb.CompressionType{
-		grocksdb.ZSTDCompression, grocksdb.ZSTDCompression,
-		grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression,
-	})
 	opts.SetTargetFileSizeMultiplier(2)
 	opts.SetLevelCompactionDynamicLevelBytes(true)
 
@@ -45,6 +39,15 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	opts.SetCompressionOptionsParallelThreads(4)
 
 	if !sstFileWriter {
+		// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
+		// (sorted bulk writes like restore-versiondb) are moved down to the bottommost level without a rewrite.
+		compressionPerLevel := make([]grocksdb.CompressionType, opts.GetNumLevels())
+		for i := range compressionPerLevel {
+			compressionPerLevel[i] = grocksdb.LZ4Compression
+		}
+		compressionPerLevel[0], compressionPerLevel[1] = grocksdb.ZSTDCompression, grocksdb.ZSTDCompression
+		opts.SetCompressionPerLevel(compressionPerLevel)
+
 		// compression options at bottommost level
 		opts.SetBottommostCompression(grocksdb.ZSTDCompression)
 		compressOpts := grocksdb.NewDefaultCompressionOptions()
