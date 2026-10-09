@@ -12,7 +12,7 @@ func CompactVersionDBCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compact-versiondb versiondb-path",
 		Short: "Rewrite all versiondb sst files with the current compression options, the node must be stopped",
-		Long:  "Rewrite all versiondb sst files with the current compression options, e.g. recompress the LZ4 files left by ingest-versiondb-sst with ZSTD. The node must be stopped, the db is locked while it runs.",
+		Long:  "Rewrite all versiondb sst files with the current compression options, e.g. recompress with ZSTD the LZ4 files left by ingest-versiondb-sst or the uncompressed files left by restore-versiondb. The node must be stopped, the db is locked while it runs.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rateLimit, err := cmd.Flags().GetUint64(flagRateLimit)
