@@ -3,6 +3,7 @@ package tsrocksdb
 import (
 	"encoding/binary"
 	"runtime"
+	"slices"
 
 	"github.com/linxGnu/grocksdb"
 )
@@ -39,6 +40,13 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	opts.SetCompressionOptionsParallelThreads(4)
 
 	if !sstFileWriter {
+		// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
+		// (e.g. from restore-versiondb) are moved down to the bottommost level as is.
+		opts.SetCompressionPerLevel(append(
+			[]grocksdb.CompressionType{grocksdb.ZSTDCompression, grocksdb.ZSTDCompression},
+			slices.Repeat([]grocksdb.CompressionType{grocksdb.LZ4Compression}, opts.GetNumLevels()-2)...,
+		))
+
 		// compression options at bottommost level
 		opts.SetBottommostCompression(grocksdb.ZSTDCompression)
 		compressOpts := grocksdb.NewDefaultCompressionOptions()
