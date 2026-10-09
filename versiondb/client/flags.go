@@ -28,4 +28,5 @@ const (
 	flagSDK64Compact     = "sdk64-compact"
 	flagIAVLVersion      = "iavl-version"
 	flagChainId          = "chain-id"
+	flagRateLimit        = "rate-limit"
 )
