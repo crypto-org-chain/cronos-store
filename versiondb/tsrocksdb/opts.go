@@ -21,6 +21,12 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	opts.SetComparator(CreateTSComparator())
 	opts.IncreaseParallelism(runtime.NumCPU())
 	opts.OptimizeLevelStyleCompaction(512 * 1024 * 1024)
+	// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
+	// (sorted bulk writes like restore-versiondb) are moved down to the bottommost level without a rewrite.
+	opts.SetCompressionPerLevel([]grocksdb.CompressionType{
+		grocksdb.ZSTDCompression, grocksdb.ZSTDCompression,
+		grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression, grocksdb.LZ4Compression,
+	})
 	opts.SetTargetFileSizeMultiplier(2)
 	opts.SetLevelCompactionDynamicLevelBytes(true)
 
