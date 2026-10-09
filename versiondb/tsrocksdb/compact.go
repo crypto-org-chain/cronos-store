@@ -1,6 +1,7 @@
 package tsrocksdb
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/linxGnu/grocksdb"
@@ -30,7 +31,11 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	db.CompactRangeCFOpt(cfHandle, grocksdb.Range{}, compactOpts)
 
 	// CompactRangeCFOpt returns no status, a failed compaction only shows up as a background error
-	if bgErrors, _ := db.GetIntProperty("rocksdb.background-errors"); bgErrors > 0 {
+	bgErrors, ok := db.GetIntProperty("rocksdb.background-errors")
+	if !ok {
+		return 0, 0, errors.New("failed to read rocksdb.background-errors")
+	}
+	if bgErrors > 0 {
 		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
 	}
 	after, _ = db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)

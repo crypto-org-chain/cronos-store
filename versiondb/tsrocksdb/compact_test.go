@@ -133,7 +133,7 @@ func (s *CompactSuite) TestCompactVersionDB() {
 			malleate: s.writeHistory,
 		},
 		{
-			// unthrottled the compaction takes milliseconds
+			// the compaction writes ~4.5 KB, ~2 s at 2 KiB/s; unthrottled it takes milliseconds
 			name:        "history with rate limit",
 			malleate:    s.writeHistory,
 			rateLimit:   2 << 10,

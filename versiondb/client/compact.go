@@ -18,6 +18,7 @@ func CompactVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// MiB/s is converted to bytes/s, which must fit in an int64
 			if rateLimit > math.MaxInt64>>20 {
 				return fmt.Errorf("rate limit too large: %d MiB/s", rateLimit)
 			}

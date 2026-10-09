@@ -77,7 +77,7 @@ func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {
 	opts := grocksdb.NewDefaultOptions()
 	opts.SetMaxSubcompactions(uint32(runtime.NumCPU()))
 	if rateBytesPerSec > 0 {
-		// refill period and fairness are rocksdb's defaults
+		// refill period and fairness are rocksdb's defaults; SetRateLimiter takes ownership of the limiter
 		opts.SetRateLimiter(grocksdb.NewGenericRateLimiter(rateBytesPerSec, 100_000, 10, grocksdb.RateLimiterModeWritesOnly, false))
 	}
 	return opts
