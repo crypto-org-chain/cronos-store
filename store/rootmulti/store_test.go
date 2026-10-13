@@ -330,7 +330,7 @@ func TestHistoricalDBCacheEviction(t *testing.T) {
 	defer store.Close()
 
 	// Use a small cache so eviction happens quickly.
-	smallCache := newHistoricalDBCache(maxSize)
+	smallCache := newHistoricalDBCache(maxSize, log.NewNopLogger())
 
 	// Track the entries we borrow.
 	entries := make([]*historicalDBEntry, numVersions)
@@ -379,7 +379,7 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	store, versions := newTestStore(t, numVersions)
 	defer store.Close()
 
-	cache := newHistoricalDBCache(3) // smaller than numVersions to force evictions
+	cache := newHistoricalDBCache(3, log.NewNopLogger()) // smaller than numVersions to force evictions
 
 	var wg sync.WaitGroup
 	const goroutines = 10
@@ -419,7 +419,7 @@ func newTestCache(t *testing.T, numVersions, size int) (*Store, []int64, *histor
 	t.Helper()
 	store, versions := newTestStore(t, numVersions)
 	t.Cleanup(func() { store.Close() })
-	cache := newHistoricalDBCache(size)
+	cache := newHistoricalDBCache(size, log.NewNopLogger())
 	t.Cleanup(func() { _ = cache.close() })
 	return store, versions, cache
 }
@@ -500,10 +500,11 @@ func TestHistoricalDBCacheConcurrentMissesShareLoad(t *testing.T) {
 		require.Same(t, first, e)
 		cache.release(e)
 	}
+	require.Zero(t, first.refs)
 }
 
 func TestHistoricalDBCacheLoadErrorReachesWaiters(t *testing.T) {
-	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize)
+	cache := newHistoricalDBCache(defaultHistoricalDBCacheSize, log.NewNopLogger())
 	t.Cleanup(func() { _ = cache.close() })
 
 	loadErr := fmt.Errorf("pruned")

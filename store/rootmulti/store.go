@@ -57,6 +57,7 @@ type historicalDBLoad struct {
 // CometBFT's consensus lock, and Commit takes c.mu.
 type historicalDBCache struct {
 	mu      sync.Mutex
+	logger  log.Logger
 	maxSize int
 	entries []*historicalDBEntry // index 0 is most-recently used
 	loading map[int64]*historicalDBLoad
@@ -64,11 +65,11 @@ type historicalDBCache struct {
 	closed  bool
 }
 
-func newHistoricalDBCache(maxSize int) *historicalDBCache {
+func newHistoricalDBCache(maxSize int, logger log.Logger) *historicalDBCache {
 	if maxSize <= 0 {
 		maxSize = defaultHistoricalDBCacheSize
 	}
-	return &historicalDBCache{maxSize: maxSize, loading: make(map[int64]*historicalDBLoad)}
+	return &historicalDBCache{logger: logger, maxSize: maxSize, loading: make(map[int64]*historicalDBLoad)}
 }
 
 // lookup returns the cached entry for version and moves it to the front
@@ -104,7 +105,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		inflight.waiters++
 		c.mu.Unlock()
 		<-inflight.done
-		return inflight.entry, inflight.err
+		return inflight.entry, inflight.err // loadEntry already counted this waiter's ref
 	}
 	inflight := &historicalDBLoad{done: make(chan struct{})}
 	c.loading[version] = inflight
@@ -132,7 +133,7 @@ func (c *historicalDBCache) loadEntry(version int64, inflight *historicalDBLoad,
 	var toClose *memiavl.DB
 	defer func() {
 		if toClose != nil {
-			_ = toClose.Close()
+			c.closeAndLog(toClose)
 		}
 	}()
 
@@ -181,7 +182,14 @@ func (c *historicalDBCache) release(e *historicalDBEntry) {
 	closeDB := e.refs == 0 && e.evicted
 	c.mu.Unlock()
 	if closeDB {
-		_ = e.db.Close()
+		c.closeAndLog(e.db)
+	}
+}
+
+// closeAndLog logs close errors that have no caller to return them to.
+func (c *historicalDBCache) closeAndLog(db *memiavl.DB) {
+	if err := db.Close(); err != nil {
+		c.logger.Error("failed to close historical memiavl db", "err", err)
 	}
 }
 
@@ -301,7 +309,7 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 		listeners:    make(map[types.StoreKey]*types.MemoryListener),
 		chainId:      chainId,
 
-		historicalDBCache: newHistoricalDBCache(defaultHistoricalDBCacheSize),
+		historicalDBCache: newHistoricalDBCache(defaultHistoricalDBCacheSize, logger),
 	}
 }
 
