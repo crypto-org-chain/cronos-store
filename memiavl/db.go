@@ -72,9 +72,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal walReader
-	// the same log as wal on a read-write DB, nil when read-only
-	walWriter   writeAheadLog
+	wal         walReader
+	walWriter   writeAheadLog // same log as wal on a read-write DB, nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -235,26 +234,26 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	}
 
 	var (
-		wl     walReader
+		reader walReader
 		writer writeAheadLog
 	)
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		wl, err = openReadOnlyWAL(walPath(dir))
+		reader, err = openReadOnlyWAL(walPath(dir))
 	} else {
 		var writable *wal.Log
 		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
-			wl, writer = writable, writable
+			reader, writer = writable, writable
 		}
 	}
 	if err != nil {
 		return nil, err
 	}
 	// assigned only on success: a typed nil would pass the cleanup's nil check.
-	walLog = wl
+	walLog = reader
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.catchupWAL(wl, int64(opts.TargetVersion)); err != nil {
+		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
 	}
@@ -304,7 +303,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wl,
+		wal:                    reader,
 		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
@@ -602,7 +601,7 @@ func (db *DB) CommittedVersion() (int64, error) {
 // Callers hold db.mtx.
 func (db *DB) committedVersion() (int64, error) {
 	if db.wal == nil {
-		return 0, fmt.Errorf("wal is not initialized")
+		return 0, wal.ErrClosed
 	}
 	lastIndex, err := db.wal.LastIndex()
 	if err != nil {
@@ -1108,7 +1107,7 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// copies have no wal; nil it so a second Close doesn't return wal.ErrClosed.
+	// copies have no wal, and a previous Close nils it.
 	if db.wal != nil {
 		errs = append(errs, db.wal.Close())
 	}
@@ -1559,15 +1558,15 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wl, err := openReadOnlyWAL(walPath(dir))
+	reader, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wl.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wl.Close())
+		return 0, errors.Join(err, reader.Close())
 	}
-	if err := wl.Close(); err != nil {
+	if err := reader.Close(); err != nil {
 		return 0, err
 	}
 	if lastIndex == 0 {

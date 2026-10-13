@@ -1851,6 +1851,26 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestClosedDB(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			if readOnly {
+				require.NoError(t, db.Close())
+				db, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, db.Close())
+			_, err = db.CommittedVersion()
+			require.ErrorIs(t, err, wal.ErrClosed)
+			require.NoError(t, db.Close())
+		})
+	}
+}
+
 func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
 	testCases := []struct {
 		name       string
