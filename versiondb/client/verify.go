@@ -131,11 +131,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				return entry.tree == nil
 			})
 
-			// All stores must end on the same version: a multitree snapshot records one
-			// commit-info version for the whole set and rejects trees that disagree with
-			// it on load. With --target-version unset every store stops at its own last
-			// changeset, so bump the laggards here the way the live path does each block.
-			// Only known once every store has been replayed, hence after Wait.
+			// A multitree snapshot records one commit-info version and rejects trees that
+			// disagree, so bump stores that stopped early to the top version, known only
+			// after Wait, the way the live path does each block.
 			latestVersion := targetVersion
 			for _, entry := range verified {
 				if v := entry.tree.Version(); v > latestVersion {

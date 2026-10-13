@@ -104,9 +104,6 @@ func TestVerifyOneStore(t *testing.T) {
 	}
 }
 
-// Without --target-version each store stops at its own last changeset, but a multitree
-// snapshot records one commit-info version for all of them and validates the trees
-// against it on load - so the laggards must be bumped before the snapshot is written.
 func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 	changeSetDir := t.TempDir()
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
@@ -280,9 +277,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 	}
 }
 
-// With --load-snapshot a repeated store name resolves to the same loaded tree, so
-// two workers would replay into it concurrently (run under -race). An alias such as
-// "foo/" would add a second store over the same change-set and snapshot directories.
+// fails under -race without dedup: two workers would replay into one loaded tree.
 func TestVerifyDedupsStoresWithLoadedSnapshot(t *testing.T) {
 	changeSetDir := t.TempDir()
 	baseDir := writeBaseSnapshot(t, 0)
