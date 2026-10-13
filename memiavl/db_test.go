@@ -1444,7 +1444,7 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
-func TestCloseTwice(t *testing.T) {
+func TestClosedDB(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
 			dir := t.TempDir()
@@ -1457,6 +1457,8 @@ func TestCloseTwice(t *testing.T) {
 			}
 
 			require.NoError(t, db.Close())
+			_, err = db.CommittedVersion()
+			require.ErrorIs(t, err, wal.ErrClosed)
 			require.NoError(t, db.Close())
 		})
 	}

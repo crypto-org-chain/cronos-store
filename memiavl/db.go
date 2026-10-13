@@ -521,6 +521,9 @@ func (db *DB) latchWalErr(err error) error {
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
 func (db *DB) CommittedVersion() (int64, error) {
+	if db.wal == nil {
+		return 0, wal.ErrClosed
+	}
 	lastIndex, err := db.wal.LastIndex()
 	if err != nil {
 		return 0, err
