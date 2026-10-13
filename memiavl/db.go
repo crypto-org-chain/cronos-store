@@ -205,16 +205,16 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	var (
-		wl     walReader
-		writer writeAheadLog
+		wreader walReader
+		writer  writeAheadLog
 	)
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		wl, err = openReadOnlyWAL(walPath(dir))
+		wreader, err = openReadOnlyWAL(walPath(dir))
 	} else {
 		var writable *wal.Log
 		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
-			wl, writer = writable, writable
+			wreader, writer = writable, writable
 		}
 	}
 	if err != nil {
@@ -222,8 +222,8 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.catchupWAL(wl, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wl.Close(), mtree.Close())
+		if err := mtree.catchupWAL(wreader, int64(opts.TargetVersion)); err != nil {
+			return nil, errors.Join(err, wreader.Close(), mtree.Close())
 		}
 	}
 
@@ -272,7 +272,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wl,
+		wal:                    wreader,
 		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
@@ -1410,15 +1410,15 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wl, err := openReadOnlyWAL(walPath(dir))
+	wreader, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wl.LastIndex()
+	lastIndex, err := wreader.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wl.Close())
+		return 0, errors.Join(err, wreader.Close())
 	}
-	if err := wl.Close(); err != nil {
+	if err := wreader.Close(); err != nil {
 		return 0, err
 	}
 	if lastIndex == 0 {
