@@ -107,8 +107,7 @@ type DB struct {
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory. onlyGenesisSnapshot means the earliest kept
-	// snapshot is snapshot-0, so the initialVersion fallback applies.
+	// scanning the directory.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
