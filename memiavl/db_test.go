@@ -715,7 +715,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.catchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
 // corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
@@ -800,7 +800,7 @@ func TestCheckBackgroundSnapshotRewriteDiscardsAheadResult(t *testing.T) {
 	// a rewrite result that caught up past the committed version.
 	ahead, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
 	require.NoError(t, err)
-	require.NoError(t, ahead.CatchupWAL(db.wal, 2))
+	require.NoError(t, ahead.catchupWAL(db.wal, 2))
 	db.lastCommitInfo.Version = ahead.Version() - 1
 	injectSnapshotRewriteResult(db, ahead)
 

@@ -246,7 +246,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	walLog = wl
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.CatchupWAL(walLog, int64(opts.TargetVersion)); err != nil {
+		if err := mtree.catchupWAL(walLog, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
 	}
@@ -661,7 +661,7 @@ func (db *DB) adoptSnapshotRewrite(mtree *MultiTree) (err error) {
 	}
 
 	if mtree.Version() < db.lastCommitInfo.Version {
-		if err := mtree.CatchupWAL(db.wal, db.lastCommitInfo.Version); err != nil {
+		if err := mtree.catchupWAL(db.wal, db.lastCommitInfo.Version); err != nil {
 			return fmt.Errorf("final catchup failed: %w", err)
 		}
 	}
@@ -1057,7 +1057,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 		}
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
-		if err := mtree.CatchupWAL(wal, 0); err != nil {
+		if err := mtree.catchupWAL(wal, 0); err != nil {
 			ch <- snapshotResult{err: errors.Join(err, mtree.Close())}
 			return
 		}
