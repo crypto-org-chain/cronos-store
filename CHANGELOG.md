@@ -4,6 +4,7 @@
 
 - [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
+- [#129](https://github.com/crypto-org-chain/cronos-store/pull/129) fix(memiavl): close loaded MultiTree when Close drains a finished snapshot rewrite
 - [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
 
 ## v1.9.0
