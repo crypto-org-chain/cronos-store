@@ -364,12 +364,12 @@ func (t *MultiTree) CatchupWAL(wal *wal.Log, endVersion int64) error {
 	return t.catchupWAL(wal, endVersion)
 }
 
-func (t *MultiTree) catchupWAL(wreader walReader, endVersion int64) error {
+func (t *MultiTree) catchupWAL(reader walReader, endVersion int64) error {
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
 
-	lastIndex, err := wreader.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
 		return fmt.Errorf("read wal last index failed, %w", err)
 	}
@@ -396,7 +396,7 @@ func (t *MultiTree) catchupWAL(wreader walReader, endVersion int64) error {
 	}
 
 	for i := firstIndex; i <= endIndex; i++ {
-		bz, err := wreader.Read(i)
+		bz, err := reader.Read(i)
 		if err != nil {
 			return fmt.Errorf("read wal log failed, %w", err)
 		}
