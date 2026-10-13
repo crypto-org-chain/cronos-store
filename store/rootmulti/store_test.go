@@ -894,6 +894,17 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	require.NoError(t, store.LoadLatestVersion())
 	defer store.Close()
 
+	// enough keys for multi-level paths, so each commit rewrites shared inner nodes.
+	commit := func(i int) {
+		kv := store.GetKVStore(key)
+		for j := 0; j < 16; j++ {
+			kv.Set([]byte(fmt.Sprintf("k%02d", j)), []byte{byte(i)})
+		}
+		store.Commit()
+	}
+	// a proof query on an empty tree panics in memiavlstore, so start readers on a populated one.
+	commit(0)
+
 	const commits = 30
 	done := make(chan struct{})
 
@@ -902,10 +913,8 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer close(done)
-		for i := 0; i < commits; i++ {
-			kv := store.GetKVStore(key)
-			kv.Set([]byte("k"), []byte{byte(i)})
-			store.Commit()
+		for i := 1; i <= commits; i++ {
+			commit(i)
 		}
 	}()
 
@@ -913,17 +922,26 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		func() { store.CacheMultiStore() },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
-			if err == nil {
-				if closer, ok := cms.(io.Closer); ok {
-					_ = closer.Close()
-				}
+			if err != nil {
+				return
 			}
+			kv := cms.GetKVStore(key)
+			_ = kv.Get([]byte("k07"))
+			it := kv.Iterator(nil, nil)
+			for ; it.Valid(); it.Next() {
+				_ = it.Value()
+			}
+			_ = it.Close()
+			_ = cms.(io.Closer).Close()
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07")})
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k"), Prove: true})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07"), Prove: true})
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
 		},
 		func() { store.LatestVersion() },
 		func() { store.EarliestVersion() },
