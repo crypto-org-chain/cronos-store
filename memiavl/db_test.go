@@ -1393,6 +1393,54 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
+	testCases := []struct {
+		name       string
+		malleate   func(t *testing.T, dir string)
+		expVersion int64
+	}{
+		{
+			// a state-sync restore leaves a snapshot and no wal entries.
+			name: "snapshot without wal entries",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Close())
+				require.NoError(t, os.RemoveAll(walPath(dir)))
+			},
+			expVersion: 3,
+		},
+		{
+			name: "nothing committed with initial version above 1",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, InitialVersion: 100}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+			expVersion: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.malleate(t, dir)
+
+			version, err := GetLatestVersion(dir)
+			require.NoError(t, err)
+			require.Equal(t, tc.expVersion, version)
+		})
+	}
+}
+
 func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,

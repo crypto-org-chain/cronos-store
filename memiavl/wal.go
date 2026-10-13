@@ -58,7 +58,7 @@ func truncateCorruptedTail(path string, format wal.LogFormat) error {
 		if format == wal.JSON {
 			n, err = loadNextJSONEntry(data)
 		} else {
-			n, err = loadNextBinaryEntry(data)
+			n, _, err = loadNextBinaryEntry(data)
 		}
 		if errors.Is(err, wal.ErrCorrupt) {
 			break
@@ -89,16 +89,17 @@ func loadNextJSONEntry(data []byte) (n int, err error) {
 	return idx + 1, nil
 }
 
-func loadNextBinaryEntry(data []byte) (n int, err error) {
+// loadNextBinaryEntry returns the entry's total length and the length of its size prefix.
+func loadNextBinaryEntry(data []byte) (n, header int, err error) {
 	// data_size + data
-	size, n := binary.Uvarint(data)
-	if n <= 0 {
-		return 0, wal.ErrCorrupt
+	size, header := binary.Uvarint(data)
+	if header <= 0 {
+		return 0, 0, wal.ErrCorrupt
 	}
-	if uint64(len(data)-n) < size {
-		return 0, wal.ErrCorrupt
+	if uint64(len(data)-header) < size {
+		return 0, 0, wal.ErrCorrupt
 	}
-	return n + int(size), nil
+	return header + int(size), header, nil
 }
 
 const (
@@ -245,11 +246,10 @@ func readWALEntries(path string) (entries [][]byte, torn bool, err error) {
 		return nil, false, err
 	}
 	for len(data) > 0 {
-		n, err := loadNextBinaryEntry(data)
+		n, header, err := loadNextBinaryEntry(data)
 		if err != nil {
 			return entries, true, nil
 		}
-		_, header := binary.Uvarint(data)
 		entries = append(entries, data[header:n:n])
 		data = data[n:]
 	}
@@ -283,8 +283,11 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// the tail is loaded at open and never evicted, so only older segments need the lock.
+	if seg != l.segments[len(l.segments)-1] {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+	}
 	if seg.entries == nil {
 		entries, torn, err := readWALEntries(seg.path)
 		if err != nil {
