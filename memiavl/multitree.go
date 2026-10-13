@@ -179,6 +179,7 @@ func (t *MultiTree) SetZeroCopy(zeroCopy bool) {
 }
 
 // Copy returns a snapshot of the tree which won't be corrupted by further modifications on the main tree.
+// It holds a reference on each tree's mmap'd snapshot; Close it when done.
 func (t *MultiTree) Copy(cacheSize int) *MultiTree {
 	return t.copy(cacheSize, true)
 }

@@ -419,6 +419,38 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
+func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
+	store, versions := newTestStore(t, 2)
+	defer store.Close()
+
+	cache := store.historicalDBCache
+	targetVersion := versions[0]
+	loadFn := func() (*memiavl.DB, error) {
+		return loadAtVersion(store.dir, store.opts, store.chainId, targetVersion)
+	}
+
+	var loaded *memiavl.DB
+	_, err := cache.borrow(targetVersion, func() (*memiavl.DB, error) {
+		db, err := loadFn()
+		loaded = db
+		// a reload lands between the load and caching its result.
+		require.NoError(t, cache.invalidate())
+		return db, err
+	})
+	require.ErrorContains(t, err, "reloaded while loading")
+	require.Empty(t, loaded.Trees(), "the discarded DB must be closed")
+	cache.mu.Lock()
+	require.Empty(t, cache.entries)
+	cache.mu.Unlock()
+
+	entry, err := cache.borrow(targetVersion, loadFn)
+	require.NoError(t, err)
+	defer cache.release(entry)
+	cache.mu.Lock()
+	require.Len(t, cache.entries, 1)
+	cache.mu.Unlock()
+}
+
 func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
@@ -986,12 +1018,17 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 				checkTx(func() { store.GetKVStore(key).Get([]byte("k")) }),
 				func() {
 					cms, err := store.CacheMultiStoreWithVersion(0)
-					if err == nil {
-						cms.GetKVStore(key).Get([]byte("k"))
-						if closer, ok := cms.(io.Closer); ok {
-							_ = closer.Close()
-						}
+					if err != nil {
+						return
 					}
+					kv := cms.GetKVStore(key)
+					_ = kv.Get([]byte("k"))
+					it := kv.Iterator(nil, nil)
+					for ; it.Valid(); it.Next() {
+						_ = it.Value()
+					}
+					_ = it.Close()
+					_ = cms.(io.Closer).Close()
 				},
 				func() {
 					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
