@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -349,5 +350,39 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			s.Require().NoError(l.Close())
 			s.Require().Equal(before, snapshotDir(s.T(), s.dir))
 		})
+	}
+}
+
+func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
+	l, err := openReadOnlyWAL(s.dir)
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(l.Close()) }()
+
+	const readers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, readers)
+	for g := uint64(1); g <= readers; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// different strides keep readers evicting each other's cached segment.
+			for n := uint64(0); n < roWALEntries*10; n++ {
+				i := n*g%roWALEntries + 1
+				data, err := l.Read(i)
+				if err != nil {
+					errs <- fmt.Errorf("index %d: %w", i, err)
+					return
+				}
+				if string(data) != string(roWALEntry(i)) {
+					errs <- fmt.Errorf("index %d: got %q", i, data)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		s.Require().NoError(err)
 	}
 }
