@@ -307,7 +307,6 @@ func (rs *Store) publishQuerySnapshot() {
 	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
 }
 
-// setMountedTrees points every mounted iavl store at db's trees.
 func (rs *Store) setMountedTrees(db *memiavl.DB) {
 	for key, store := range rs.stores {
 		memiavlStore, ok := store.(*memiavlstore.Store)
