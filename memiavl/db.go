@@ -677,7 +677,6 @@ func (db *DB) adoptSnapshotRewrite(mtree *MultiTree) (err error) {
 		return fmt.Errorf("catchup landed on version %d, want %d", mtree.Version(), db.lastCommitInfo.Version)
 	}
 
-	// do the switch
 	reloadCalled = true
 	if err := db.reloadMultiTree(mtree); err != nil {
 		return fmt.Errorf("switch multitree failed: %w", err)
@@ -686,7 +685,6 @@ func (db *DB) adoptSnapshotRewrite(mtree *MultiTree) (err error) {
 
 	db.pruneSnapshots()
 
-	// trigger state-sync snapshot export
 	if db.triggerStateSyncExport != nil {
 		db.triggerStateSyncExport(db.SnapshotVersion())
 	}

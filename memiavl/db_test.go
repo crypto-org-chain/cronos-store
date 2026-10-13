@@ -1294,7 +1294,6 @@ func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
 
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
 
-	// close the wal out from under the writer so its next write fails.
 	require.NoError(t, db.wal.Close())
 
 	v, err := db.Commit()
