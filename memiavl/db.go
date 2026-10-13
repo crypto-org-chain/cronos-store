@@ -70,9 +70,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal walReader
-	// the same log as wal on a read-write DB, nil when read-only
-	walWriter   writeAheadLog
+	wal         walReader
+	walWriter   writeAheadLog // same log as wal on a read-write DB, nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
