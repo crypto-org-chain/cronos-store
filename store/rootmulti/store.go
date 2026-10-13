@@ -176,7 +176,6 @@ func (c *historicalDBCache) invalidate() error {
 }
 
 // evictAllLocked closes unborrowed entries; borrowed ones close on release.
-// Caller must hold c.mu.
 func (c *historicalDBCache) evictAllLocked() error {
 	var errs []error
 	for _, e := range c.entries {
@@ -506,7 +505,6 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
-// closer runs when the caller closes the returned store.
 func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
@@ -948,7 +946,6 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	version := req.Height
 
-	// latest height reads the snapshot; older heights load from disk.
 	var db *memiavl.DB
 	snap := rs.acquireQuerySnapshot()
 	if snap != nil && (version == 0 || version == snap.lastCommitInfo.Version) {

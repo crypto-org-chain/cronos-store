@@ -230,9 +230,8 @@ func (t *Tree) setInitialVersion(initialVersion uint32) {
 // Copy returns a snapshot of the tree which won't be modified by further modifications on the main tree,
 // the returned new tree can be accessed concurrently with the main tree.
 //
-// The copy shares the source's mmap'd snapshot and holds a reference to it, so the
-// snapshot stays mapped across reloads until every tree sharing it is closed.
-// Close the copy when done with it, or the snapshot is never unmapped.
+// The copy holds a reference to the source's mmap'd snapshot, which stays mapped
+// until every tree sharing it is closed, so Close the copy when done.
 func (t *Tree) Copy(cacheSize int) *Tree {
 	if _, ok := t.root.(*MemNode); ok {
 		// protect the existing `MemNode`s from get modified in-place
