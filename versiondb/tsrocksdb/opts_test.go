@@ -25,6 +25,8 @@ func TestFlushedFilesAreCompressed(t *testing.T) {
 	require.NoError(t, store.Import(1, ch))
 	require.NoError(t, store.Flush())
 
-	size, _ := store.db.GetIntPropertyCF("rocksdb.live-sst-files-size", store.cfHandle)
+	size, ok := store.db.GetIntPropertyCF("rocksdb.live-sst-files-size", store.cfHandle)
+	require.True(t, ok)
+	require.NotZero(t, size)
 	require.Less(t, float64(size)/float64(raw), 0.5, "flushed sst files are not compressed")
 }
