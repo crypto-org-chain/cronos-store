@@ -72,7 +72,9 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         writeAheadLog
+	wal walReader
+	// the same log as wal on a read-write DB, nil when read-only
+	walWriter   writeAheadLog
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -185,7 +187,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		err      error
 		fileLock FileLock
 		mtree    *MultiTree
-		walLog   writeAheadLog
+		walLog   walReader
 	)
 	// until the DB takes ownership, an early return would leak the lock, mmaps
 	// and wal fds, and a retried Load could never re-lock the dir.
@@ -232,12 +234,18 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
-	var wl writeAheadLog
+	var (
+		wl     walReader
+		writer writeAheadLog
+	)
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
 		wl, err = openReadOnlyWAL(walPath(dir))
 	} else {
-		wl, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+		var writable *wal.Log
+		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
+			wl, writer = writable, writable
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -246,7 +254,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	walLog = wl
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.catchupWAL(walLog, int64(opts.TargetVersion)); err != nil {
+		if err := mtree.catchupWAL(wl, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
 	}
@@ -265,9 +273,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			}
 		}
 
-		// truncate the WAL
+		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
 		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := walLog.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
+		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
 			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 
@@ -296,7 +304,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    walLog,
+		wal:                    wl,
+		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
@@ -691,7 +700,7 @@ func (db *DB) pruneSnapshots() {
 	db.pruneSnapshotLock.Lock()
 
 	initialVersion := db.initialVersion
-	wal := db.wal
+	wal := db.walWriter
 	if wal == nil {
 		db.pruneSnapshotLock.Unlock()
 		return
@@ -773,7 +782,7 @@ func (db *DB) Commit() (int64, error) {
 	}
 
 	// write logs if enabled
-	if db.wal != nil {
+	if db.walWriter != nil {
 		entry := walEntry{index: walIndex(v, db.initialVersion), data: db.pendingLog}
 		if db.walChanSize >= 0 {
 			if db.walChan == nil {
@@ -1102,8 +1111,9 @@ func (db *DB) Close() error {
 	// copies have no wal; nil it so a second Close doesn't return wal.ErrClosed.
 	if db.wal != nil {
 		errs = append(errs, db.wal.Close())
-		db.wal = nil
 	}
+	db.wal = nil
+	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
 		errs = append(errs, db.retiredMultiTree.Close())
@@ -1269,7 +1279,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (writeAheadLog, uint32, int64, int64, error) {
+func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
@@ -1279,7 +1289,7 @@ func (db *DB) walStateForRead() (writeAheadLog, uint32, int64, int64, error) {
 	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog writeAheadLog, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1560,6 +1570,9 @@ func GetLatestVersion(dir string) (int64, error) {
 	if err := wl.Close(); err != nil {
 		return 0, err
 	}
+	if lastIndex == 0 {
+		return metadata.CommitInfo.Version, nil
+	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
 }
 
@@ -1585,27 +1598,27 @@ func channelBatchRecv[T any](ch <-chan *T) []*T {
 func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 	defer batch.Clear()
 
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walWriter.LastIndex()
 	if err != nil {
 		return err
 	}
 
 	written := false
 	for _, entry := range entries {
-		ok, err := writeEntry(batch, db.wal, lastIndex, entry)
+		ok, err := writeEntry(batch, db.walWriter, lastIndex, entry)
 		if err != nil {
 			return err
 		}
 		written = written || ok
 	}
 	if written {
-		if err := db.wal.WriteBatch(batch); err != nil {
+		if err := db.walWriter.WriteBatch(batch); err != nil {
 			return err
 		}
 	}
 	// sync even a pure replay: the process that wrote those entries may have
 	// crashed before its own fsync.
-	if err := db.walSync(db.wal); err != nil {
+	if err := db.walSync(db.walWriter); err != nil {
 		return err
 	}
 	// walSync only fsyncs the segment file; a freshly cycled segment also needs
@@ -1614,7 +1627,7 @@ func (db *DB) writeAndSyncWAL(batch *wal.Batch, entries []*walEntry) error {
 }
 
 // writeEntry reports whether it added entry to batch.
-func writeEntry(batch *wal.Batch, log writeAheadLog, lastIndex uint64, entry *walEntry) (bool, error) {
+func writeEntry(batch *wal.Batch, log walReader, lastIndex uint64, entry *walEntry) (bool, error) {
 	bz, err := entry.data.Marshal()
 	if err != nil {
 		return false, err

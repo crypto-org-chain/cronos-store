@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -154,6 +155,8 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			return nil
 		}
 	}
+	// a length prefix of 9 followed by only 3 bytes: an entry the writer is still appending.
+	tornEntry := append(binary.AppendUvarint(nil, 9), "ent"...)
 
 	testCases := []struct {
 		name       string
@@ -179,7 +182,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			malleate: func() {
 				f, err := os.OpenFile(s.segmentPath(16, ""), os.O_APPEND|os.O_WRONLY, 0)
 				s.Require().NoError(err)
-				_, err = f.Write(append(binary.AppendUvarint(nil, 9), "ent"...))
+				_, err = f.Write(tornEntry)
 				s.Require().NoError(err)
 				s.Require().NoError(f.Close())
 			},
@@ -197,6 +200,20 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), nil, 0o600)) },
 			expFirst: 1,
 			expLast:  roWALEntries,
+		},
+		{
+			name:     "torn-only tail after a segment cycle",
+			malleate: func() { s.Require().NoError(os.WriteFile(s.segmentPath(roWALEntries+1, ""), tornEntry, 0o600)) },
+			expFirst: 1,
+			expLast:  roWALEntries,
+		},
+		{
+			// no entry is complete yet, so the log is empty.
+			name: "only segment torn",
+			malleate: func() {
+				s.dir = s.T().TempDir()
+				s.Require().NoError(os.WriteFile(s.segmentPath(1, ""), tornEntry, 0o600))
+			},
 		},
 		{
 			name: "non-segment names skipped",
@@ -333,5 +350,39 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			s.Require().NoError(l.Close())
 			s.Require().Equal(before, snapshotDir(s.T(), s.dir))
 		})
+	}
+}
+
+func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
+	l, err := openReadOnlyWAL(s.dir)
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(l.Close()) }()
+
+	const readers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, readers)
+	for g := uint64(1); g <= readers; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// different strides keep readers evicting each other's cached segment.
+			for n := uint64(0); n < roWALEntries*10; n++ {
+				i := n*g%roWALEntries + 1
+				data, err := l.Read(i)
+				if err != nil {
+					errs <- fmt.Errorf("index %d: %w", i, err)
+					return
+				}
+				if string(data) != string(roWALEntry(i)) {
+					errs <- fmt.Errorf("index %d: got %q", i, data)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		s.Require().NoError(err)
 	}
 }

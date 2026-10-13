@@ -58,7 +58,7 @@ func truncateCorruptedTail(path string, format wal.LogFormat) error {
 		if format == wal.JSON {
 			n, err = loadNextJSONEntry(data)
 		} else {
-			n, err = loadNextBinaryEntry(data)
+			n, _, err = loadNextBinaryEntry(data)
 		}
 		if errors.Is(err, wal.ErrCorrupt) {
 			break
@@ -89,16 +89,17 @@ func loadNextJSONEntry(data []byte) (n int, err error) {
 	return idx + 1, nil
 }
 
-func loadNextBinaryEntry(data []byte) (n int, err error) {
+// loadNextBinaryEntry returns the entry's total length and the length of its size prefix.
+func loadNextBinaryEntry(data []byte) (n, header int, err error) {
 	// data_size + data
-	size, n := binary.Uvarint(data)
-	if n <= 0 {
-		return 0, wal.ErrCorrupt
+	size, header := binary.Uvarint(data)
+	if header <= 0 {
+		return 0, 0, wal.ErrCorrupt
 	}
-	if uint64(len(data)-n) < size {
-		return 0, wal.ErrCorrupt
+	if uint64(len(data)-header) < size {
+		return 0, 0, wal.ErrCorrupt
 	}
-	return n + int(size), nil
+	return header + int(size), header, nil
 }
 
 const (
@@ -108,22 +109,25 @@ const (
 	readOnlyWALOpenAttempts = 3
 )
 
-// writeAheadLog is the WAL API used by DB, backed by *wal.Log when writable and
-// by readOnlyWAL when read-only.
-type writeAheadLog interface {
+type walReader interface {
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
 	Read(index uint64) ([]byte, error)
+	Close() error
+}
+
+// writeAheadLog is the writable WAL held by a read-write DB.
+type writeAheadLog interface {
+	walReader
 	WriteBatch(b *wal.Batch) error
 	TruncateFront(index uint64) error
 	TruncateBack(index uint64) error
 	Sync() error
-	Close() error
 }
 
 var (
 	_ writeAheadLog = (*wal.Log)(nil)
-	_ writeAheadLog = (*readOnlyWAL)(nil)
+	_ walReader     = (*readOnlyWAL)(nil)
 )
 
 // readOnlyWAL reads a binary-format WAL that a live writer may be appending to
@@ -173,7 +177,8 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 		return nil, err
 	}
 	l.firstIndex = segments[0].index
-	// an empty tail (just cycled) ends the log at the previous segment; 0 means an empty log, as in wal.Log.
+	// tail.index >= 1 (listWALSegments skips 0), so an empty tail (just cycled) ends the log at the
+	// previous segment without wrapping; 0 means an empty log, as in wal.Log.
 	l.lastIndex = tail.index + uint64(len(tail.entries)) - 1
 	return l, nil
 }
@@ -183,6 +188,7 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 func listWALSegments(dir string) ([]*walSegment, error) {
 	dirEntries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
+		// an empty log, as wal.Open would create.
 		return nil, nil
 	}
 	if err != nil {
@@ -243,11 +249,10 @@ func readWALEntries(path string) (entries [][]byte, torn bool, err error) {
 		return nil, false, err
 	}
 	for len(data) > 0 {
-		n, err := loadNextBinaryEntry(data)
+		n, header, err := loadNextBinaryEntry(data)
 		if err != nil {
 			return entries, true, nil
 		}
-		_, header := binary.Uvarint(data)
 		entries = append(entries, data[header:n:n])
 		data = data[n:]
 	}
@@ -281,8 +286,11 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// the tail is loaded at open and never evicted, so only older segments need the lock.
+	if seg != l.segments[len(l.segments)-1] {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+	}
 	if seg.entries == nil {
 		entries, torn, err := readWALEntries(seg.path)
 		if err != nil {
@@ -303,11 +311,6 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	}
 	return seg.entries[offset], nil
 }
-
-func (*readOnlyWAL) WriteBatch(*wal.Batch) error { return errReadOnly }
-func (*readOnlyWAL) TruncateFront(uint64) error  { return errReadOnly }
-func (*readOnlyWAL) TruncateBack(uint64) error   { return errReadOnly }
-func (*readOnlyWAL) Sync() error                 { return errReadOnly }
 
 func (l *readOnlyWAL) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {

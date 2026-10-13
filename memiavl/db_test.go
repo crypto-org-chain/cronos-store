@@ -733,7 +733,7 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	// so WALEntry.Unmarshal reliably rejects it as corrupt.
 	var batch wal.Batch
 	batch.Write(corruptIndex, []byte("not a valid WALEntry"))
-	require.NoError(t, db.wal.WriteBatch(&batch))
+	require.NoError(t, db.walWriter.WriteBatch(&batch))
 
 	return walVersion(corruptIndex, db.initialVersion)
 }
@@ -1851,6 +1851,54 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
+	testCases := []struct {
+		name       string
+		malleate   func(t *testing.T, dir string)
+		expVersion int64
+	}{
+		{
+			// a state-sync restore leaves a snapshot and no wal entries.
+			name: "snapshot without wal entries",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Close())
+				require.NoError(t, os.RemoveAll(walPath(dir)))
+			},
+			expVersion: 3,
+		},
+		{
+			name: "nothing committed with initial version above 1",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, InitialVersion: 100}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+			expVersion: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.malleate(t, dir)
+
+			version, err := GetLatestVersion(dir)
+			require.NoError(t, err)
+			require.Equal(t, tc.expVersion, version)
+		})
+	}
+}
+
 func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
@@ -2131,28 +2179,9 @@ func TestLoadReleasesResourcesOnWALFailure(t *testing.T) {
 	}
 }
 
-// errorLogger records Error messages, e.g. a failed WAL TruncateFront in the prune goroutine.
-type errorLogger struct {
-	nopLogger
-	mu   sync.Mutex
-	msgs []string
-}
-
-func (l *errorLogger) Error(msg string, keyvals ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.msgs = append(l.msgs, fmt.Sprint(msg, keyvals))
-}
-
-func (l *errorLogger) Messages() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]string(nil), l.msgs...)
-}
-
 func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	dir := t.TempDir()
-	logger := &errorLogger{}
+	logger := &recordingLogger{}
 	db, err := Load(dir, Options{
 		Logger:             logger,
 		CreateIfMissing:    true,
@@ -2252,9 +2281,7 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	lastHash := db.TreeByName(testStoreName).RootHash()
 	writerClosed = true
 	require.NoError(t, db.Close())
-	for _, msg := range logger.Messages() {
-		require.NotContains(t, msg, "failed to truncate wal")
-	}
+	require.NotContains(t, logger.Errors(), "failed to truncate wal")
 
 	reopened, err := Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
