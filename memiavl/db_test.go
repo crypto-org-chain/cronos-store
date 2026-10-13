@@ -1667,28 +1667,9 @@ func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
 	}
 }
 
-// errorLogger records Error messages, e.g. a failed WAL TruncateFront in the prune goroutine.
-type errorLogger struct {
-	nopLogger
-	mu   sync.Mutex
-	msgs []string
-}
-
-func (l *errorLogger) Error(msg string, keyvals ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.msgs = append(l.msgs, fmt.Sprint(msg, keyvals))
-}
-
-func (l *errorLogger) Messages() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]string(nil), l.msgs...)
-}
-
 func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	dir := t.TempDir()
-	logger := &errorLogger{}
+	logger := &recordingLogger{}
 	db, err := Load(dir, Options{
 		Logger:             logger,
 		CreateIfMissing:    true,
@@ -1789,9 +1770,7 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	lastHash := db.TreeByName(testStoreName).RootHash()
 	writerClosed = true
 	require.NoError(t, db.Close())
-	for _, msg := range logger.Messages() {
-		require.NotContains(t, msg, "failed to truncate wal")
-	}
+	require.NotContains(t, logger.Errors(), "failed to truncate wal")
 
 	reopened, err := Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
