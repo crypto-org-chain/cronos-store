@@ -11,7 +11,7 @@ import (
 func TestFlushedFilesAreCompressed(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	var raw int
 	ch := make(chan versiondb.ImportEntry, 20_000)
