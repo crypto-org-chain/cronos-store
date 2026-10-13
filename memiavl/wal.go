@@ -108,21 +108,24 @@ const (
 	readOnlyWALOpenAttempts = 3
 )
 
-// writeAheadLog is the WAL API used by DB, backed by *wal.Log when writable and
-// by readOnlyWAL when read-only.
-type writeAheadLog interface {
+type walReader interface {
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
 	Read(index uint64) ([]byte, error)
+	Close() error
+}
+
+// writeAheadLog is the writable WAL held by a read-write DB.
+type writeAheadLog interface {
+	walReader
 	WriteBatch(b *wal.Batch) error
 	TruncateFront(index uint64) error
 	TruncateBack(index uint64) error
-	Close() error
 }
 
 var (
 	_ writeAheadLog = (*wal.Log)(nil)
-	_ writeAheadLog = (*readOnlyWAL)(nil)
+	_ walReader     = (*readOnlyWAL)(nil)
 )
 
 // readOnlyWAL reads a binary-format WAL that a live writer may be appending to
@@ -302,10 +305,6 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	}
 	return seg.entries[offset], nil
 }
-
-func (*readOnlyWAL) WriteBatch(*wal.Batch) error { return errReadOnly }
-func (*readOnlyWAL) TruncateFront(uint64) error  { return errReadOnly }
-func (*readOnlyWAL) TruncateBack(uint64) error   { return errReadOnly }
 
 func (l *readOnlyWAL) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {

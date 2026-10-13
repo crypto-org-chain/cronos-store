@@ -702,7 +702,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.catchupWAL(db.wal, -1), "negative endVersion must return an error")
 }
 
 // corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
@@ -718,7 +718,7 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	// so WALEntry.Unmarshal reliably rejects it as corrupt.
 	var batch wal.Batch
 	batch.Write(corruptIndex, []byte("not a valid WALEntry"))
-	require.NoError(t, db.wal.WriteBatch(&batch))
+	require.NoError(t, db.walWriter.WriteBatch(&batch))
 
 	return walVersion(corruptIndex, db.initialVersion)
 }
