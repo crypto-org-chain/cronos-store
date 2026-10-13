@@ -970,12 +970,13 @@ func (db *DB) Close() error {
 	db.pruneSnapshotLock.Lock()
 	defer db.pruneSnapshotLock.Unlock()
 
-	errs = append(errs,
-		db.MultiTree.Close(),
-		db.wal.Close(),
-	)
+	errs = append(errs, db.MultiTree.Close())
 
-	db.wal = nil
+	// nil after a previous Close
+	if db.wal != nil {
+		errs = append(errs, db.wal.Close())
+		db.wal = nil
+	}
 	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
