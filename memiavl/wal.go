@@ -176,7 +176,8 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 		return nil, err
 	}
 	l.firstIndex = segments[0].index
-	// an empty tail (just cycled) ends the log at the previous segment; 0 means an empty log, as in wal.Log.
+	// tail.index >= 1 (listWALSegments skips 0), so an empty tail (just cycled) ends the log at the
+	// previous segment without wrapping; 0 means an empty log, as in wal.Log.
 	l.lastIndex = tail.index + uint64(len(tail.entries)) - 1
 	return l, nil
 }
@@ -186,6 +187,7 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 func listWALSegments(dir string) ([]*walSegment, error) {
 	dirEntries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
+		// an empty log, as wal.Open would create.
 		return nil, nil
 	}
 	if err != nil {

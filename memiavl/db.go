@@ -242,7 +242,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 			}
 		}
 
-		// truncate the WAL
+		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
 		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
 		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
 			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
