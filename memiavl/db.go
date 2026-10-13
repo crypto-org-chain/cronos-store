@@ -1421,6 +1421,9 @@ func GetLatestVersion(dir string) (int64, error) {
 	if err := wl.Close(); err != nil {
 		return 0, err
 	}
+	if lastIndex == 0 {
+		return metadata.CommitInfo.Version, nil
+	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
 }
 
