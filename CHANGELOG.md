@@ -4,6 +4,7 @@
 
 - [#105](https://github.com/crypto-org-chain/cronos-store/pull/105) fix(store): publish copy-on-write trees to the mounted stores
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
+- [#129](https://github.com/crypto-org-chain/cronos-store/pull/129) fix(memiavl): close loaded MultiTree when Close drains a finished snapshot rewrite
 - [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
 
 ## v1.9.0
