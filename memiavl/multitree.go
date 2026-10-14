@@ -488,9 +488,7 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 	return t.WriteMetadata(dir, &t.lastCommitInfo)
 }
 
-// WriteMetadata writes the metadata file that loadMultiTree validates a snapshot
-// directory against. commitInfo overrides the tree's own, for callers that wrote a
-// subset of the trees and computed the commit info themselves.
+// WriteMetadata writes the snapshot metadata with commitInfo in place of the tree's own.
 func (t *MultiTree) WriteMetadata(dir string, commitInfo *CommitInfo) error {
 	metadata := MultiTreeMetadata{
 		CommitInfo:     commitInfo,
