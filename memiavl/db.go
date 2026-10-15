@@ -160,7 +160,7 @@ const (
 	SnapshotDirLen = len(SnapshotPrefix) + 20
 )
 
-func Load(dir string, opts Options, chainId string) (*DB, error) {
+func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	if err := opts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid options: %w", err)
 	}
@@ -175,7 +175,26 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	var (
 		err      error
 		fileLock FileLock
+		mtree    *MultiTree
+		walLog   walReader
 	)
+	// until the DB takes ownership, an early return would leak the lock, mmaps
+	// and wal fds, and a retried Load could never re-lock the dir.
+	ownershipMoved := false
+	defer func() {
+		if ownershipMoved {
+			return
+		}
+		if mtree != nil {
+			retErr = errors.Join(retErr, mtree.Close())
+		}
+		if walLog != nil {
+			retErr = errors.Join(retErr, walLog.Close())
+		}
+		if fileLock != nil {
+			retErr = errors.Join(retErr, fileLock.Unlock(), fileLock.Destroy())
+		}
+	}()
 	if !opts.ReadOnly {
 		fileLock, err = LockFile(filepath.Join(dir, LockFileName))
 		if err != nil {
@@ -199,7 +218,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	path := filepath.Join(dir, snapshot)
-	mtree, err := LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
 	if err != nil {
 		return nil, err
 	}
@@ -218,12 +237,14 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		}
 	}
 	if err != nil {
-		return nil, errors.Join(err, mtree.Close())
+		return nil, err
 	}
+	// assigned only on success: a typed nil would pass the cleanup's nil check.
+	walLog = reader
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, reader.Close(), mtree.Close())
+			return nil, err
 		}
 	}
 
@@ -280,6 +301,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
 	}
+	ownershipMoved = true
 	db.attachTraverseStateChanges()
 
 	if !db.readOnly && db.Version() == 0 && len(opts.InitialStores) > 0 {
