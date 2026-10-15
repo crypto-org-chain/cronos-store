@@ -558,7 +558,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 }
 
 // acquireForVersion returns the published snapshot, with a reference to release, when
-// version is 0 or its height, and nil when version is an older height to load from disk.
+// version is 0 or its height, and (nil, nil) for any other height, which callers load from disk.
 func (rs *Store) acquireForVersion(version int64) (*querySnapshot, error) {
 	snap := rs.acquireQuerySnapshot()
 	if snap == nil {
