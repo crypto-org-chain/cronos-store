@@ -3,7 +3,6 @@
 ## UNRELEASED
 
 - [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fsync WAL entry before acknowledging Commit
-- [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
 - [#137](https://github.com/crypto-org-chain/cronos-store/pull/137) fix(versiondb): compress flushed sst files

@@ -488,22 +488,6 @@ func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-
-	key := types.NewKVStoreKey("test")
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
-
-	require.NoError(t, rs.SetInitialVersion(5))
-	require.Equal(t, int64(5), rs.EarliestVersion())
-
-	commitID := rs.Commit()
-	require.Equal(t, int64(5), commitID.Version)
-	require.Equal(t, int64(5), rs.LatestVersion())
-}
-
 func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
 	store, versions := newTestStore(t, 2)
 	defer store.Close()
@@ -886,6 +870,22 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	require.Zero(t, rs.LatestVersion())
 	require.Empty(t, rs.LastCommitID().Hash, "no db is loaded, so no hash may be reported")
 	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
+}
+
+func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey("test")
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+
+	require.NoError(t, rs.SetInitialVersion(5))
+	require.Equal(t, int64(5), rs.EarliestVersion())
+
+	commitID := rs.Commit()
+	require.Equal(t, int64(5), commitID.Version)
+	require.Equal(t, int64(5), rs.LatestVersion())
 }
 
 func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
