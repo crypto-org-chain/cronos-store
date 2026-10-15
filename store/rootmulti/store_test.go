@@ -418,6 +418,57 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
+func TestCacheMultiStoreWriteBack(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey("test")
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+
+	cms := rs.CacheMultiStore()
+	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	cms.Write()
+
+	rs.Commit()
+
+	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
+}
+
+func TestCloseClearsQuerySnapshot(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	rs.Commit()
+
+	require.NoError(t, rs.Close())
+	require.Nil(t, rs.querySnapshot.Load(), "Close must drop the querySnapshot before closing rs.db")
+}
+
+func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+	rs.AddListeners([]types.StoreKey{key})
+
+	rs.Commit()
+
+	cms, err := rs.CacheMultiStoreWithVersion(0)
+	require.NoError(t, err)
+	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	cms.Write()
+
+	// the dropped write must not reach the listener stream either.
+	require.Empty(t, rs.listeners[key].PopStateCache())
+	rs.Commit()
+	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
+}
+
 func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
 	store, versions := newTestStore(t, 2)
 	defer store.Close()
@@ -739,6 +790,29 @@ func TestCacheMultiStoreWithVersionHistoricalHeightSkipsDeletedStore(t *testing.
 	cms, err := store.CacheMultiStoreWithVersion(1)
 	require.NoError(t, err)
 	require.NotPanics(t, func() { cms.GetKVStore(testKey) })
+}
+
+func TestReadPathsWithClosedDB(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	rs.Commit()
+
+	// Restore's teardown.
+	require.NoError(t, rs.closeDB())
+
+	require.NotPanics(t, func() {
+		require.Zero(t, rs.LatestVersion())
+		require.Zero(t, rs.EarliestVersion())
+
+		_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+		require.ErrorContains(t, err, "store is not loaded")
+
+		_, err = rs.CacheMultiStoreWithVersion(0)
+		require.ErrorContains(t, err, "store is not loaded")
+	})
 }
 
 func TestRestoreFailureTearsDownReadState(t *testing.T) {
