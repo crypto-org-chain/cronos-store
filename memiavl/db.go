@@ -795,11 +795,14 @@ func (db *DB) waitAsyncCommit() error {
 	return db.latchWalErr(err)
 }
 
+// Copy returns a read-only copy: it has no WAL, so its own commits would never persist.
 func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	cloned := db.copy(db.cacheSize)
+	cloned.readOnly = true
+	return cloned
 }
 
 func (db *DB) copy(cacheSize int) *DB {

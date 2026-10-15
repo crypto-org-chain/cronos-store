@@ -324,6 +324,51 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestCopyRejectsWrites(t *testing.T) {
+	writes := []struct {
+		name  string
+		write func(cp *DB) error
+	}{
+		{"ApplyChangeSets", func(cp *DB) error {
+			return cp.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2"))
+		}},
+		{"Commit", func(cp *DB) error { _, err := cp.Commit(); return err }},
+		{"SetInitialVersion", func(cp *DB) error { return cp.SetInitialVersion(100) }},
+		{"ApplyUpgrades", func(cp *DB) error { return cp.ApplyUpgrades([]*TreeNameUpgrade{{Name: "new"}}) }},
+		{"RewriteSnapshot", func(cp *DB) error { return cp.RewriteSnapshot() }},
+		{"RewriteSnapshotBackground", func(cp *DB) error { return cp.RewriteSnapshotBackground() }},
+	}
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			_, err = db.Commit()
+			require.NoError(t, err)
+			if readOnly {
+				require.NoError(t, db.Close())
+				db, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+			}
+			defer func() { require.NoError(t, db.Close()) }()
+			current, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+
+			for _, w := range writes {
+				t.Run(w.name, func(t *testing.T) {
+					require.ErrorIs(t, w.write(db.Copy()), errReadOnly)
+				})
+			}
+			// a copy of a read-only DB must not swap the live snapshot.
+			after, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+			require.Equal(t, current, after)
+			require.Equal(t, int64(1), db.Version())
+		})
+	}
+}
+
 func TestCloseDuringSnapshotPrune(t *testing.T) {
 	for iter := 0; iter < 50; iter++ {
 		db, err := Load(t.TempDir(), Options{
