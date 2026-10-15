@@ -89,7 +89,9 @@ type DB struct {
 	// - The DB for the state machine will handle writes through the Commit call,
 	//   this method is the sole entry point for tree modifications, and there's no concurrency internally
 	//   (the background snapshot rewrite is handled separately), so we don't need locks in the Tree.
-	mtx                 sync.Mutex
+	mtx sync.Mutex
+
+	// max concurrent tree writers within one snapshot write.
 	snapshotWriterLimit int
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
@@ -125,6 +127,7 @@ type Options struct {
 	// it do nothing if the target version is `0`.
 	LoadForOverwriting bool
 
+	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.
 	SnapshotWriterLimit int
 }
 
