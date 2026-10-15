@@ -70,7 +70,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         *wal.Log
+	walReader   walReader
+	walWriter   writeAheadLog // on a read-write DB, the same log as walReader; nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -203,14 +204,26 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		return nil, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	var (
+		reader walReader
+		writer writeAheadLog
+	)
+	if opts.ReadOnly {
+		// a live writer may own the WAL, so it must not be repaired from here.
+		reader, err = openReadOnlyWAL(walPath(dir))
+	} else {
+		var writable *wal.Log
+		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
+			reader, writer = writable, writable
+		}
+	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, mtree.Close())
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.CatchupWAL(wal, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wal.Close())
+		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
+			return nil, errors.Join(err, reader.Close(), mtree.Close())
 		}
 	}
 
@@ -228,9 +241,9 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 			}
 		}
 
-		// truncate the WAL
+		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
 		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := wal.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
+		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
 			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 
@@ -259,7 +272,8 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wal,
+		walReader:              reader,
+		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
@@ -514,7 +528,10 @@ func (db *DB) latchWalErr(err error) error {
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
 func (db *DB) CommittedVersion() (int64, error) {
-	lastIndex, err := db.wal.LastIndex()
+	if db.walReader == nil {
+		return 0, wal.ErrClosed
+	}
+	lastIndex, err := db.walReader.LastIndex()
 	if err != nil {
 		return 0, err
 	}
@@ -569,7 +586,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		}
 
 		// catchup the remaining wal
-		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
+		if err := result.mtree.catchupWAL(db.walReader, 0); err != nil {
 			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
 		}
 
@@ -597,7 +614,7 @@ func (db *DB) pruneSnapshots() {
 	db.pruneSnapshotLock.Lock()
 
 	initialVersion := db.initialVersion
-	wal := db.wal
+	wal := db.walWriter
 	if wal == nil {
 		db.pruneSnapshotLock.Unlock()
 		return
@@ -676,7 +693,7 @@ func (db *DB) Commit() (int64, error) {
 	}
 
 	// write logs if enabled
-	if db.wal != nil {
+	if db.walWriter != nil {
 		entry := walEntry{index: walIndex(v, db.initialVersion), data: db.pendingLog}
 		if db.walChanSize >= 0 {
 			if db.walChan == nil {
@@ -694,7 +711,7 @@ func (db *DB) Commit() (int64, error) {
 				return 0, db.walErr
 			}
 		} else {
-			lastIndex, err := db.wal.LastIndex()
+			lastIndex, err := db.walWriter.LastIndex()
 			if err != nil {
 				return 0, err
 			}
@@ -704,7 +721,7 @@ func (db *DB) Commit() (int64, error) {
 				return 0, err
 			}
 
-			if err := db.wal.WriteBatch(&db.wbatch); err != nil {
+			if err := db.walWriter.WriteBatch(&db.wbatch); err != nil {
 				return 0, err
 			}
 		}
@@ -739,7 +756,7 @@ func (db *DB) initAsyncCommit() {
 				break
 			}
 
-			lastIndex, err := db.wal.LastIndex()
+			lastIndex, err := db.walWriter.LastIndex()
 			if err != nil {
 				walQuit <- err
 				return
@@ -752,7 +769,7 @@ func (db *DB) initAsyncCommit() {
 				}
 			}
 
-			if err := db.wal.WriteBatch(&batch); err != nil {
+			if err := db.walWriter.WriteBatch(&batch); err != nil {
 				walQuit <- err
 				return
 			}
@@ -936,7 +953,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	db.snapshotRewriteCancel = cancel
 
 	cloned := db.copy(0, true)
-	wal := db.wal
+	wal := db.walReader
 	logger, dir, version := db.logger, db.dir, cloned.Version()
 	zeroCopy, cacheSize, chainID := db.zeroCopy, db.cacheSize, db.chainId
 	go func() {
@@ -962,7 +979,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 		}
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
-		if err := mtree.CatchupWAL(wal, 0); err != nil {
+		if err := mtree.catchupWAL(wal, 0); err != nil {
 			ch <- snapshotResult{err: errors.Join(err, mtree.Close())}
 			return
 		}
@@ -997,11 +1014,12 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// copies have no wal
-	if db.wal != nil {
-		errs = append(errs, db.wal.Close())
-		db.wal = nil
+	// copies have no wal, and a previous Close nils it.
+	if db.walReader != nil {
+		errs = append(errs, db.walReader.Close())
 	}
+	db.walReader = nil
+	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
 		errs = append(errs, db.retiredMultiTree.Close())
@@ -1167,17 +1185,17 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
+func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	if db.wal == nil {
+	if db.walReader == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1435,16 +1453,19 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true})
+	reader, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wal.Close())
+		return 0, errors.Join(err, reader.Close())
 	}
-	if err := wal.Close(); err != nil {
+	if err := reader.Close(); err != nil {
 		return 0, err
+	}
+	if lastIndex == 0 {
+		return metadata.CommitInfo.Version, nil
 	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
 }
