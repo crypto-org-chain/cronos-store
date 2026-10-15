@@ -311,6 +311,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
 		}
 		if err := db.ApplyUpgrades(upgrades); err != nil {
+			// the DB owns the lock, tree and WAL now, so Close releases them.
 			return nil, errors.Join(err, db.Close())
 		}
 	}

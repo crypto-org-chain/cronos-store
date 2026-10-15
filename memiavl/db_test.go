@@ -1779,8 +1779,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			needsNonRoot: true,
 			malleate: func(t *testing.T, dir string, _ *DB) Options {
 				t.Helper()
-				// TruncateBack can't create its TEMP segment in a read-only wal dir; tidwall/wal
-				// then reports the rename of that missing file.
+				// a read-only wal dir fails TruncateBack.
 				require.NoError(t, os.Chmod(walPath(dir), 0o500))
 				t.Cleanup(func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) })
 				return Options{TargetVersion: 2, LoadForOverwriting: true}
@@ -1829,8 +1828,10 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 
 			_, err := Load(dir, opts, TestAppChainID)
 			require.ErrorContains(t, err, tc.expErr)
-			// a failed or repeated cleanup would be joined in as extra lines.
-			require.NotContains(t, err.Error(), "\n", "cleanup must release everything exactly once")
+			// a repeated cleanup would join these close errors into the returned one.
+			for _, closed := range []error{wal.ErrClosed, os.ErrClosed, syscall.EBADF} {
+				require.NotErrorIs(t, err, closed, "cleanup must release everything exactly once")
+			}
 			require.Equal(t, before, countOpenFDsUnder(t, dir), "the loaded snapshot, wal and lock files must be closed")
 
 			lock, err := LockFile(filepath.Join(dir, LockFileName))
