@@ -75,7 +75,6 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 			changeSetDir := args[0]
 
-			// deferred before StopAndWait so it runs after: workers read the snapshot's mmap zero-copy.
 			var mtree *memiavl.MultiTree
 			defer func() {
 				if mtree != nil {
@@ -95,6 +94,8 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				}
 			}
 
+			// without a snapshot to write, each worker's tree is released when it returns.
+			keepTrees := len(saveSnapshot) > 0
 			verified := make([]verifiedStore, len(stores))
 			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
 				store := stores[i]
@@ -113,7 +114,10 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					return nil
 				}
 				// hashed in the worker; the bump below only adds empty versions, so the hash holds.
-				verified[i] = verifiedStore{name: store, tree: tree, hash: tree.RootHash()}
+				verified[i] = verifiedStore{name: store, version: tree.Version(), hash: tree.RootHash()}
+				if keepTrees {
+					verified[i].tree = tree
+				}
 				return nil
 			})
 			if err != nil {
@@ -121,25 +125,25 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			}
 
 			verified = slices.DeleteFunc(verified, func(entry verifiedStore) bool {
-				return entry.tree == nil
+				return entry.name == ""
 			})
 
 			// a multitree snapshot needs every tree at one version, known only after Wait.
 			latestVersion := targetVersion
 			for _, entry := range verified {
-				if v := entry.tree.Version(); v > latestVersion {
-					latestVersion = v
-				}
+				latestVersion = max(latestVersion, entry.version)
 			}
 
 			storeInfos := make([]storetypes.StoreInfo, 0, len(verified))
 			for _, entry := range verified {
-				if err := advanceTreeVersion(entry.tree, latestVersion); err != nil {
-					return err
+				if entry.tree != nil {
+					if err := advanceTreeVersion(entry.tree, latestVersion); err != nil {
+						return err
+					}
 				}
 				storeInfos = append(storeInfos, storetypes.StoreInfo{
 					Name:     entry.name,
-					CommitId: storetypes.CommitID{Version: entry.tree.Version(), Hash: entry.hash},
+					CommitId: storetypes.CommitID{Version: latestVersion, Hash: entry.hash},
 				})
 			}
 
@@ -157,7 +161,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					return err
 				}
 
-				// keeps InitialVersion in the metadata, which loadMultiTree checks the trees against.
+				// keeps the loaded InitialVersion, which memiavl uses to map versions to WAL indexes.
 				if err := mtree.WriteMetadata(saveSnapshot, convertCommitInfo(&commitInfo)); err != nil {
 					return err
 				}
@@ -213,11 +217,12 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 	return cmd
 }
 
-// verifiedStore keeps its tree open until the final version is known.
+// verifiedStore holds one replayed store; tree is set only when its snapshot will be written.
 type verifiedStore struct {
-	name string
-	tree *memiavl.Tree
-	hash []byte
+	name    string
+	version int64
+	hash    []byte
+	tree    *memiavl.Tree
 }
 
 // verifyOneStore reports false without error if the store doesn't exist before targetVersion.

@@ -1,7 +1,9 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,6 +131,41 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 		tree := mtree.TreeByName(name)
 		require.NotNil(t, tree)
 		require.Equal(t, int64(3), tree.Version())
+	}
+}
+
+func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
+	changeSetDir := t.TempDir()
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{1, 2, 3})
+	writeStoreChangeSet(t, changeSetDir, barStore, []int64{1})
+
+	verify := func(extra ...string) []byte {
+		cmd := VerifyChangeSetCmd(nil)
+		cmd.SetArgs(append([]string{changeSetDir, "--" + flagStores, "foo bar", "--" + flagSave}, extra...))
+		require.NoError(t, cmd.Execute())
+		result := filepath.Join(changeSetDir, "verified-3")
+		bz, err := os.ReadFile(result)
+		require.NoError(t, err)
+		require.NoError(t, os.Remove(result))
+		return bz
+	}
+
+	// only the save path keeps and bumps the trees; both must report every store at version 3.
+	plain := verify()
+	require.Equal(t, plain, verify("--"+flagSaveSnapshot, filepath.Join(t.TempDir(), "snapshot")))
+
+	var info struct {
+		StoreInfos []struct {
+			CommitID struct {
+				Version string `json:"version"`
+			} `json:"commitId"`
+		} `json:"storeInfos"`
+	}
+	_, body, _ := bytes.Cut(plain, []byte("\n"))
+	require.NoError(t, json.Unmarshal(body, &info))
+	require.Len(t, info.StoreInfos, 2)
+	for _, si := range info.StoreInfos {
+		require.Equal(t, "3", si.CommitID.Version)
 	}
 }
 
