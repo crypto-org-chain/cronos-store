@@ -1727,7 +1727,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				require.NoError(t, os.Remove(filepath.Join(currentPath(dir), MetadataFileName)))
 				return Options{}
 			},
-			expErr: MetadataFileName,
+			expErr: MetadataFileName + ": no such file or directory",
 		},
 		{
 			name: "wal open fails",
@@ -1828,7 +1828,8 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 
 			_, err := Load(dir, opts, TestAppChainID)
 			require.ErrorContains(t, err, tc.expErr)
-			// a repeated cleanup would join these close errors into the returned one.
+			// a repeated cleanup would join these WAL and lock close errors into the returned
+			// one; closing the tree twice is a harmless no-op.
 			for _, closed := range []error{wal.ErrClosed, os.ErrClosed, syscall.EBADF} {
 				require.NotErrorIs(t, err, closed, "cleanup must release everything exactly once")
 			}
