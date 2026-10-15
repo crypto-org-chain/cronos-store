@@ -362,11 +362,15 @@ func commitInfoEqual(trusted, actual *CommitInfo) error {
 // CatchupWAL replay the new entries in the WAL on the tree to catch-up to the target or latest version.
 // endVersion == 0 means "to the latest version"; a negative endVersion returns an error.
 func (t *MultiTree) CatchupWAL(wal *wal.Log, endVersion int64) error {
+	return t.catchupWAL(wal, endVersion)
+}
+
+func (t *MultiTree) catchupWAL(reader walReader, endVersion int64) error {
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
 
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
 		return fmt.Errorf("read wal last index failed, %w", err)
 	}
@@ -393,7 +397,7 @@ func (t *MultiTree) CatchupWAL(wal *wal.Log, endVersion int64) error {
 	}
 
 	for i := firstIndex; i <= endIndex; i++ {
-		bz, err := wal.Read(i)
+		bz, err := reader.Read(i)
 		if err != nil {
 			return fmt.Errorf("read wal log failed, %w", err)
 		}

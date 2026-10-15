@@ -3,6 +3,8 @@
 ## UNRELEASED
 
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot
+- [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
+- [#137](https://github.com/crypto-org-chain/cronos-store/pull/137) fix(versiondb): compress flushed sst files
 - [#130](https://github.com/crypto-org-chain/cronos-store/pull/130) fix(memiavl): close opened trees on LoadMultiTree failure and lock file on LockFile failure
 - [#129](https://github.com/crypto-org-chain/cronos-store/pull/129) fix(memiavl): close loaded MultiTree when Close drains a finished snapshot rewrite
 - [#135](https://github.com/crypto-org-chain/cronos-store/pull/135) fix(memiavl): fail the snapshot rewrite when a tree write panics
