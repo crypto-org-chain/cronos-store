@@ -178,8 +178,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		mtree    *MultiTree
 		walLog   walReader
 	)
-	// until the DB takes ownership, an early return would leak the lock, mmaps
-	// and wal fds, and a retried Load could never re-lock the dir.
+	// until the DB takes ownership, an early return would leak the lock, the
+	// snapshot's mmaps and the WAL, and a retried Load could never re-lock the dir.
 	ownershipMoved := false
 	defer func() {
 		if ownershipMoved {

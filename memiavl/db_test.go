@@ -1689,7 +1689,9 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name     string
+		name string
+		// skip building a committed db first; malleate then gets a nil db.
+		emptyDir bool
 		malleate func(t *testing.T, dir string, db *DB) Options
 	}{
 		{
@@ -1763,30 +1765,56 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				return Options{TargetVersion: 3, LoadForOverwriting: true}
 			},
 		},
+		{
+			name: "rollback wal truncation fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				if os.Geteuid() == 0 {
+					t.Skip("root ignores directory permissions")
+				}
+				// TruncateBack writes a replacement segment, so a read-only wal dir fails it.
+				require.NoError(t, os.Chmod(walPath(dir), 0o500))
+				t.Cleanup(func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) })
+				return Options{TargetVersion: 2, LoadForOverwriting: true}
+			},
+		},
+		{
+			// the DB already owns its resources here, so Load must close it once, not twice.
+			name:     "initial upgrade fails",
+			emptyDir: true,
+			malleate: func(*testing.T, string, *DB) Options {
+				return Options{CreateIfMissing: true, InitialStores: []string{testStoreName, testStoreName}}
+			},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
-			require.NoError(t, err)
-			for i := 0; i < 3; i++ {
-				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
-				_, err := db.Commit()
+			var opts Options
+			if tc.emptyDir {
+				opts = tc.malleate(t, dir, nil)
+			} else {
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
 				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				// the genesis snapshot is empty and maps no files.
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Reload())
+				require.NoError(t, db.WaitAsyncCommit())
+				opts = tc.malleate(t, dir, db)
+				require.NoError(t, db.Close())
 			}
-			// the genesis snapshot is empty and maps no files.
-			require.NoError(t, db.RewriteSnapshot())
-			require.NoError(t, db.Reload())
-			require.NoError(t, db.WaitAsyncCommit())
-			opts := tc.malleate(t, dir, db)
-			require.NoError(t, db.Close())
 
 			// a GC-run finalizer could close a leaked fd and hide the leak.
 			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 			before := countOpenFDsUnder(t, dir)
 
-			_, err = Load(dir, opts, TestAppChainID)
+			_, err := Load(dir, opts, TestAppChainID)
 			require.Error(t, err)
 			require.Equal(t, before, countOpenFDsUnder(t, dir), "the loaded snapshot, wal and lock files must be closed")
 
