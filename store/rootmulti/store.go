@@ -298,7 +298,10 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	info := rs.commitInfoFromDB(rs.db)
 	// no node cache: the snapshot is replaced every Commit, so it never warms up.
-	rs.replaceQuerySnapshot(newQuerySnapshot(rs.db.CopyWithCacheSize(0), info))
+	db := rs.db.CopyWithCacheSize(0)
+	// the last release can unmap this snapshot while a caller still holds a ResponseQuery referencing it.
+	db.SetZeroCopy(false)
+	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
 	// block execution reads the mounted stores, so they keep the node cache. Unpinned:
 	// readers hold no reference, so the copy lives as long as the DB maps the generation.
 	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
