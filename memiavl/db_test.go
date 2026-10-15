@@ -1464,6 +1464,7 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 			// historical-height queries open and close a read-only DB each time.
 			name: "read-only load",
 			cycle: func(t *testing.T) {
+				t.Helper()
 				db, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 				require.NoError(t, err)
 				require.NoError(t, db.Close())
@@ -1472,6 +1473,7 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 		{
 			name: "writable load with snapshot writes",
 			cycle: func(t *testing.T) {
+				t.Helper()
 				db, err := Load(dir, Options{}, TestAppChainID)
 				require.NoError(t, err)
 				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
