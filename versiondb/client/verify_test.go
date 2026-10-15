@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	fooStore = "foo"
-	barStore = "bar"
+	fooStore   = "foo"
+	barStore   = "bar"
+	bothStores = fooStore + " " + barStore
 )
 
 func TestBuildCommitInfoUsesVersionParam(t *testing.T) {
@@ -116,7 +117,7 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 	cmd := VerifyChangeSetCmd(nil)
 	cmd.SetArgs([]string{
 		changeSetDir,
-		"--" + flagStores, "foo bar",
+		"--" + flagStores, bothStores,
 		"--" + flagSaveSnapshot, snapshotDir,
 		"--" + flagSave,
 	})
@@ -141,7 +142,7 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 
 	verify := func(extra ...string) []byte {
 		cmd := VerifyChangeSetCmd(nil)
-		cmd.SetArgs(append([]string{changeSetDir, "--" + flagStores, "foo bar", "--" + flagSave}, extra...))
+		cmd.SetArgs(append([]string{changeSetDir, "--" + flagStores, bothStores, "--" + flagSave}, extra...))
 		require.NoError(t, cmd.Execute())
 		result := filepath.Join(changeSetDir, "verified-3")
 		bz, err := os.ReadFile(result)
@@ -287,7 +288,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 			cmd := VerifyChangeSetCmd(nil)
 			cmd.SetArgs([]string{
 				changeSetDir,
-				"--" + flagStores, "foo bar",
+				"--" + flagStores, bothStores,
 				"--" + flagLoadSnapshot, baseDir,
 				"--" + flagSaveSnapshot, outDir,
 				"--" + flagSave,
