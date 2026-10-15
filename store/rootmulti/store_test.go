@@ -2,12 +2,14 @@ package rootmulti
 
 import (
 	"bytes"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	protoio "github.com/cosmos/gogoproto/io"
@@ -869,6 +871,81 @@ func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
 	require.Equal(t, int64(5), rs.LatestVersion())
 }
 
+func TestReadPathsReleaseQuerySnapshot(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+	for _, v := range []string{"v1", "v2"} {
+		rs.GetKVStore(key).Set([]byte("k"), []byte(v))
+		rs.Commit()
+	}
+
+	query := func(height int64, prove bool) error {
+		_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: height, Prove: prove})
+		return err
+	}
+	cacheMultiStore := func(version int64) error {
+		cms, err := rs.CacheMultiStoreWithVersion(version)
+		if err != nil {
+			return err
+		}
+		closer := cms.(io.Closer)
+		// a second Close must not release the snapshot again.
+		return stderrors.Join(closer.Close(), closer.Close())
+	}
+	testCases := []struct {
+		name    string
+		read    func() error
+		wantErr bool
+	}{
+		{"Query latest", func() error { return query(0, false) }, false},
+		{"Query latest height with proof", func() error { return query(2, true) }, false},
+		{"Query historical height with proof", func() error { return query(1, true) }, false},
+		{"Query negative height", func() error { return query(-1, false) }, true},
+		{"Query future height", func() error { return query(5, false) }, true},
+		{"CacheMultiStoreWithVersion latest", func() error { return cacheMultiStore(0) }, false},
+		{"CacheMultiStoreWithVersion latest height", func() error { return cacheMultiStore(2) }, false},
+		{"CacheMultiStoreWithVersion historical height", func() error { return cacheMultiStore(1) }, false},
+		{"CacheMultiStoreWithVersion negative height", func() error { return cacheMultiStore(-1) }, true},
+		{"EarliestVersion", func() error { rs.EarliestVersion(); return nil }, false},
+		{"LatestVersion", func() error { rs.LatestVersion(); return nil }, false},
+		{"LastCommitID", func() error { rs.LastCommitID(); return nil }, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.read()
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			// a leaked reference pins the snapshot's mmap and files after later reloads.
+			require.EqualValues(t, 1, rs.querySnapshot.Load().refs.Load(), "only the publish slot may hold it")
+		})
+	}
+}
+
+func TestAcquireQuerySnapshotSkipsReleasedSnapshot(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	// a reader can load a snapshot from the slot just as its last reference goes.
+	rs.querySnapshot.Store(&querySnapshot{})
+
+	acquired := make(chan *querySnapshot, 1)
+	go func() { acquired <- rs.acquireQuerySnapshot() }()
+	select {
+	case <-acquired:
+		t.Fatal("acquired a released snapshot")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	live := newQuerySnapshot(nil, &types.CommitInfo{})
+	rs.querySnapshot.Store(live)
+	require.Same(t, live, <-acquired)
+	require.EqualValues(t, 2, live.refs.Load())
+}
+
 func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -1133,6 +1210,12 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 	// the cached version-2 db maps files the rollback discarded.
 	_, err = rs.Query(newQuery())
 	require.Error(t, err)
+
+	// the rollback publishes its target as the latest height.
+	require.Equal(t, int64(1), rs.LatestVersion())
+	res, err = rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), res.Value)
 }
 
 func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {

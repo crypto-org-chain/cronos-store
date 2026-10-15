@@ -302,12 +302,16 @@ func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
 	if db.Version() == 0 {
 		return &types.CommitInfo{}
 	}
-	info := convertCommitInfo(db.LastCommitInfo())
+	return rs.sdkCommitInfo(db.LastCommitInfo())
+}
+
+func (rs *Store) sdkCommitInfo(info *memiavl.CommitInfo) *types.CommitInfo {
+	commitInfo := convertCommitInfo(info)
 	// to keep the root hash compatible with cosmos-sdk 0.46
 	if rs.sdk46Compact {
-		info = amendCommitInfo(info, rs.storesParams)
+		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
 	}
-	return info
+	return commitInfo
 }
 
 // replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
@@ -378,11 +382,7 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	commitInfo := convertCommitInfo(rs.db.WorkingCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
-	}
-	return commitInfo.Hash()
+	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
 }
 
 // Commit Implements interface Committer
@@ -433,10 +433,8 @@ func (rs *Store) closeDB() error {
 // closeDBForReload releases the current db and every cached historical db so a
 // replacement can be loaded over the same directory.
 //
-// Close errors are logged, not returned: memiavl.DB.Close finishes its cleanup
-// regardless and its WAL error latch is sticky, so returning would wedge every
-// retry. The unsynced WAL tail such an error implies is what a rollback or
-// restore discards anyway.
+// Close errors are logged, not returned: closeDB drops the old db either way,
+// and aborting here would leave the store with no db at all.
 func (rs *Store) closeDBForReload() {
 	if err := rs.closeDB(); err != nil {
 		rs.logger.Error("failed to close memiavl db before reload", "err", err)
@@ -1004,9 +1002,12 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "proof is unexpectedly empty; ensure height has not been pruned")
 	}
 
-	commitInfo := convertCommitInfo(db.LastCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
+	// the published snapshot already holds its converted commit info.
+	var commitInfo *types.CommitInfo
+	if snap != nil {
+		commitInfo = snap.lastCommitInfo
+	} else {
+		commitInfo = rs.commitInfoFromDB(db)
 	}
 
 	// Restore origin path and append proof op.
