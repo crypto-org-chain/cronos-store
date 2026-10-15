@@ -418,6 +418,38 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
+func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
+	store, versions := newTestStore(t, 2)
+	defer store.Close()
+
+	cache := store.historicalDBCache
+	targetVersion := versions[0]
+	loadFn := func() (*memiavl.DB, error) {
+		return loadAtVersion(store.dir, store.opts, store.chainId, targetVersion)
+	}
+
+	var loaded *memiavl.DB
+	_, err := cache.borrow(targetVersion, func() (*memiavl.DB, error) {
+		db, err := loadFn()
+		loaded = db
+		// a reload lands between the load and caching its result.
+		require.NoError(t, cache.invalidate())
+		return db, err
+	})
+	require.ErrorContains(t, err, "reloaded while loading")
+	require.Empty(t, loaded.Trees(), "the discarded DB must be closed")
+	cache.mu.Lock()
+	require.Empty(t, cache.entries)
+	cache.mu.Unlock()
+
+	entry, err := cache.borrow(targetVersion, loadFn)
+	require.NoError(t, err)
+	defer cache.release(entry)
+	cache.mu.Lock()
+	require.Len(t, cache.entries, 1)
+	cache.mu.Unlock()
+}
+
 func TestCacheMultiStoreWithVersionCloser(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
@@ -595,7 +627,7 @@ func TestHistoricalQueryResultSurvivesCacheEviction(t *testing.T) {
 		require.NoError(t, store.db.WaitAsyncCommit())
 		require.NoError(t, store.db.RewriteSnapshot())
 	}
-	// one more commit so no queried version is current, else Query would bypass historicalDBCache via rs.lastCommitInfo
+	// one more commit so no queried version is current, else Query would read the latest-height snapshot instead of historicalDBCache
 	finalCid := store.Commit()
 	require.Greater(t, finalCid.Version, versions[numVersions-1])
 	require.NoError(t, store.db.WaitAsyncCommit())
@@ -862,6 +894,17 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	require.NoError(t, store.LoadLatestVersion())
 	defer store.Close()
 
+	// enough keys for multi-level paths, so each commit rewrites shared inner nodes.
+	commit := func(i int) {
+		kv := store.GetKVStore(key)
+		for j := 0; j < 16; j++ {
+			kv.Set([]byte(fmt.Sprintf("k%02d", j)), []byte{byte(i)})
+		}
+		store.Commit()
+	}
+	// a proof query on an empty tree panics in memiavlstore, so start readers on a populated one.
+	commit(0)
+
 	const commits = 30
 	done := make(chan struct{})
 
@@ -870,10 +913,8 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer close(done)
-		for i := 0; i < commits; i++ {
-			kv := store.GetKVStore(key)
-			kv.Set([]byte("k"), []byte{byte(i)})
-			store.Commit()
+		for i := 1; i <= commits; i++ {
+			commit(i)
 		}
 	}()
 
@@ -881,17 +922,26 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		func() { store.CacheMultiStore() },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)
-			if err == nil {
-				if closer, ok := cms.(io.Closer); ok {
-					_ = closer.Close()
-				}
+			if err != nil {
+				return
 			}
+			kv := cms.GetKVStore(key)
+			_ = kv.Get([]byte("k07"))
+			it := kv.Iterator(nil, nil)
+			for ; it.Valid(); it.Next() {
+				_ = it.Value()
+			}
+			_ = it.Close()
+			_ = cms.(io.Closer).Close()
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k")})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07")})
 		},
 		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName, Data: []byte("k"), Prove: true})
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07"), Prove: true})
+		},
+		func() {
+			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
 		},
 		func() { store.LatestVersion() },
 		func() { store.EarliestVersion() },
