@@ -42,10 +42,9 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	if !sstFileWriter {
 		// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
 		// (e.g. from restore-versiondb) are moved down to the bottommost level as is.
-		opts.SetCompressionPerLevel(append(
-			[]grocksdb.CompressionType{grocksdb.ZSTDCompression, grocksdb.ZSTDCompression},
-			slices.Repeat([]grocksdb.CompressionType{grocksdb.LZ4Compression}, opts.GetNumLevels()-2)...,
-		))
+		levels := slices.Repeat([]grocksdb.CompressionType{grocksdb.LZ4Compression}, opts.GetNumLevels())
+		levels[0], levels[1] = grocksdb.ZSTDCompression, grocksdb.ZSTDCompression
+		opts.SetCompressionPerLevel(levels)
 
 		// compression options at bottommost level
 		opts.SetBottommostCompression(grocksdb.ZSTDCompression)
