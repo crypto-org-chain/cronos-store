@@ -255,9 +255,6 @@ type Store struct {
 	logger  log.Logger
 	chainId string
 
-	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
-	lastCommitInfo *types.CommitInfo
-
 	storesParams map[types.StoreKey]storeParams
 	keysByName   map[string]types.StoreKey
 	stores       map[types.StoreKey]types.CommitStore
@@ -291,9 +288,23 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
-func (rs *Store) publishQuerySnapshot() {
+func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
+	info := rs.commitInfoFromDB(rs.db)
 	// no node cache: the snapshot is replaced every Commit, so it never warms up.
-	rs.replaceQuerySnapshot(newQuerySnapshot(rs.db.CopyWithCacheSize(0), rs.lastCommitInfo))
+	rs.replaceQuerySnapshot(newQuerySnapshot(rs.db.CopyWithCacheSize(0), info))
+	return info
+}
+
+func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
+	if db.Version() == 0 {
+		return &types.CommitInfo{}
+	}
+	info := convertCommitInfo(db.LastCommitInfo())
+	// to keep the root hash compatible with cosmos-sdk 0.46
+	if rs.sdk46Compact {
+		info = amendCommitInfo(info, rs.storesParams)
+	}
+	return info
 }
 
 // replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
@@ -323,12 +334,10 @@ func (rs *Store) acquireQuerySnapshot() *querySnapshot {
 				return snap
 			}
 		}
-		// released between Load and CompareAndSwap, so a newer one is already published.
+		// released between Load and CompareAndSwap: a newer one, or nil on close, is published.
 	}
 }
 
-// latestCommitInfo never falls back to rs.lastCommitInfo: closeDB nils it
-// concurrently with readers.
 func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	if snap := rs.querySnapshot.Load(); snap != nil {
 		return snap.lastCommitInfo
@@ -398,12 +407,7 @@ func (rs *Store) Commit() types.CommitID {
 		}
 	}
 
-	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
-	if rs.sdk46Compact {
-		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-	}
-	rs.publishQuerySnapshot()
-	return rs.lastCommitInfo.CommitID()
+	return rs.publishQuerySnapshot().CommitID()
 }
 
 func (rs *Store) Close() error {
@@ -420,8 +424,6 @@ func (rs *Store) closeDB() error {
 
 	err := rs.db.Close()
 	rs.db = nil
-	// otherwise LastCommitID keeps reporting a version whose data is gone.
-	rs.lastCommitInfo = nil
 	return err
 }
 
@@ -533,18 +535,13 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 //
 // version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	snap := rs.acquireQuerySnapshot()
-	if snap == nil {
-		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+	snap, err := rs.acquireForVersion(version)
+	if err != nil {
+		return nil, err
 	}
-	if version == 0 || version == snap.lastCommitInfo.Version {
+	if snap != nil {
 		// the caller's Close releases the snapshot, so it outlives later reloads.
 		return rs.cacheMultiStoreFromDB(snap.db, &snapshotCloser{snap: snap}), nil
-	}
-	rs.releaseQuerySnapshot(snap)
-
-	if version < 0 || version > math.MaxUint32 {
-		return nil, fmt.Errorf("version out of range: %d", version)
 	}
 	// historicalDBCache isn't used here: the returned store's lifetime is owned
 	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
@@ -555,6 +552,24 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	}
 
 	return rs.cacheMultiStoreFromDB(db, db), nil
+}
+
+// acquireForVersion returns the published snapshot, with a reference to release, when
+// version is 0 or its height, and nil when version is an older height to load from disk.
+func (rs *Store) acquireForVersion(version int64) (*querySnapshot, error) {
+	snap := rs.acquireQuerySnapshot()
+	if snap == nil {
+		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+	}
+	if version == 0 || version == snap.lastCommitInfo.Version {
+		return snap, nil
+	}
+	// a historical load can queue; don't keep the latest generation mapped meanwhile.
+	rs.releaseQuerySnapshot(snap)
+	if version < 0 || version > math.MaxUint32 {
+		return nil, fmt.Errorf("version out of range: %d", version)
+	}
+	return nil, nil
 }
 
 // GetStore Implements interface MultiStore
@@ -746,15 +761,6 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	rs.db = db
 	dbInstalled = true
 	rs.stores = newStores
-	// to keep the root hash compatible with cosmos-sdk 0.46
-	if db.Version() != 0 {
-		rs.lastCommitInfo = convertCommitInfo(db.LastCommitInfo())
-		if rs.sdk46Compact {
-			rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-		}
-	} else {
-		rs.lastCommitInfo = &types.CommitInfo{}
-	}
 	rs.publishQuerySnapshot()
 
 	return nil
@@ -884,10 +890,6 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	if err != nil {
 		return err
 	}
-	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
-	if rs.sdk46Compact {
-		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-	}
 	rs.publishQuerySnapshot()
 
 	return nil
@@ -946,22 +948,15 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	version := req.Height
 
+	snap, err := rs.acquireForVersion(version)
+	if err != nil {
+		return nil, err
+	}
 	var db *memiavl.DB
-	snap := rs.acquireQuerySnapshot()
-	if snap != nil && (version == 0 || version == snap.lastCommitInfo.Version) {
+	if snap != nil {
 		defer rs.releaseQuerySnapshot(snap)
 		db = snap.db
 	} else {
-		if snap != nil {
-			// a historical load can queue; don't keep the latest generation mapped meanwhile.
-			rs.releaseQuerySnapshot(snap)
-		}
-		if version == 0 {
-			return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
-		}
-		if version < 0 || version > math.MaxUint32 {
-			return nil, fmt.Errorf("version out of range: %d", version)
-		}
 		borrowedEntry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
 			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 		})

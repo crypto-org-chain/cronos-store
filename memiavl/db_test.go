@@ -1437,10 +1437,14 @@ func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, earliest)
 
 	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
+	earliest, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, earliest)
 }
 
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
@@ -1684,12 +1688,12 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
-	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
+	defer cp.Close()
+	// the cache is shared, so the copy's first scan fills it for the live db too.
+	earliest, err := cp.EarliestVersion()
 	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Equal(t, earliest, db.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
