@@ -1835,6 +1835,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			}
 			require.Equal(t, before, countOpenFDsUnder(t, dir), "the loaded snapshot, wal and lock files must be closed")
 
+			// read-only loads never take the lock, so this only checks the writable cases.
 			lock, err := LockFile(filepath.Join(dir, LockFileName))
 			require.NoError(t, err, "a failed Load must release the db lock")
 			require.NoError(t, errors.Join(lock.Unlock(), lock.Destroy()))
