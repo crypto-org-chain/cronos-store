@@ -704,7 +704,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.catchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.catchupWAL(db.walReader, -1), "negative endVersion must return an error")
 }
 
 // corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
@@ -712,7 +712,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
 
 	corruptIndex := lastIndex + 1
@@ -1532,7 +1532,7 @@ func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	require.NoError(t, err)
 
 	// break the underlying wal so the writer's next write fails.
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	_, _ = commit()
 	time.Sleep(100 * time.Millisecond)
@@ -1572,7 +1572,7 @@ func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	_, err = commit()
 	require.NoError(t, err)
 
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	sawError := false
 	for i := 0; i < 20; i++ {

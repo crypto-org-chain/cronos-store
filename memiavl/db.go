@@ -70,8 +70,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         walReader
-	walWriter   writeAheadLog // same log as wal on a read-write DB, nil when read-only
+	walReader   walReader
+	walWriter   writeAheadLog // on a read-write DB, the same log as walReader; nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -272,7 +272,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    reader,
+		walReader:              reader,
 		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
@@ -521,10 +521,10 @@ func (db *DB) latchWalErr(err error) error {
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
 func (db *DB) CommittedVersion() (int64, error) {
-	if db.wal == nil {
+	if db.walReader == nil {
 		return 0, wal.ErrClosed
 	}
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walReader.LastIndex()
 	if err != nil {
 		return 0, err
 	}
@@ -579,7 +579,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		}
 
 		// catchup the remaining wal
-		if err := result.mtree.catchupWAL(db.wal, 0); err != nil {
+		if err := result.mtree.catchupWAL(db.walReader, 0); err != nil {
 			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
 		}
 
@@ -922,7 +922,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	db.snapshotRewriteCancel = cancel
 
 	cloned := db.copy(0)
-	wal := db.wal
+	wal := db.walReader
 	go func() {
 		defer close(ch)
 
@@ -976,9 +976,9 @@ func (db *DB) Close() error {
 	errs = append(errs, db.MultiTree.Close())
 
 	// nil after a previous Close
-	if db.wal != nil {
-		errs = append(errs, db.wal.Close())
-		db.wal = nil
+	if db.walReader != nil {
+		errs = append(errs, db.walReader.Close())
+		db.walReader = nil
 	}
 	db.walWriter = nil
 
@@ -1149,10 +1149,10 @@ func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	if db.wal == nil {
+	if db.walReader == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
 func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
