@@ -821,8 +821,8 @@ func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 }
 
 // UnpinnedCopy is CopyWithCacheSize without a snapshot reference, so it needs no
-// Close. It is only valid until the second reload after it is taken, when the DB
-// unmaps that generation. Suits readers that move to a fresh copy every block.
+// Close. It is valid until the second snapshot reload after it is taken, or until
+// the DB closes. Suits readers that move to a fresh copy every block.
 func (db *DB) UnpinnedCopy(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()

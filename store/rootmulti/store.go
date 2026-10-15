@@ -303,7 +303,8 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	db.SetZeroCopy(false)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
 	// block execution reads the mounted stores, so they keep the node cache. Unpinned:
-	// readers hold no reference, so the copy lives as long as the DB maps the generation.
+	// readers hold no reference, so the copy is valid until the second snapshot reload
+	// after it is taken, or until the DB closes.
 	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
 	return info
 }
