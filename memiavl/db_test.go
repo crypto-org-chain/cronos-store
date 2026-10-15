@@ -1461,7 +1461,7 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 		cycle func(t *testing.T)
 	}{
 		{
-			// historical-height queries open and close a read-only DB each time.
+			// rootmulti opens and closes a read-only DB for every historical-height CacheMultiStoreWithVersion.
 			name: "read-only load",
 			cycle: func(t *testing.T) {
 				t.Helper()
@@ -1474,13 +1474,15 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 			name: "writable load with snapshot writes",
 			cycle: func(t *testing.T) {
 				t.Helper()
-				db, err := Load(dir, Options{}, TestAppChainID)
+				db, err := Load(dir, Options{SnapshotWriterLimit: 2}, TestAppChainID)
 				require.NoError(t, err)
 				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 				_, err = db.Commit()
 				require.NoError(t, err)
 				require.NoError(t, db.RewriteSnapshot())
-				require.NoError(t, db.Copy().WriteSnapshot(t.TempDir()))
+				cp := db.Copy()
+				require.Equal(t, 2, cp.snapshotWriterLimit)
+				require.NoError(t, cp.WriteSnapshot(t.TempDir()))
 				require.NoError(t, db.Close())
 			},
 		},
@@ -1491,9 +1493,9 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				tc.cycle(t)
 			}
-			// slack for testify's polling goroutine and writers still exiting; a leak adds one per cycle.
+			// slack for testify's polling goroutine and writers still exiting; a leak adds at least one per cycle.
 			require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+5 },
-				time.Second, 10*time.Millisecond, "goroutines: before %d, now %d", before, runtime.NumGoroutine())
+				time.Second, 10*time.Millisecond, "goroutines before the cycles: %d", before)
 		})
 	}
 }
