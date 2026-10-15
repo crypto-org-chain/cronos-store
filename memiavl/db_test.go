@@ -332,6 +332,10 @@ func TestCopyRejectsWrites(t *testing.T) {
 		{"ApplyChangeSets", func(cp *DB) error {
 			return cp.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2"))
 		}},
+		{"ApplyChangeSet", func(cp *DB) error {
+			return cp.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: []byte("v2")}}})
+		}},
+		{"SaveVersion", func(cp *DB) error { _, err := cp.SaveVersion(true); return err }},
 		{"Commit", func(cp *DB) error { _, err := cp.Commit(); return err }},
 		{"SetInitialVersion", func(cp *DB) error { return cp.SetInitialVersion(100) }},
 		{"ApplyUpgrades", func(cp *DB) error { return cp.ApplyUpgrades([]*TreeNameUpgrade{{Name: "new"}}) }},
@@ -360,6 +364,7 @@ func TestCopyRejectsWrites(t *testing.T) {
 					require.ErrorIs(t, w.write(db.Copy()), errReadOnly)
 				})
 			}
+			require.Panics(t, func() { db.Copy().UpdateCommitInfo() })
 			// a copy of a read-only DB must not swap the live snapshot.
 			after, err := os.Readlink(currentPath(dir))
 			require.NoError(t, err)
