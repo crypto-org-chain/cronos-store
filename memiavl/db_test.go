@@ -1692,15 +1692,16 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 		name string
 		// skip building a committed db first; malleate then gets a nil db.
 		emptyDir bool
-		malleate func(t *testing.T, dir string, db *DB) Options
+		// root ignores directory permissions, which these cases rely on.
+		needsNonRoot bool
+		malleate     func(t *testing.T, dir string, db *DB) Options
+		expErr       string
 	}{
 		{
-			name: "tmp dir cleanup fails",
+			name:         "tmp dir cleanup fails",
+			needsNonRoot: true,
 			malleate: func(t *testing.T, dir string, _ *DB) Options {
 				t.Helper()
-				if os.Geteuid() == 0 {
-					t.Skip("root ignores directory permissions")
-				}
 				locked := filepath.Join(dir, "snapshot-9"+TmpSuffix, "locked")
 				require.NoError(t, os.MkdirAll(locked, 0o700))
 				require.NoError(t, os.WriteFile(filepath.Join(locked, "f"), nil, 0o600))
@@ -1708,6 +1709,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				t.Cleanup(func() { require.NoError(t, os.Chmod(locked, 0o700)) })
 				return Options{}
 			},
+			expErr: "fail to cleanup tmp directories",
 		},
 		{
 			name: "target snapshot pruned",
@@ -1716,6 +1718,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				require.NoError(t, os.RemoveAll(filepath.Join(dir, snapshotName(0))))
 				return Options{TargetVersion: 1}
 			},
+			expErr: "target version is pruned",
 		},
 		{
 			name: "snapshot load fails",
@@ -1724,6 +1727,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				require.NoError(t, os.Remove(filepath.Join(currentPath(dir), MetadataFileName)))
 				return Options{}
 			},
+			expErr: MetadataFileName,
 		},
 		{
 			name: "wal open fails",
@@ -1732,6 +1736,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				corruptWALDir(t, dir)
 				return Options{}
 			},
+			expErr: "corrupt",
 		},
 		{
 			name: "read-only wal open fails",
@@ -1740,6 +1745,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				corruptWALDir(t, dir)
 				return Options{ReadOnly: true}
 			},
+			expErr: "corrupt",
 		},
 		{
 			name: "wal replay fails",
@@ -1747,6 +1753,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				t.Helper()
 				return Options{TargetVersion: uint32(corruptTrailingWALEntry(t, db))}
 			},
+			expErr: "unmarshal wal log failed",
 		},
 		{
 			name: "read-only wal replay fails",
@@ -1754,6 +1761,7 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				t.Helper()
 				return Options{ReadOnly: true, TargetVersion: uint32(corruptTrailingWALEntry(t, db))}
 			},
+			expErr: "unmarshal wal log failed",
 		},
 		{
 			name: "rollback fails",
@@ -1764,19 +1772,20 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 				require.NoError(t, os.WriteFile(currentPath(dir), nil, 0o600))
 				return Options{TargetVersion: 3, LoadForOverwriting: true}
 			},
+			expErr: "fail to read current version",
 		},
 		{
-			name: "rollback wal truncation fails",
+			name:         "rollback wal truncation fails",
+			needsNonRoot: true,
 			malleate: func(t *testing.T, dir string, _ *DB) Options {
 				t.Helper()
-				if os.Geteuid() == 0 {
-					t.Skip("root ignores directory permissions")
-				}
-				// TruncateBack writes a replacement segment, so a read-only wal dir fails it.
+				// TruncateBack can't create its TEMP segment in a read-only wal dir; tidwall/wal
+				// then reports the rename of that missing file.
 				require.NoError(t, os.Chmod(walPath(dir), 0o500))
 				t.Cleanup(func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) })
 				return Options{TargetVersion: 2, LoadForOverwriting: true}
 			},
+			expErr: "fail to truncate wal logs",
 		},
 		{
 			// the DB already owns its resources here, so Load must close it once, not twice.
@@ -1785,11 +1794,15 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			malleate: func(*testing.T, string, *DB) Options {
 				return Options{CreateIfMissing: true, InitialStores: []string{testStoreName, testStoreName}}
 			},
+			expErr: "memiavl tree name conflicts",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsNonRoot && os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
 			dir := t.TempDir()
 			var opts Options
 			if tc.emptyDir {
@@ -1815,7 +1828,9 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			before := countOpenFDsUnder(t, dir)
 
 			_, err := Load(dir, opts, TestAppChainID)
-			require.Error(t, err)
+			require.ErrorContains(t, err, tc.expErr)
+			// a failed or repeated cleanup would be joined in as extra lines.
+			require.NotContains(t, err.Error(), "\n", "cleanup must release everything exactly once")
 			require.Equal(t, before, countOpenFDsUnder(t, dir), "the loaded snapshot, wal and lock files must be closed")
 
 			lock, err := LockFile(filepath.Join(dir, LockFileName))
