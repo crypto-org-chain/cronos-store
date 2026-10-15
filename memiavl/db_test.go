@@ -1875,6 +1875,32 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 }
 
+func TestEarliestVersionCopyTakenBeforeSetInitialVersion(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer db.Close()
+
+	stale := db.CopyWithCacheSize(0)
+	defer stale.Close()
+	require.NoError(t, db.SetInitialVersion(100))
+
+	// the stale copy fills the shared cache first; its own fallback must not reach newer readers.
+	got, err := stale.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, got)
+
+	fresh := db.CopyWithCacheSize(0)
+	defer fresh.Close()
+	for _, reader := range []*DB{db, fresh} {
+		got, err = reader.EarliestVersion()
+		require.NoError(t, err)
+		require.EqualValues(t, 100, got)
+	}
+}
+
 func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
