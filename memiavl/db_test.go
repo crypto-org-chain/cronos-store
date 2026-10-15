@@ -1458,7 +1458,10 @@ func TestClosedDB(t *testing.T) {
 				require.NoError(t, err)
 			}
 
+			pool := db.snapshotWriterPool
 			require.NoError(t, db.Close())
+			// a pool left running leaks pond's purger goroutine on every Load.
+			require.True(t, pool.Stopped())
 			_, err = db.CommittedVersion()
 			require.ErrorIs(t, err, wal.ErrClosed)
 			require.NoError(t, db.Close())

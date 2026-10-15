@@ -92,6 +92,8 @@ type DB struct {
 	mtx sync.Mutex
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
+	// copies share the pool and must not stop it on Close.
+	ownsWriterPool bool
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
@@ -279,6 +281,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterPool:     workerPool,
+		ownsWriterPool:         true,
 	}
 	db.attachTraverseStateChanges()
 
@@ -967,6 +970,13 @@ func (db *DB) Close() error {
 		}
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
+	}
+
+	// safe now that the rewrite goroutine is joined; otherwise pond's purger
+	// goroutine leaks on every Load.
+	if db.ownsWriterPool && db.snapshotWriterPool != nil {
+		db.snapshotWriterPool.StopAndWait()
+		db.snapshotWriterPool = nil
 	}
 
 	// wait for any in-flight prune goroutine to finish before closing the WAL.
