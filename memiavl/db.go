@@ -72,8 +72,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         walReader
-	walWriter   writeAheadLog // same log as wal on a read-write DB, nil when read-only
+	walReader   walReader
+	walWriter   writeAheadLog // on a read-write DB, the same log as walReader; nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -247,7 +247,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, mtree.Close())
 	}
 	// assigned only on success: a typed nil would pass the cleanup's nil check.
 	walLog = reader
@@ -303,7 +303,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    reader,
+		walReader:              reader,
 		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
@@ -326,13 +326,6 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 		if err := db.ApplyUpgrades(upgrades); err != nil {
 			return nil, errors.Join(err, db.Close())
-		}
-	}
-
-	if !db.readOnly {
-		// warm the cache here so no query on a copy pays for the first snapshot dir scan.
-		if _, err := db.EarliestVersion(); err != nil {
-			opts.Logger.Error("failed to cache earliest version", "err", err)
 		}
 	}
 
@@ -386,11 +379,8 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	// the earliest version follows the initial version, so re-warm the cache Load filled.
+	// the earliest version follows the initial version, so drop any cached value.
 	db.earliestSnapshotCache.Store(0)
-	if _, err := db.EarliestVersion(); err != nil {
-		db.logger.Error("failed to cache earliest version", "err", err)
-	}
 	return nil
 }
 
@@ -600,10 +590,10 @@ func (db *DB) CommittedVersion() (int64, error) {
 
 // Callers hold db.mtx.
 func (db *DB) committedVersion() (int64, error) {
-	if db.wal == nil {
+	if db.walReader == nil {
 		return 0, wal.ErrClosed
 	}
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walReader.LastIndex()
 	if err != nil {
 		return 0, err
 	}
@@ -669,7 +659,7 @@ func (db *DB) adoptSnapshotRewrite(mtree *MultiTree) (err error) {
 	}
 
 	if mtree.Version() < db.lastCommitInfo.Version {
-		if err := mtree.catchupWAL(db.wal, db.lastCommitInfo.Version); err != nil {
+		if err := mtree.catchupWAL(db.walReader, db.lastCommitInfo.Version); err != nil {
 			return fmt.Errorf("final catchup failed: %w", err)
 		}
 	}
@@ -1033,7 +1023,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	db.snapshotRewriteCancel = cancel
 
 	cloned := db.copy(0)
-	wal := db.wal
+	wal := db.walReader
 	onCatchupMTreeLoaded := db.onCatchupMTreeLoaded
 	logger, dir, version := db.logger, db.dir, cloned.Version()
 	zeroCopy, cacheSize, chainID := db.zeroCopy, db.cacheSize, db.chainId
@@ -1106,10 +1096,10 @@ func (db *DB) Close() error {
 	errs = append(errs, db.MultiTree.Close())
 
 	// copies have no wal, and a previous Close nils it.
-	if db.wal != nil {
-		errs = append(errs, db.wal.Close())
+	if db.walReader != nil {
+		errs = append(errs, db.walReader.Close())
 	}
-	db.wal = nil
+	db.walReader = nil
 	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
@@ -1280,10 +1270,10 @@ func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	if db.wal == nil {
+	if db.walReader == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
 func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {

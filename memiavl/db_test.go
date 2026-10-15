@@ -176,6 +176,8 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 		CacheSize:          cacheSize,
 	}, TestAppChainID)
 	require.NoError(t, err)
+	// Close waits for the snapshot prune goroutine, which otherwise races with TempDir cleanup
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	cs := []*NamedChangeSet{
 		{
@@ -717,7 +719,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.catchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.catchupWAL(db.walReader, -1), "negative endVersion must return an error")
 }
 
 // corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
@@ -725,7 +727,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
 
 	corruptIndex := lastIndex + 1
@@ -840,7 +842,7 @@ func TestCheckBackgroundSnapshotRewriteDiscardsAheadResult(t *testing.T) {
 	// a rewrite result that caught up past the committed version.
 	ahead, err := LoadMultiTree(currentPath(db.dir), db.zeroCopy, db.cacheSize, db.chainId)
 	require.NoError(t, err)
-	require.NoError(t, ahead.catchupWAL(db.wal, 2))
+	require.NoError(t, ahead.catchupWAL(db.walReader, 2))
 	db.lastCommitInfo.Version = ahead.Version() - 1
 	injectSnapshotRewriteResult(db, ahead)
 
@@ -865,7 +867,7 @@ func TestCommittedVersionNilWAL(t *testing.T) {
 }
 
 func TestCommittedVersionConcurrentWithClose(t *testing.T) {
-	// CommittedVersion must take db.mtx: Close nils db.wal under it.
+	// CommittedVersion must take db.mtx: Close nils db.walReader under it.
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
 		CreateIfMissing: true,
@@ -1294,7 +1296,7 @@ func newDBWithDeadAsyncWALWriter(t *testing.T, dir string) *DB {
 
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "hello", "world")))
 
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	v, err := db.Commit()
 	require.ErrorIs(t, err, wal.ErrClosed)
@@ -1313,7 +1315,7 @@ func TestCommitFailsSynchronouslyOnAsyncWALWriteError(t *testing.T) {
 	// release the file lock without touching the now-closed wal.
 	db.walChan = nil
 	db.walQuit = nil
-	db.wal = nil
+	db.walReader = nil
 	require.NoError(t, db.fileLock.Unlock())
 	require.NoError(t, db.fileLock.Destroy())
 }
@@ -1723,10 +1725,14 @@ func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, earliest)
 
 	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
+	earliest, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, earliest)
 }
 
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
@@ -1938,7 +1944,7 @@ func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	require.NoError(t, err)
 
 	// break the underlying wal so the writer's next write fails.
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	_, _ = commit()
 	time.Sleep(100 * time.Millisecond)
@@ -1978,7 +1984,7 @@ func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	_, err = commit()
 	require.NoError(t, err)
 
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	sawError := false
 	for i := 0; i < 20; i++ {
@@ -2063,12 +2069,12 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
-	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
+	defer cp.Close()
+	// the cache is shared, so the copy's first scan fills it for the live db too.
+	earliest, err := cp.EarliestVersion()
 	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Equal(t, earliest, db.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))

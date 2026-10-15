@@ -713,7 +713,7 @@ func TestHistoricalQueryResultSurvivesCacheEviction(t *testing.T) {
 		require.NoError(t, store.db.WaitAsyncCommit())
 		require.NoError(t, store.db.RewriteSnapshot())
 	}
-	// one more commit so no queried version is current, else Query would bypass historicalDBCache via rs.lastCommitInfo
+	// one more commit so no queried version is current, else Query would read the latest-height snapshot instead of historicalDBCache
 	finalCid := store.Commit()
 	require.Greater(t, finalCid.Version, versions[numVersions-1])
 	require.NoError(t, store.db.WaitAsyncCommit())
