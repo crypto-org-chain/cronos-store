@@ -7,6 +7,7 @@ import (
 	fmt "fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -1446,6 +1447,55 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	testCases := []struct {
+		name  string
+		cycle func(t *testing.T)
+	}{
+		{
+			// historical-height queries open and close a read-only DB each time.
+			name: "read-only load",
+			cycle: func(t *testing.T) {
+				db, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
+			name: "writable load with snapshot writes",
+			cycle: func(t *testing.T) {
+				db, err := Load(dir, Options{}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+				_, err = db.Commit()
+				require.NoError(t, err)
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Copy().WriteSnapshot(t.TempDir()))
+				require.NoError(t, db.Close())
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := runtime.NumGoroutine()
+			for i := 0; i < 20; i++ {
+				tc.cycle(t)
+			}
+			// small slack for runtime goroutines; a leak adds one per cycle.
+			require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+5 },
+				time.Second, 10*time.Millisecond, "goroutines: before %d, now %d", before, runtime.NumGoroutine())
+		})
+	}
+}
+
 func TestClosedDB(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
@@ -1458,10 +1508,7 @@ func TestClosedDB(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			pool := db.snapshotWriterPool
 			require.NoError(t, db.Close())
-			// a pool left running leaks pond's purger goroutine on every Load.
-			require.True(t, pool.Stopped())
 			_, err = db.CommittedVersion()
 			require.ErrorIs(t, err, wal.ErrClosed)
 			require.NoError(t, db.Close())

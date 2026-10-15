@@ -89,11 +89,8 @@ type DB struct {
 	// - The DB for the state machine will handle writes through the Commit call,
 	//   this method is the sole entry point for tree modifications, and there's no concurrency internally
 	//   (the background snapshot rewrite is handled separately), so we don't need locks in the Tree.
-	mtx sync.Mutex
-	// worker goroutine IdleTimeout = 5s
-	snapshotWriterPool *pond.WorkerPool
-	// copies share the pool and must not stop it on Close.
-	ownsWriterPool bool
+	mtx                 sync.Mutex
+	snapshotWriterLimit int
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
@@ -265,9 +262,6 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 			return nil, fmt.Errorf("fail to prune snapshots: %w", err)
 		}
 	}
-	// create worker pool. recv tasks to write snapshot
-	workerPool := pond.New(opts.SnapshotWriterLimit, opts.SnapshotWriterLimit*10)
-
 	db := &DB{
 		MultiTree:              *mtree,
 		logger:                 opts.Logger,
@@ -280,8 +274,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
-		snapshotWriterPool:     workerPool,
-		ownsWriterPool:         true,
+		snapshotWriterLimit:    opts.SnapshotWriterLimit,
 	}
 	db.attachTraverseStateChanges()
 
@@ -809,10 +802,10 @@ func (db *DB) copy(cacheSize int) *DB {
 	mtree := db.MultiTree.Copy(cacheSize)
 
 	cloned := &DB{
-		MultiTree:          *mtree,
-		logger:             db.logger,
-		dir:                db.dir,
-		snapshotWriterPool: db.snapshotWriterPool,
+		MultiTree:           *mtree,
+		logger:              db.logger,
+		dir:                 db.dir,
+		snapshotWriterLimit: db.snapshotWriterLimit,
 	}
 	cloned.attachTraverseStateChanges()
 	return cloned
@@ -835,7 +828,7 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	snapshotDir := snapshotName(db.lastCommitInfo.Version)
 	tmpDir := snapshotDir + TmpSuffix
 	path := filepath.Join(db.dir, tmpDir)
-	if err := db.MultiTree.WriteSnapshotWithContext(ctx, path, db.snapshotWriterPool); err != nil {
+	if err := writeSnapshotOwnPool(ctx, &db.MultiTree, path, db.snapshotWriterLimit); err != nil {
 		return errors.Join(err, os.RemoveAll(path))
 	}
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
@@ -970,13 +963,6 @@ func (db *DB) Close() error {
 		}
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
-	}
-
-	// safe now that the rewrite goroutine is joined; otherwise pond's purger
-	// goroutine leaks on every Load.
-	if db.ownsWriterPool && db.snapshotWriterPool != nil {
-		db.snapshotWriterPool.StopAndWait()
-		db.snapshotWriterPool = nil
 	}
 
 	// wait for any in-flight prune goroutine to finish before closing the WAL.
@@ -1205,7 +1191,7 @@ func (db *DB) WriteSnapshotWithContext(ctx context.Context, dir string) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.MultiTree.WriteSnapshotWithContext(ctx, dir, db.snapshotWriterPool)
+	return writeSnapshotOwnPool(ctx, &db.MultiTree, dir, db.snapshotWriterLimit)
 }
 
 func snapshotName(version int64) string {
@@ -1309,14 +1295,17 @@ func walPath(root string) string {
 func initEmptyDB(dir string, initialVersion uint32, chainId string) error {
 	tmp := NewEmptyMultiTree(initialVersion, 0, chainId)
 	snapshotDir := snapshotName(0)
-	// create tmp worker pool
-	pool := pond.New(DefaultSnapshotWriterLimit, DefaultSnapshotWriterLimit*10)
-	defer pool.Stop()
-
-	if err := tmp.WriteSnapshot(filepath.Join(dir, snapshotDir), pool); err != nil {
+	if err := writeSnapshotOwnPool(context.Background(), tmp, filepath.Join(dir, snapshotDir), DefaultSnapshotWriterLimit); err != nil {
 		return err
 	}
 	return updateCurrentSymlink(dir, snapshotDir)
+}
+
+// Each write gets its own pool, so no worker or purger goroutine outlives it.
+func writeSnapshotOwnPool(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
+	pool := pond.New(writerLimit, writerLimit*10)
+	defer pool.StopAndWait()
+	return mtree.WriteSnapshotWithContext(ctx, dir, pool)
 }
 
 // updateCurrentSymlink creates or replace the current symblic link atomically.
