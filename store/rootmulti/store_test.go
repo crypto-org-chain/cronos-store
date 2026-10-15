@@ -649,6 +649,69 @@ func TestQueryHistoricalHeightAllowsRenamedStore(t *testing.T) {
 	require.Equal(t, []byte("v"), res.Value)
 }
 
+func TestLatestHeightReadsOutliveTheirSnapshot(t *testing.T) {
+	testCases := []struct {
+		name string
+		// read returns the value of key and releases whatever it holds of the snapshot.
+		read func(t *testing.T, rs *Store, key types.StoreKey) []byte
+	}{
+		{
+			name: "Query",
+			read: func(t *testing.T, rs *Store, _ types.StoreKey) []byte {
+				t.Helper()
+				res, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+				require.NoError(t, err)
+				return res.Value
+			},
+		},
+		{
+			name: "CacheMultiStoreWithVersion(0)",
+			read: func(t *testing.T, rs *Store, key types.StoreKey) []byte {
+				t.Helper()
+				cms, err := rs.CacheMultiStoreWithVersion(0)
+				require.NoError(t, err)
+				value := cms.GetKVStore(key).Get([]byte("k"))
+				require.NoError(t, cms.(io.Closer).Close())
+				return value
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			rs.SetMemIAVLOptions(memiavl.Options{ZeroCopy: true})
+			key := types.NewKVStoreKey(testStoreName)
+			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			require.NoError(t, rs.LoadLatestVersion())
+			t.Cleanup(func() { rs.Close() })
+
+			want := bytes.Repeat([]byte("v"), 1<<16)
+			rs.GetKVStore(key).Set([]byte("k"), want)
+			rs.Commit()
+			// publish a snapshot whose trees read from the mmap'd snapshot files.
+			require.NoError(t, rs.db.RewriteSnapshot())
+			require.NoError(t, rs.db.Reload())
+			rs.Commit()
+
+			value := tc.read(t, rs, key)
+
+			// the DB unmaps a generation at the second reload after retiring it.
+			for i := 0; i < 2; i++ {
+				rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
+				rs.Commit()
+				require.NoError(t, rs.db.RewriteSnapshot())
+				require.NoError(t, rs.db.Reload())
+			}
+			rs.Commit()
+
+			// a read of an unmapped page panics here instead of crashing the test binary.
+			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+			require.Equal(t, want, value)
+		})
+	}
+}
+
 func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
 	dir := t.TempDir()
 	db, err := memiavl.Load(dir, memiavl.Options{
