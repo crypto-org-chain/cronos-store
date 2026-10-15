@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zbiljic/go-filelock"
 )
 
 const TestAppChainID = "test_chain"
@@ -856,6 +858,44 @@ func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	return walVersion(corruptIndex, db.initialVersion)
 }
 
+// Scoped to dir so descriptors that other tests open or close can't skew the count.
+func countOpenFDsUnder(t *testing.T, dir string) int {
+	t.Helper()
+
+	var files []*syscall.Stat_t
+	require.NoError(t, filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		files = append(files, info.Sys().(*syscall.Stat_t))
+		return nil
+	}))
+
+	fdDir, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot list open file descriptors: %v", err)
+	}
+	names, err := fdDir.Readdirnames(-1)
+	require.NoError(t, errors.Join(err, fdDir.Close()))
+
+	count := 0
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		require.NoError(t, err)
+
+		// fstat, not stat on /dev/fd/N: on macOS that reports the fd filesystem's device.
+		// Fails for the listing's own descriptor, which is closed by now.
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) != nil {
+			continue
+		}
+		if slices.ContainsFunc(files, func(f *syscall.Stat_t) bool { return f.Dev == st.Dev && f.Ino == st.Ino }) {
+			count++
+		}
+	}
+	return count
+}
+
 // injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
 // callers can drive checkBackgroundSnapshotRewrite without a real goroutine.
 func injectSnapshotRewriteResult(db *DB, mtree *MultiTree) {
@@ -1092,21 +1132,32 @@ func TestInvalidOptions(t *testing.T) {
 }
 
 func TestExclusiveLock(t *testing.T) {
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
 	dir := t.TempDir()
 
 	db, err := Load(dir, Options{CreateIfMissing: true}, TestAppChainID)
 	require.NoError(t, err)
 
+	fdsBefore := countOpenFDsUnder(t, dir)
 	_, err = Load(dir, Options{}, TestAppChainID)
-	require.Error(t, err)
+	require.ErrorIs(t, err, filelock.ErrLocked)
+	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "a failed lock attempt must close the lock file")
 
-	_, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	// closing the failed attempt's lock file must not release the open DB's lock.
+	_, err = Load(dir, Options{}, TestAppChainID)
+	require.ErrorIs(t, err, filelock.ErrLocked)
+
+	roDB, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, roDB.Close())
 
 	require.NoError(t, db.Close())
 
-	_, err = Load(dir, Options{}, TestAppChainID)
+	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 }
 
 func TestFastCommit(t *testing.T) {
@@ -1420,10 +1471,14 @@ func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, earliest)
 
 	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
+	earliest, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, earliest)
 }
 
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
@@ -1667,12 +1722,12 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
-	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
+	defer cp.Close()
+	// the cache is shared, so the copy's first scan fills it for the live db too.
+	earliest, err := cp.EarliestVersion()
 	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Equal(t, earliest, db.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))

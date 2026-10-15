@@ -280,13 +280,6 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		}
 	}
 
-	if !db.readOnly {
-		// warm the cache here so no query on a copy pays for the first snapshot dir scan.
-		if _, err := db.EarliestVersion(); err != nil {
-			opts.Logger.Error("failed to cache earliest version", "err", err)
-		}
-	}
-
 	return db, nil
 }
 
@@ -337,11 +330,8 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	// the earliest version follows the initial version, so re-warm the cache Load filled.
+	// the earliest version follows the initial version, so drop any cached value.
 	db.earliestSnapshotCache.Store(0)
-	if _, err := db.EarliestVersion(); err != nil {
-		db.logger.Error("failed to cache earliest version", "err", err)
-	}
 	return nil
 }
 
