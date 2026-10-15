@@ -267,6 +267,8 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 		CacheSize:          cacheSize,
 	}, TestAppChainID)
 	require.NoError(t, err)
+	// Close waits for the snapshot prune goroutine, which otherwise races with TempDir cleanup
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	cs := []*NamedChangeSet{
 		{
