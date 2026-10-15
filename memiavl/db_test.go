@@ -1493,7 +1493,7 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				tc.cycle(t)
 			}
-			// slack for testify's polling goroutine and writers still exiting; a leak adds at least one per cycle.
+			// slack for testify's polling goroutine and the WAL writer goroutine still exiting; a leak adds at least one per cycle.
 			require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+5 },
 				time.Second, 10*time.Millisecond, "goroutines before the cycles: %d", before)
 		})
