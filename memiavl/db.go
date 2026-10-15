@@ -802,7 +802,7 @@ func (db *DB) waitAsyncCommit() error {
 	return db.latchWalErr(err)
 }
 
-// Copy returns a read-only view of the current state that shares the live
+// Copy returns a view of the current state that shares the live
 // snapshot's mmap. It stays valid across reloads; Close it when done.
 func (db *DB) Copy() *DB {
 	db.mtx.Lock()

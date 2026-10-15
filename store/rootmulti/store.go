@@ -290,7 +290,7 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	info := rs.commitInfoFromDB(rs.db)
-	// no node cache: the snapshot is replaced every Commit, so it never warms up.
+	// no node cache: the snapshot is replaced every Commit, so its cache would start cold every block.
 	db := rs.db.CopyWithCacheSize(0)
 	// the last release can unmap this snapshot while a caller still holds a ResponseQuery referencing it.
 	db.SetZeroCopy(false)
