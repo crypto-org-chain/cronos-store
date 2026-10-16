@@ -1444,8 +1444,6 @@ func TestEarliestVersion(t *testing.T) {
 	require.Equal(t, earliest, earliest2)
 }
 
-// TestEarliestVersionUnpruned verifies that EarliestVersion does not report
-// height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestCacheEarliestVersionKeepsAPrunedValue(t *testing.T) {
 	db := &DB{earliestSnapshotCache: new(atomic.Int64)}
 	// a prune stored 5 while a scan that saw snapshot 2 was in flight.
@@ -1458,6 +1456,8 @@ func TestCacheEarliestVersionKeepsAPrunedValue(t *testing.T) {
 	require.EqualValues(t, 2, db.earliestSnapshotCache.Load())
 }
 
+// TestEarliestVersionUnpruned verifies that EarliestVersion does not report
+// height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestEarliestVersionUnpruned(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,

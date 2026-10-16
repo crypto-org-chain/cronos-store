@@ -18,7 +18,8 @@ import (
 func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
-	// the importer rewrites rs.dir; everything mapped over it must close first.
+	// the importer needs the directory lock rs.db holds, and cached historical DBs
+	// would keep serving the history it replaces.
 	rs.closeDBForReload()
 
 	item, err := rs.restore(height, format, protoReader)
