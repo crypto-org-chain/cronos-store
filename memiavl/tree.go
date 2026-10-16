@@ -246,7 +246,7 @@ func (t *Tree) copy(cacheSize int, pin bool) *Tree {
 		t.cowVersion = max(t.cowVersion, t.version, root.version)
 	}
 	if pin && t.snapshot != nil {
-		t.snapshot.copies.Add(1)
+		t.snapshot.refs.Add(1)
 	}
 	newTree := *t
 	if !pin {
