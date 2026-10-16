@@ -1471,6 +1471,16 @@ func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
 			},
 		},
 		{
+			// creating a db writes the genesis snapshot in initEmptyDB.
+			name: "new db",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
 			name: "writable load with snapshot writes",
 			cycle: func(t *testing.T) {
 				t.Helper()

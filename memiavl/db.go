@@ -1304,7 +1304,8 @@ func initEmptyDB(dir string, initialVersion uint32, chainId string) error {
 	return updateCurrentSymlink(dir, snapshotDir)
 }
 
-// Each write gets its own pool, so no worker or purger goroutine outlives it.
+// at most writerLimit trees are written at once, and the pool lives only for
+// this call, so no worker or purger goroutine outlives it.
 func writeSnapshotWithLimit(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
 	pool := pond.New(writerLimit, writerLimit*10)
 	defer pool.StopAndWait()
