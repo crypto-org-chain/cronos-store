@@ -15,6 +15,7 @@ import (
 
 	protoio "github.com/cosmos/gogoproto/io"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
+	"github.com/crypto-org-chain/cronos-store/store/memiavlstore"
 	"github.com/stretchr/testify/require"
 
 	log "cosmossdk.io/log/v2"
@@ -978,6 +979,37 @@ func TestUnclosedQueryStoreIsReleased(t *testing.T) {
 		runtime.GC()
 		return refs() == 1
 	}, 5*time.Second, 10*time.Millisecond, "an unreachable unclosed store must release its reference")
+}
+
+func TestPinnedStoreKeepsCloserReachable(t *testing.T) {
+	testCases := []struct {
+		name   string
+		derive func(s pinnedStore) any
+	}{
+		{"Iterator", func(s pinnedStore) any { return s.Iterator(nil, nil) }},
+		{"ReverseIterator", func(s pinnedStore) any { return s.ReverseIterator(nil, nil) }},
+		{"CacheWrap", func(s pinnedStore) any { return s.CacheWrap() }},
+		{"CacheWrapWithTrace", func(s pinnedStore) any { return s.CacheWrapWithTrace(nil, nil) }},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var released atomic.Bool
+			derived := func() any {
+				closer := newQueryCloser(func() error { released.Store(true); return nil }, log.NewNopLogger())
+				return tc.derive(pinnedStore{Store: memiavlstore.New(memiavl.New(0), log.NewNopLogger()), pin: closer})
+			}()
+			for i := 0; i < 3; i++ {
+				runtime.GC()
+			}
+			require.False(t, released.Load(), "a live derived store or iterator must keep the db")
+			runtime.KeepAlive(derived)
+
+			require.Eventually(t, func() bool {
+				runtime.GC()
+				return released.Load()
+			}, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 }
 
 func TestFailedReloadDropsStores(t *testing.T) {
