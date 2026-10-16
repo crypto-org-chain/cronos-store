@@ -293,8 +293,8 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 // (CheckTx state on another ABCI connection) may still be reading.
 //
 // The repoint is not atomic across stores. Block execution runs on this
-// goroutine after the publish, so only CheckTx can see a torn view, and that
-// costs it an occasional stale read.
+// goroutine after the publish, so only readers on other connections (CheckTx,
+// simulate) can see a torn view, and that costs them an occasional stale read.
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	info := rs.commitInfoFromDB(rs.db)
 	// no node cache: the snapshot is replaced every Commit, so its cache would start cold every block.

@@ -1501,10 +1501,19 @@ func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	// baseapp's finalize state reads through the mounted stores until Commit.
 	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
 
+	// a write after WorkingHash lands in Commit, which must repoint the mounted stores past the WorkingHash copy.
+	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
 	cid := store.Commit()
 	res, err = store.Query(newQuery(0))
 	require.NoError(t, err)
 	require.Equal(t, []byte("dirty"), res.Value)
 	require.Equal(t, cid.Version, res.Height)
 	require.Equal(t, cid.Version, store.LatestVersion())
+	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("late")))
+	require.Equal(t, []byte("v"), store.CacheMultiStore().GetKVStore(key).Get([]byte("late")))
+
+	// and a block committed without WorkingHash.
+	store.GetKVStore(key).Set([]byte("next"), []byte("v"))
+	store.Commit()
+	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("next")))
 }
