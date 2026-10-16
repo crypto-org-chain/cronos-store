@@ -1036,6 +1036,16 @@ func TestReadPathsReleaseQuerySnapshot(t *testing.T) {
 			require.EqualValues(t, 1, rs.querySnapshot.Load().refs.Load(), "only the publish slot may hold it")
 		})
 	}
+
+	// the SDK's query context passes the latest height explicitly; it must read the snapshot, not load from disk.
+	latest := rs.LatestVersion()
+	cms, err := rs.CacheMultiStoreWithVersion(latest)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, rs.querySnapshot.Load().refs.Load())
+	require.NoError(t, cms.(io.Closer).Close())
+	cached := len(rs.historicalDBCache.entries)
+	require.NoError(t, query(latest, true))
+	require.Len(t, rs.historicalDBCache.entries, cached)
 }
 
 func TestAcquireQuerySnapshotSkipsReleasedSnapshot(t *testing.T) {
