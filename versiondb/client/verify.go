@@ -94,7 +94,8 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				}
 			}
 
-			// without a snapshot to write, each worker's tree is released when it returns.
+			// without a snapshot to write, each worker closes its tree once hashed, so
+			// --concurrency bounds memory even for trees the loaded snapshot owns.
 			keepTrees := len(saveSnapshot) > 0
 			verified := make([]verifiedStore, len(stores))
 			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
@@ -117,8 +118,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				verified[i] = verifiedStore{name: store, version: tree.Version(), hash: tree.RootHash()}
 				if keepTrees {
 					verified[i].tree = tree
+					return nil
 				}
-				return nil
+				return tree.Close()
 			})
 			if err != nil {
 				return err

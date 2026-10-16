@@ -285,15 +285,24 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 			// Only "foo" has change sets past the snapshot; "bar" has none at all.
 			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{tc.baseVersion + 1, finalVersion})
 
-			cmd := VerifyChangeSetCmd(nil)
-			cmd.SetArgs([]string{
-				changeSetDir,
-				"--" + flagStores, bothStores,
-				"--" + flagLoadSnapshot, baseDir,
-				"--" + flagSaveSnapshot, outDir,
-				"--" + flagSave,
-			})
-			require.NoError(t, cmd.Execute())
+			verify := func(extra ...string) []byte {
+				cmd := VerifyChangeSetCmd(nil)
+				cmd.SetArgs(append([]string{
+					changeSetDir,
+					"--" + flagStores, bothStores,
+					"--" + flagLoadSnapshot, baseDir,
+					"--" + flagSave,
+				}, extra...))
+				require.NoError(t, cmd.Execute())
+				result := filepath.Join(changeSetDir, fmt.Sprintf("verified-%d", finalVersion))
+				bz, err := os.ReadFile(result)
+				require.NoError(t, err)
+				require.NoError(t, os.Remove(result))
+				return bz
+			}
+			withSnapshot := verify("--"+flagSaveSnapshot, outDir)
+			// without a snapshot to write, each worker closes its tree, including the unchanged loaded "bar".
+			require.Equal(t, withSnapshot, verify())
 
 			loaded, err := memiavl.LoadMultiTree(outDir, false, 0, "")
 			require.NoError(t, err)
