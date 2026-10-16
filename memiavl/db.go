@@ -174,7 +174,7 @@ const (
 	SnapshotDirLen = len(SnapshotPrefix) + 20
 )
 
-func Load(dir string, opts Options, chainId string) (*DB, error) {
+func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	if err := opts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid options: %w", err)
 	}
@@ -189,7 +189,27 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	var (
 		err      error
 		fileLock FileLock
+		mtree    *MultiTree
+		reader   walReader
+		writer   writeAheadLog
 	)
+	// until the DB takes ownership, an early return would leak the lock, the
+	// snapshot's mmaps and the WAL, and a retried Load could never re-lock the dir.
+	ownershipMoved := false
+	defer func() {
+		if ownershipMoved {
+			return
+		}
+		if mtree != nil {
+			retErr = errors.Join(retErr, mtree.Close())
+		}
+		if reader != nil {
+			retErr = errors.Join(retErr, reader.Close())
+		}
+		if fileLock != nil {
+			retErr = errors.Join(retErr, fileLock.Unlock(), fileLock.Destroy())
+		}
+	}()
 	if !opts.ReadOnly {
 		fileLock, err = LockFile(filepath.Join(dir, LockFileName))
 		if err != nil {
@@ -213,18 +233,17 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	path := filepath.Join(dir, snapshot)
-	mtree, err := LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		reader walReader
-		writer writeAheadLog
-	)
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		reader, err = openReadOnlyWAL(walPath(dir))
+		var readOnly *readOnlyWAL
+		if readOnly, err = openReadOnlyWAL(walPath(dir)); err == nil {
+			reader = readOnly
+		}
 	} else {
 		var writable *wal.Log
 		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
@@ -232,12 +251,12 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		}
 	}
 	if err != nil {
-		return nil, errors.Join(err, mtree.Close())
+		return nil, err
 	}
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, reader.Close(), mtree.Close())
+			return nil, err
 		}
 	}
 
@@ -292,6 +311,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		snapshotWriterLimit:    opts.SnapshotWriterLimit,
 		earliestSnapshotCache:  new(atomic.Int64),
 	}
+	ownershipMoved = true
 	db.attachTraverseStateChanges()
 
 	if !db.readOnly && db.Version() == 0 && len(opts.InitialStores) > 0 {
@@ -301,6 +321,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 			upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
 		}
 		if err := db.ApplyUpgrades(upgrades); err != nil {
+			// the DB owns the lock, tree and WAL now, so Close releases them.
 			return nil, errors.Join(err, db.Close())
 		}
 	}
