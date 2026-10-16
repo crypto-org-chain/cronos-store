@@ -11,8 +11,8 @@ type MemIAVLConfig struct {
 	// the zero-copied slices must not be retained beyond current block's execution.
 	// the sdk address cache will be disabled if zero-copy is enabled.
 	ZeroCopy bool `mapstructure:"zero-copy"`
-	// AsyncCommitBuffer defines the size of asynchronous commit queue, this greatly improve block catching-up
-	// performance, -1 means synchronous commit.
+	// AsyncCommitBuffer defines the size of the asynchronous wal writer's queue, -1 writes the wal on the
+	// committing goroutine. Commit waits for the wal fsync either way.
 	AsyncCommitBuffer int `mapstructure:"async-commit-buffer"`
 	// SnapshotKeepRecent defines what many old snapshots (excluding the latest one) to keep after new snapshots are
 	// taken, defaults to 1 to make sure ibc relayers work.

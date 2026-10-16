@@ -341,6 +341,19 @@ func (rs *Store) latestCommitInfo() *types.CommitInfo {
 	return nil
 }
 
+// keys must be sorted so stores load in deterministic order.
+func (rs *Store) rebuildStores(db *memiavl.DB, keys []types.StoreKey) (map[types.StoreKey]types.CommitStore, error) {
+	newStores := make(map[types.StoreKey]types.CommitStore, len(keys))
+	for _, key := range keys {
+		store, err := rs.loadCommitStoreFromParams(db, key, rs.storesParams[key])
+		if err != nil {
+			return nil, err
+		}
+		newStores[key] = store
+	}
+	return newStores, nil
+}
+
 // flush writes all the pending change sets to memiavl tree.
 func (rs *Store) flush() error {
 	var changeSets []*memiavl.NamedChangeSet
@@ -475,21 +488,26 @@ func (rs *Store) CacheWrapWithTrace(_ io.Writer, _ interface{}) types.CacheWrap 
 	return rs.CacheWrap()
 }
 
-// CacheMultiStore Implements interface MultiStore
+// CacheMultiStore Implements interface MultiStore.
+//
+// Wraps the live rs.stores: Write() must reach them, a snapshot would discard it.
 func (rs *Store) CacheMultiStore() types.CacheMultiStore {
-	stores := make(map[types.StoreKey]types.CacheWrapper)
+	stores := make(map[types.StoreKey]types.CacheWrapper, len(rs.stores))
 	for k, v := range rs.stores {
-		store := types.CacheWrapper(v)
-		if kv, ok := store.(types.KVStore); ok {
-			// Wire the listenkv.Store to allow listeners to observe the writes from the cache store,
-			// set same listeners on cache store will observe duplicated writes.
-			if rs.ListeningEnabled(k) {
-				store = listenkv.NewStore(kv, k, rs.listeners[k])
-			}
-		}
-		stores[k] = store
+		stores[k] = v
 	}
-	return cachemulti.NewStore(stores, nil, nil, nil)
+	return cachemulti.NewStore(rs.wireListeners(stores), nil, nil, nil)
+}
+
+// wireListeners wraps listening-enabled stores in place so listeners see
+// writes made through the cache store.
+func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map[types.StoreKey]types.CacheWrapper {
+	for k, store := range stores {
+		if kv, ok := store.(types.KVStore); ok && rs.ListeningEnabled(k) {
+			stores[k] = listenkv.NewStore(kv, k, rs.listeners[k])
+		}
+	}
+	return stores
 }
 
 func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) types.CacheMultiStore {
@@ -520,6 +538,8 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) typ
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
+// A Write() on the result is discarded for iavl stores (nothing flushes their
+// change sets) but still reaches the transient and mem stores from rs.stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap, err := rs.acquireForVersion(version)
 	if err != nil {
@@ -529,9 +549,8 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		// the caller's Close releases the snapshot, so it outlives later reloads.
 		return rs.cacheMultiStoreFromDB(snap.db, snap.release), nil
 	}
-	// historicalDBCache isn't used here: the returned store's lifetime is owned
-	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
-	// not scoped to this call, so the cache's borrow/release model doesn't fit.
+	// historicalDBCache isn't used here: the caller owns the returned store's
+	// lifetime (closed via the closer arg), so the cache's borrow/release model doesn't fit.
 	db, err := loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 	if err != nil {
 		return nil, err
@@ -738,12 +757,9 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
-	newStores := make(map[types.StoreKey]types.CommitStore, len(storesKeys))
-	for _, key := range storesKeys {
-		newStores[key], err = rs.loadCommitStoreFromParams(db, key, rs.storesParams[key])
-		if err != nil {
-			return err
-		}
+	newStores, err := rs.rebuildStores(db, storesKeys)
+	if err != nil {
+		return err
 	}
 
 	rs.db = db
@@ -875,11 +891,30 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	opts.TargetVersion = uint32(target)
 	opts.LoadForOverwriting = true
 
-	var err error
-	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
+	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return err
 	}
+
+	// a store an upgrade after target added has no tree yet; that upgrade re-adds
+	// it on restart.
+	keys := make([]types.StoreKey, 0, len(rs.storesParams))
+	for key, params := range rs.storesParams {
+		if params.typ == types.StoreTypeIAVL && db.TreeByName(key.Name()) == nil {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Name() < keys[j].Name() })
+
+	newStores, err := rs.rebuildStores(db, keys)
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	rs.db = db
+	rs.stores = newStores
+
 	rs.publishQuerySnapshot()
 
 	return nil

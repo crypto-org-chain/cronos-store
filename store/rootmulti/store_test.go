@@ -452,6 +452,25 @@ func TestCloseClearsQuerySnapshot(t *testing.T) {
 	require.Nil(t, rs.querySnapshot.Load(), "Close must drop the querySnapshot before closing rs.db")
 }
 
+func TestRollbackToVersionRebuildsStores(t *testing.T) {
+	dir := t.TempDir()
+	rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+
+	key := types.NewKVStoreKey("test")
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
+	rs.Commit()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
+	rs.Commit()
+
+	require.NoError(t, rs.RollbackToVersion(1))
+	t.Cleanup(func() { rs.Close() })
+
+	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
+}
+
 func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 
@@ -1332,6 +1351,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	}()
 
 	readers := []func(){
+		// wraps live rs.stores: only construction is safe here, not a read.
 		func() { store.CacheMultiStore() },
 		func() {
 			cms, err := store.CacheMultiStoreWithVersion(0)

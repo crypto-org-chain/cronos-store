@@ -18,8 +18,8 @@ enable = {{ .MemIAVL.Enable }}
 # unmapped by the historical store cache while a response is still in flight.
 zero-copy = {{ .MemIAVL.ZeroCopy }}
 
-# AsyncCommitBuffer defines the size of asynchronous commit queue, this greatly improve block catching-up
-# performance, -1 means synchronous commit.
+# AsyncCommitBuffer defines the size of the asynchronous wal writer's queue, -1 writes the wal on the
+# committing goroutine. Commit waits for the wal fsync either way.
 async-commit-buffer = {{ .MemIAVL.AsyncCommitBuffer }}
 
 # SnapshotKeepRecent defines what many old snapshots (excluding the latest one) to keep after new snapshots are
