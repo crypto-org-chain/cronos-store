@@ -802,13 +802,13 @@ func (db *DB) waitAsyncCommit() error {
 	return db.latchWalErr(err)
 }
 
-// Copy returns a view of the current state that shares the live
+// Copy returns a read-only view of the current state that shares the live
 // snapshot's mmap. It stays valid across reloads; Close it when done.
 func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	return db.readOnlyCopy(db.cacheSize)
 }
 
 // CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
@@ -817,7 +817,15 @@ func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(cacheSize)
+	return db.readOnlyCopy(cacheSize)
+}
+
+// A copy has no WAL and shares the source's directory, so writes through it
+// would be lost or would rewrite the source's snapshots.
+func (db *DB) readOnlyCopy(cacheSize int) *DB {
+	cloned := db.copy(cacheSize)
+	cloned.readOnly = true
+	return cloned
 }
 
 func (db *DB) copy(cacheSize int) *DB {
