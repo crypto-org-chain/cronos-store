@@ -3,6 +3,7 @@
 ## UNRELEASED
 
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
+- [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
 - [#137](https://github.com/crypto-org-chain/cronos-store/pull/137) fix(versiondb): compress flushed sst files
