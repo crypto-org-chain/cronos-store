@@ -262,26 +262,26 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			}
 		}
 
-		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
-		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
-			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
-		}
-
-		// prune snapshots that's larger than the target version
+		// newer snapshots go before the WAL heights they cover, so a failed or interrupted
+		// rollback never leaves a stale one behind and can be re-run.
 		if err := traverseSnapshots(dir, false, func(version int64) (bool, error) {
 			if version <= int64(opts.TargetVersion) {
 				return true, nil
 			}
 
 			if err := atomicRemoveDir(filepath.Join(dir, snapshotName(version))); err != nil {
-				opts.Logger.Error("fail to prune snapshot", "version", version, "err", err)
-			} else {
-				opts.Logger.Info("prune snapshot", "version", version)
+				return true, fmt.Errorf("version %d: %w", version, err)
 			}
+			opts.Logger.Info("prune snapshot", "version", version)
 			return false, nil
 		}); err != nil {
 			return nil, fmt.Errorf("fail to prune snapshots: %w", err)
+		}
+
+		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
+		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
+		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
+			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 	}
 	db := &DB{

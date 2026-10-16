@@ -1907,6 +1907,82 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 	}
 }
 
+func TestFailedRollbackLeavesLoadableState(t *testing.T) {
+	const target = 3
+
+	testCases := []struct {
+		name string
+		// root ignores directory permissions, which this case relies on.
+		needsNonRoot bool
+		// breaks one rollback step and returns how to repair it.
+		malleate func(t *testing.T, dir string) (repair func())
+		expErr   string
+	}{
+		{
+			name: "newer snapshot deletion fails",
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				// a file where the rename target belongs: removeTmpDirs skips files, and renaming a dir onto one fails.
+				blocker := filepath.Join(dir, snapshotName(4)+TmpSuffix)
+				require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+				return func() { require.NoError(t, os.Remove(blocker)) }
+			},
+			expErr: "fail to prune snapshot",
+		},
+		{
+			name:         "wal truncation fails",
+			needsNonRoot: true,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				// a read-only wal dir fails TruncateBack.
+				require.NoError(t, os.Chmod(walPath(dir), 0o500))
+				return func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) }
+			},
+			expErr: "fail to truncate wal logs",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsNonRoot && os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			for h := 1; h <= 5; h++ {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", h), "v")))
+				_, err := db.Commit()
+				require.NoError(t, err)
+				if h == 2 || h == 4 {
+					require.NoError(t, db.RewriteSnapshot())
+				}
+			}
+			require.NoError(t, db.Close())
+
+			repair := tc.malleate(t, dir)
+			_, err = Load(dir, Options{TargetVersion: target, LoadForOverwriting: true}, TestAppChainID)
+			require.ErrorContains(t, err, tc.expErr)
+			repair()
+
+			// a normal start after the failed rollback still sees the pre-rollback chain.
+			db, err = Load(dir, Options{}, TestAppChainID)
+			require.NoError(t, err)
+			require.EqualValues(t, 5, db.Version())
+			require.Equal(t, []byte("v"), db.TreeByName(testStoreName).Get([]byte("k5")))
+			require.NoError(t, db.Close())
+
+			// re-running the rollback completes it.
+			db, err = Load(dir, Options{TargetVersion: target, LoadForOverwriting: true}, TestAppChainID)
+			require.NoError(t, err)
+			require.EqualValues(t, target, db.Version())
+			require.Nil(t, db.TreeByName(testStoreName).Get([]byte("k4")))
+			require.NoError(t, db.Close())
+			require.NoDirExists(t, filepath.Join(dir, snapshotName(4)))
+		})
+	}
+}
+
 func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 	dir := t.TempDir()
 	logger := &recordingLogger{}
