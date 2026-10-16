@@ -1,9 +1,8 @@
 package rootmulti
 
 import (
-	"fmt"
-
 	"errors"
+	"fmt"
 	"io"
 	"math"
 
