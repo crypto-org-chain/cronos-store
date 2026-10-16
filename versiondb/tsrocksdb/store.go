@@ -56,9 +56,6 @@ func NewStore(dir string) (Store, error) {
 	}, nil
 }
 
-// NewStoreWithDB adopts a caller-owned db and cfHandle. The caller keeps
-// ownership, so the returned store must not be Closed: grocksdb's close and
-// destroy have no nil guard, and a second one segfaults.
 func NewStoreWithDB(db *grocksdb.DB, cfHandle *grocksdb.ColumnFamilyHandle) Store {
 	return Store{
 		db:       db,
@@ -244,6 +241,7 @@ func (s Store) Flush() error {
 }
 
 // Close does not flush the memtable; call Flush first if durability is needed.
+// Close releases the db and cfHandle, also ones passed to NewStoreWithDB; grocksdb crashes if either is released twice.
 func (s Store) Close() error {
 	s.cfHandle.Destroy()
 	s.db.Close()
