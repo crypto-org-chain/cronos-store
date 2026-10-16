@@ -1839,6 +1839,16 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			expErr: "fail to read current version",
 		},
 		{
+			name: "rollback snapshot deletion fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				// a file where the rename target belongs: removeTmpDirs skips files, and renaming a dir onto one fails.
+				require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(3)+TmpSuffix), nil, 0o600))
+				return Options{TargetVersion: 2, LoadForOverwriting: true}
+			},
+			expErr: "fail to prune snapshots",
+		},
+		{
 			name:         "rollback wal truncation fails",
 			needsNonRoot: true,
 			malleate: func(t *testing.T, dir string, _ *DB) Options {
@@ -1908,30 +1918,35 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 }
 
 func TestFailedRollbackLeavesLoadableState(t *testing.T) {
-	const target = 3
-
 	testCases := []struct {
 		name string
 		// root ignores directory permissions, which this case relies on.
 		needsNonRoot bool
-		// breaks one rollback step and returns how to repair it.
+		target       uint32
+		// breaks one rollback step and returns an idempotent repair.
 		malleate func(t *testing.T, dir string) (repair func())
 		expErr   string
+		// what the failed rollback must have left on disk, beyond staying loadable.
+		failedState func(t *testing.T, dir string)
+		retryable   bool
 	}{
 		{
-			name: "newer snapshot deletion fails",
+			name:   "newer snapshot deletion fails",
+			target: 3,
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
 				// a file where the rename target belongs: removeTmpDirs skips files, and renaming a dir onto one fails.
 				blocker := filepath.Join(dir, snapshotName(4)+TmpSuffix)
 				require.NoError(t, os.WriteFile(blocker, nil, 0o600))
-				return func() { require.NoError(t, os.Remove(blocker)) }
+				return func() { require.NoError(t, os.RemoveAll(blocker)) }
 			},
-			expErr: "fail to prune snapshot",
+			expErr:    "fail to prune snapshots",
+			retryable: true,
 		},
 		{
 			name:         "wal truncation fails",
 			needsNonRoot: true,
+			target:       3,
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
 				// a read-only wal dir fails TruncateBack.
@@ -1939,6 +1954,30 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				return func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) }
 			},
 			expErr: "fail to truncate wal logs",
+			failedState: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoDirExists(t, filepath.Join(dir, snapshotName(4)), "newer snapshots must go before the wal cut")
+			},
+			retryable: true,
+		},
+		{
+			name:   "target below the wal",
+			target: 2,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+				require.NoError(t, err)
+				require.NoError(t, errors.Join(wl.TruncateFront(3), wl.Close()))
+				return func() {}
+			},
+			expErr: "out of range",
+			failedState: func(t *testing.T, dir string) {
+				t.Helper()
+				current, err := os.Readlink(currentPath(dir))
+				require.NoError(t, err)
+				require.Equal(t, snapshotName(4), current, "a cut-back that can't succeed must change nothing")
+				require.DirExists(t, filepath.Join(dir, snapshotName(4)))
+			},
 		},
 	}
 
@@ -1961,9 +2000,13 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			require.NoError(t, db.Close())
 
 			repair := tc.malleate(t, dir)
-			_, err = Load(dir, Options{TargetVersion: target, LoadForOverwriting: true}, TestAppChainID)
+			t.Cleanup(repair)
+			_, err = Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
 			require.ErrorContains(t, err, tc.expErr)
 			repair()
+			if tc.failedState != nil {
+				tc.failedState(t, dir)
+			}
 
 			// a normal start after the failed rollback still sees the pre-rollback chain.
 			db, err = Load(dir, Options{}, TestAppChainID)
@@ -1972,10 +2015,13 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			require.Equal(t, []byte("v"), db.TreeByName(testStoreName).Get([]byte("k5")))
 			require.NoError(t, db.Close())
 
+			if !tc.retryable {
+				return
+			}
 			// re-running the rollback completes it.
-			db, err = Load(dir, Options{TargetVersion: target, LoadForOverwriting: true}, TestAppChainID)
+			db, err = Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
 			require.NoError(t, err)
-			require.EqualValues(t, target, db.Version())
+			require.EqualValues(t, tc.target, db.Version())
 			require.Nil(t, db.TreeByName(testStoreName).Get([]byte("k4")))
 			require.NoError(t, db.Close())
 			require.NoDirExists(t, filepath.Join(dir, snapshotName(4)))
