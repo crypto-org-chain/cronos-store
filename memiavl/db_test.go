@@ -715,8 +715,6 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
-	// the default async writer may not have written the entry yet, and the corrupt one must come after it.
-	require.NoError(t, db.WaitAsyncCommit())
 	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
 
@@ -1394,8 +1392,6 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
-	// the default async writer may not have written the entry yet.
-	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
