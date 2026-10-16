@@ -29,15 +29,15 @@ const (
 
 var errReadOnly = errors.New("db is read-only")
 
-// onlyGenesisSnapshot is the earliestSnapshotCache marker for "the earliest
+// earliestIsGenesis is the earliestSnapshotCache marker for "the earliest
 // kept snapshot is snapshot-0"; a real earliest version is always positive and
 // zero means uncached.
-const onlyGenesisSnapshot = -1
+const earliestIsGenesis = -1
 
 // earliestCacheEntry keeps snapshot-0 distinct from the uncached zero.
 func earliestCacheEntry(snapshotVersion int64) int64 {
 	if snapshotVersion == 0 {
-		return onlyGenesisSnapshot
+		return earliestIsGenesis
 	}
 	return snapshotVersion
 }
@@ -1127,9 +1127,9 @@ func (db *DB) FirstVersion() (int64, error) {
 //
 // SDK callers may hit this on every height-bound query, so the earliest
 // snapshot version is cached and refreshed by pruneSnapshots instead of
-// scanning the snapshot directory. While only snapshot-0 is left, the result is
-// initialVersion, read under db.mtx since SetInitialVersion and Reload can
-// still change it.
+// scanning the snapshot directory. While snapshot-0 is the earliest one kept,
+// the result is initialVersion, read under db.mtx since SetInitialVersion and
+// Reload can still change it.
 func (db *DB) EarliestVersion() (int64, error) {
 	v := db.earliestSnapshotCache.Load()
 	if v == 0 {

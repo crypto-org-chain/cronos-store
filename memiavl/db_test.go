@@ -1475,7 +1475,7 @@ func TestEarliestVersionCachesGenesisMarker(t *testing.T) {
 	}{
 		{name: "snapshot-0 pruned", keepRecent: 0, wantCache: 102, wantEarliest: 102},
 		// a zero cache here would force a snapshot dir rescan after every prune
-		{name: "snapshot-0 kept", keepRecent: 1, wantCache: onlyGenesisSnapshot, wantEarliest: 100},
+		{name: "snapshot-0 kept", keepRecent: 1, wantCache: earliestIsGenesis, wantEarliest: 100},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1494,7 +1494,7 @@ func TestEarliestVersionCachesGenesisMarker(t *testing.T) {
 			require.EqualValues(t, 1, fallback)
 			// The genesis-only state must still be cached: this runs on the query hot
 			// path and a miss costs a directory scan.
-			require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
+			require.EqualValues(t, earliestIsGenesis, db.earliestSnapshotCache.Load())
 
 			// InitChain sets the initial version after the store is loaded; a cached
 			// fallback value would keep reporting 1 here.
@@ -2007,7 +2007,7 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	// the cache is shared, so the copy's first scan fills it for the live db too.
 	_, err = cp.EarliestVersion()
 	require.NoError(t, err)
-	require.EqualValues(t, onlyGenesisSnapshot, db.earliestSnapshotCache.Load())
+	require.EqualValues(t, earliestIsGenesis, db.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
