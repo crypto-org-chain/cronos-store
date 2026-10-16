@@ -287,7 +287,7 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	db.SetZeroCopy(false)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
-	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
+	rs.setMountedTrees(rs.db.UnpinnedCopy(0))
 	return info
 }
 

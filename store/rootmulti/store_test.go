@@ -1549,6 +1549,30 @@ func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
 	}
 }
 
+func TestMountedStoresReadACopyAfterReload(t *testing.T) {
+	dir := t.TempDir()
+	key := types.NewKVStoreKey(testStoreName)
+	open := func() *Store {
+		rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+		rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+		require.NoError(t, rs.LoadLatestVersion())
+		return rs
+	}
+	rs := open()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	rs.Commit()
+	require.NoError(t, rs.Close())
+
+	rs = open()
+	t.Cleanup(func() { rs.Close() })
+	// a mounted store still on the live tree would see this uncommitted write.
+	require.NoError(t, rs.db.ApplyChangeSets([]*memiavl.NamedChangeSet{{
+		Name:      testStoreName,
+		Changeset: memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte("live")}}},
+	}}))
+	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
+}
+
 // WorkingHash flushes the next block into the live tree before Commit.
 func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	store, versions := newTestStore(t, 1)
