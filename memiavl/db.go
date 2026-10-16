@@ -106,9 +106,9 @@ type DB struct {
 	// worker goroutine IdleTimeout = 5s
 	snapshotWriterPool *pond.WorkerPool
 
-	// cached earliest snapshot version. Loaded lazily and refreshed by
-	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory.
+	// earliest retained snapshot version, filled lazily and refreshed by
+	// pruneSnapshots. Zero means not cached yet; onlyGenesisSnapshot means only
+	// snapshot-0 is left, so readers report initialVersion instead.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
@@ -1106,9 +1106,11 @@ func (db *DB) FirstVersion() (int64, error) {
 // the earliest snapshot are pruned, so the snapshot version is the true
 // lower bound for queries.
 //
-// The result is cached and refreshed by pruneSnapshots. SDK callers may hit
-// this on every height-bound query, so we avoid scanning the snapshot
-// directory on the hot path.
+// SDK callers may hit this on every height-bound query, so the earliest
+// snapshot version is cached and refreshed by pruneSnapshots instead of
+// scanning the snapshot directory. While only snapshot-0 is left, the result is
+// initialVersion, read under db.mtx since SetInitialVersion and Reload can
+// still change it.
 func (db *DB) EarliestVersion() (int64, error) {
 	v := db.earliestSnapshotCache.Load()
 	if v == 0 {
