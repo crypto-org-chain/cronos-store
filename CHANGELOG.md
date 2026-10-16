@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot. API breaking: memiavl `Tree.Copy`, `MultiTree.Copy`, `DB.Copy` and `DB.CopyWithCacheSize` copies must be closed (an unclosed one keeps its snapshot mapped), and `DB` copies are read-only; stores from `CacheMultiStoreWithVersion` must be closed, which needs crypto-org-chain/cosmos-sdk#1849 for out-of-gas gRPC queries.
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load
