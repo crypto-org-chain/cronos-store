@@ -26,10 +26,7 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
-	// swapped by SetTree while CheckTx reads on another ABCI connection. A mounted
-	// store gets a new unpinned copy every WorkingHash and Commit, never the live
-	// tree flush mutates in place, so a reader on an older pointer stays valid until
-	// the second snapshot reload after that copy was taken, or until the DB closes.
+	// swapped by SetTree while readers on other ABCI connections use it.
 	tree   atomic.Pointer[memiavl.Tree]
 	logger log.Logger
 
@@ -170,8 +167,7 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		subspace := req.Data
 		res.Key = subspace
 
-		// use the tree loaded above, or a concurrent SetTree could serve a newer
-		// version than res.Height reports.
+		// the tree loaded above, so a concurrent SetTree can't change the version mid-query.
 		iterator := tree.Iterator(subspace, types.PrefixEndBytes(subspace), true)
 		for ; iterator.Valid(); iterator.Next() {
 			pairs.Pairs = append(pairs.Pairs, memiavl.Pair{Key: iterator.Key(), Value: iterator.Value()})
@@ -205,13 +201,11 @@ func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocry
 	)
 
 	if exists {
-		// the value came from this tree, so a failure means the tree is inconsistent.
 		commitmentProof, err = tree.GetMembershipProof(key)
 		if err != nil {
 			return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build membership proof for key %X: %s", key, err)
 		}
 	} else {
-		// an empty tree has no absence proof; that is the querier's problem, not a panic.
 		commitmentProof, err = tree.GetNonMembershipProof(key)
 		if err != nil {
 			return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build non-membership proof for key %X: %s", key, err)

@@ -277,13 +277,9 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
-// publishQuerySnapshot also repoints the mounted iavl stores at a fresh copy:
-// flush mutates the live trees in place while readers branched off rs.stores
-// (CheckTx state on another ABCI connection) may still be reading.
-//
-// The repoint is not atomic across stores. Block execution runs on this
-// goroutine after the publish, so only readers on other connections (CheckTx,
-// simulate) can see a torn view, and that costs them an occasional stale read.
+// publishQuerySnapshot also repoints the mounted stores at a copy, since flush mutates the
+// live trees in place. The repoint isn't atomic across stores, so readers on other ABCI
+// connections can briefly see a mix of two versions.
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
 	db := rs.db.CopyWithCacheSize(0)
@@ -291,9 +287,6 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	db.SetZeroCopy(false)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
-	// block execution reads the mounted stores, so they keep the node cache. Unpinned:
-	// readers hold no reference, so the copy is valid until the second snapshot reload
-	// after it is taken, or until the DB closes.
 	rs.setMountedTrees(rs.db.UnpinnedCopy(rs.opts.CacheSize))
 	return info
 }
@@ -397,8 +390,8 @@ func (rs *Store) WorkingHash() []byte {
 		panic(err)
 	}
 	commitInfo := rs.sdkCommitInfo(rs.db.WorkingCommitInfo())
-	// reads before Commit (retention height, Precommit) must see this block's
-	// writes. Copied after hashing, so SaveVersion only reads the shared nodes.
+	// reads before Commit must see this block's writes; copied after hashing so
+	// SaveVersion only reads the shared nodes.
 	rs.setMountedTrees(rs.db.UnpinnedCopy(0))
 	return commitInfo.Hash()
 }
@@ -420,7 +413,6 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// also repoints the mounted stores' trees, which db.Commit may have reloaded.
 	return rs.publishQuerySnapshot().CommitID()
 }
 
@@ -549,8 +541,7 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) typ
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
-// A Write() on the result is discarded for iavl stores (nothing flushes their
-// change sets) but still reaches the transient and mem stores from rs.stores.
+// A Write() on the result is dropped for iavl stores but reaches the transient and mem stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap, err := rs.acquireForVersion(version)
 	if err != nil {
@@ -727,7 +718,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
-	// reads go through copies that get their own cache; the live trees are only written.
+	// the live trees are only written; reads go through copies.
 	opts.CacheSize = 0
 	// a previously loaded db holds the directory lock memiavl.Load needs.
 	rs.closeDBForReload()
@@ -908,13 +899,6 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return err
-	}
-	// a store an upgrade after target added has no tree to repoint to; that
-	// upgrade re-adds it on restart.
-	for key, store := range rs.stores {
-		if _, ok := store.(*memiavlstore.Store); ok && rs.db.TreeByName(key.Name()) == nil {
-			delete(rs.stores, key)
-		}
 	}
 	rs.publishQuerySnapshot()
 

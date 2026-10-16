@@ -1294,9 +1294,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 	testCases := []struct {
 		name string
 		opts memiavl.Options
-		// reloadEvery > 0 rewrites and reloads the snapshot before every n-th block, outside
-		// Commit; otherwise db.Commit reloads in the background and publishQuerySnapshot
-		// repoints right after, as in production.
+		// > 0 reloads before every n-th block; 0 leaves reloads to db.Commit, as in production.
 		reloadEvery int
 	}{
 		{name: "explicit reloads", reloadEvery: 5},
@@ -1322,9 +1320,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 				maxCommits = 10000
 			)
 			done := make(chan struct{})
-			// CheckTx-style readers never span a reload: CometBFT's mempool lock (cronos's
-			// app-mempool mutex with mempool.type=app) excludes them during Commit, and an
-			// unpinned copy is unmapped at the second reload after it is taken.
+			// like CheckTx under the mempool lock, readers never span a Commit.
 			var mempool sync.RWMutex
 
 			var wg sync.WaitGroup
@@ -1547,7 +1543,7 @@ func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	// baseapp's finalize state reads through the mounted stores until Commit.
 	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
 
-	// a write after WorkingHash lands in Commit, which must repoint the mounted stores past the WorkingHash copy.
+	// a write after WorkingHash must show once Commit repoints the stores.
 	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
 	cid := store.Commit()
 	res, err = store.Query(newQuery(0))
