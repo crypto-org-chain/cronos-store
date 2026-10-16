@@ -872,7 +872,7 @@ func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	return db.readOnlyCopy(db.cacheSize)
 }
 
 // CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
@@ -881,7 +881,15 @@ func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(cacheSize)
+	return db.readOnlyCopy(cacheSize)
+}
+
+// A copy has no WAL and shares the source's directory, so writes through it
+// would be lost or would rewrite the source's snapshots.
+func (db *DB) readOnlyCopy(cacheSize int) *DB {
+	cloned := db.copy(cacheSize)
+	cloned.readOnly = true
+	return cloned
 }
 
 func (db *DB) copy(cacheSize int) *DB {
@@ -1198,9 +1206,14 @@ func (db *DB) EarliestVersion() (int64, error) {
 			v = 1
 		}
 	}
-	// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
-	db.earliestSnapshotCache.CompareAndSwap(0, v)
+	db.cacheEarliestVersion(v)
 	return v, nil
+}
+
+// cacheEarliestVersion fills only an empty cache, so a scan that raced a prune
+// can't overwrite the prune's newer value.
+func (db *DB) cacheEarliestVersion(v int64) {
+	db.earliestSnapshotCache.CompareAndSwap(0, v)
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.

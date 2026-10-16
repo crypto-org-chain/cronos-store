@@ -306,6 +306,69 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	require.Nil(t, snapshot.nodesMap)
 }
 
+func TestCopyRejectsWrites(t *testing.T) {
+	copies := []struct {
+		name string
+		copy func(db *DB) *DB
+	}{
+		{"Copy", (*DB).Copy},
+		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }},
+	}
+	writes := []struct {
+		name  string
+		write func(cp *DB) error
+	}{
+		{"ApplyChangeSets", func(cp *DB) error {
+			return cp.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2"))
+		}},
+		{"ApplyChangeSet", func(cp *DB) error {
+			return cp.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: []byte("v2")}}})
+		}},
+		{"SaveVersion", func(cp *DB) error { _, err := cp.SaveVersion(true); return err }},
+		{"Commit", func(cp *DB) error { _, err := cp.Commit(); return err }},
+		{"SetInitialVersion", func(cp *DB) error { return cp.SetInitialVersion(100) }},
+		{"ApplyUpgrades", func(cp *DB) error { return cp.ApplyUpgrades([]*TreeNameUpgrade{{Name: "new"}}) }},
+		{"RewriteSnapshot", func(cp *DB) error { return cp.RewriteSnapshot() }},
+		{"RewriteSnapshotBackground", func(cp *DB) error { return cp.RewriteSnapshotBackground() }},
+	}
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			_, err = db.Commit()
+			require.NoError(t, err)
+			if readOnly {
+				require.NoError(t, db.Close())
+				db, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+			}
+			defer func() { require.NoError(t, db.Close()) }()
+			current, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+
+			for _, c := range copies {
+				for _, w := range writes {
+					t.Run(c.name+"/"+w.name, func(t *testing.T) {
+						cp := c.copy(db)
+						defer func() { require.NoError(t, cp.Close()) }()
+						require.ErrorIs(t, w.write(cp), errReadOnly)
+					})
+				}
+				cp := c.copy(db)
+				require.Panics(t, func() { cp.UpdateCommitInfo() })
+				require.NoError(t, cp.Close())
+			}
+			// a rejected write must not swap the live snapshot.
+			after, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+			require.Equal(t, current, after)
+			require.Equal(t, int64(1), db.Version())
+		})
+	}
+}
+
 func TestCloseDuringSnapshotPrune(t *testing.T) {
 	for iter := 0; iter < 50; iter++ {
 		db, err := Load(t.TempDir(), Options{
@@ -1664,6 +1727,18 @@ func TestEarliestVersion(t *testing.T) {
 
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
 // height 0 for unpruned stores that still have snapshot-0 on disk.
+func TestCacheEarliestVersionKeepsAPrunedValue(t *testing.T) {
+	db := &DB{earliestSnapshotCache: new(atomic.Int64)}
+	// a prune stored 5 while a scan that saw snapshot 2 was in flight.
+	db.earliestSnapshotCache.Store(5)
+	db.cacheEarliestVersion(2)
+	require.EqualValues(t, 5, db.earliestSnapshotCache.Load())
+
+	db.earliestSnapshotCache.Store(0)
+	db.cacheEarliestVersion(2)
+	require.EqualValues(t, 2, db.earliestSnapshotCache.Load())
+}
+
 func TestEarliestVersionUnpruned(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,

@@ -290,7 +290,7 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	info := rs.commitInfoFromDB(rs.db)
-	// no node cache: the snapshot is replaced every Commit, so it never warms up.
+	// no node cache: the snapshot is replaced every Commit, so its cache would start cold every block.
 	db := rs.db.CopyWithCacheSize(0)
 	// the last release can unmap this snapshot while a caller still holds a ResponseQuery referencing it.
 	db.SetZeroCopy(false)
@@ -302,12 +302,16 @@ func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
 	if db.Version() == 0 {
 		return &types.CommitInfo{}
 	}
-	info := convertCommitInfo(db.LastCommitInfo())
+	return rs.sdkCommitInfo(db.LastCommitInfo())
+}
+
+func (rs *Store) sdkCommitInfo(info *memiavl.CommitInfo) *types.CommitInfo {
+	commitInfo := convertCommitInfo(info)
 	// to keep the root hash compatible with cosmos-sdk 0.46
 	if rs.sdk46Compact {
-		info = amendCommitInfo(info, rs.storesParams)
+		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
 	}
-	return info
+	return commitInfo
 }
 
 // replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
@@ -391,11 +395,7 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	commitInfo := convertCommitInfo(rs.db.WorkingCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
-	}
-	return commitInfo.Hash()
+	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
 }
 
 // Commit Implements interface Committer
@@ -446,10 +446,8 @@ func (rs *Store) closeDB() error {
 // closeDBForReload releases the current db and every cached historical db so a
 // replacement can be loaded over the same directory.
 //
-// Close errors are logged, not returned: memiavl.DB.Close finishes its cleanup
-// regardless and its WAL error latch is sticky, so returning would wedge every
-// retry. The unsynced WAL tail such an error implies is what a rollback or
-// restore discards anyway.
+// Close errors are logged, not returned: closeDB drops the old db either way,
+// and aborting here would leave the store with no db at all.
 func (rs *Store) closeDBForReload() {
 	if err := rs.closeDB(); err != nil {
 		rs.logger.Error("failed to close memiavl db before reload", "err", err)
@@ -577,7 +575,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 }
 
 // acquireForVersion returns the published snapshot, with a reference to release, when
-// version is 0 or its height, and nil when version is an older height to load from disk.
+// version is 0 or its height, and (nil, nil) for any other height, which callers load from disk.
 func (rs *Store) acquireForVersion(version int64) (*querySnapshot, error) {
 	snap := rs.acquireQuerySnapshot()
 	if snap == nil {
@@ -1039,9 +1037,9 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "proof is unexpectedly empty; ensure height has not been pruned")
 	}
 
-	// skip the per-store conversion on every proved query.
+	// the published snapshot already holds its converted commit info.
 	var commitInfo *types.CommitInfo
-	if snap != nil && db == snap.db {
+	if snap != nil {
 		commitInfo = snap.lastCommitInfo
 	} else {
 		commitInfo = rs.commitInfoFromDB(db)
