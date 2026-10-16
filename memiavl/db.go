@@ -124,7 +124,8 @@ type Options struct {
 	CacheSize int
 	// LoadForOverwriting if true rollbacks the state, specifically the Load method will
 	// truncate the versions after the `TargetVersion`, the `TargetVersion` becomes the latest version.
-	// it do nothing if the target version is `0`.
+	// it does nothing if the target version is `0`, and fails with wal.ErrOutOfRange before touching
+	// the snapshots or the WAL if the target is outside the WAL.
 	LoadForOverwriting bool
 
 	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.
@@ -208,6 +209,10 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err := removeTmpDirs(dir); err != nil {
 			return nil, fmt.Errorf("fail to cleanup tmp directories: %w", err)
 		}
+		// a crash inside updateCurrentSymlink leaves this behind, and it would fail every later link update.
+		if err := os.Remove(currentTmpPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("fail to cleanup tmp current link: %w", err)
+		}
 	}
 
 	snapshot := "current"
@@ -242,46 +247,68 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
+	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
+	var targetIndex uint64
+	if rollback {
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject a target TruncateBack
+		// can't reach (tidwall/wal's ErrOutOfRange rule) before replaying or touching the snapshots.
+		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
+		firstIndex, err := writer.FirstIndex()
+		if err != nil {
+			return nil, fmt.Errorf("fail to read wal first index: %w", err)
+		}
+		lastIndex, err := writer.LastIndex()
+		if err != nil {
+			return nil, fmt.Errorf("fail to read wal last index: %w", err)
+		}
+		if targetIndex == 0 || lastIndex == 0 || targetIndex < firstIndex || targetIndex > lastIndex {
+			return nil, fmt.Errorf("rollback target version %d is outside the wal: %w", opts.TargetVersion, wal.ErrOutOfRange)
+		}
+	}
+
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
 	}
 
-	if opts.LoadForOverwriting && opts.TargetVersion > 0 {
+	if rollback {
 		currentSnapshot, err := os.Readlink(currentPath(dir))
 		if err != nil {
 			return nil, fmt.Errorf("fail to read current version: %w", err)
 		}
 
 		if snapshot != currentSnapshot {
-			// downgrade `"current"` link first
+			// the link moves first: the older snapshot is valid with both the full and the cut-back WAL.
 			opts.Logger.Info("downgrade current link to", "snapshot", snapshot)
 			if err := updateCurrentSymlink(dir, snapshot); err != nil {
 				return nil, fmt.Errorf("fail to update current snapshot link: %w", err)
 			}
 		}
 
-		// truncate the WAL; writer is set because Validate rejects LoadForOverwriting with ReadOnly.
-		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := writer.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
-			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
-		}
-
-		// prune snapshots that's larger than the target version
+		// delete newer snapshots before cutting back the WAL, so none outlives the heights it
+		// covers and a failed or interrupted rollback can be re-run.
 		if err := traverseSnapshots(dir, false, func(version int64) (bool, error) {
 			if version <= int64(opts.TargetVersion) {
 				return true, nil
 			}
 
 			if err := atomicRemoveDir(filepath.Join(dir, snapshotName(version))); err != nil {
-				opts.Logger.Error("fail to prune snapshot", "version", version, "err", err)
-			} else {
-				opts.Logger.Info("prune snapshot", "version", version)
+				return true, fmt.Errorf("version %d: %w", version, err)
 			}
+			opts.Logger.Info("prune snapshot", "version", version)
 			return false, nil
 		}); err != nil {
 			return nil, fmt.Errorf("fail to prune snapshots: %w", err)
+		}
+		// persist the deletions before the cut, so a power loss can't bring a snapshot back.
+		if err := fsyncDir(dir); err != nil {
+			return nil, fmt.Errorf("fail to sync snapshot deletions: %w", err)
+		}
+
+		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
+		if err := writer.TruncateBack(targetIndex); err != nil {
+			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
 		}
 	}
 	db := &DB{
