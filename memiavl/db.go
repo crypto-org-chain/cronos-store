@@ -34,8 +34,8 @@ var errReadOnly = errors.New("db is read-only")
 // zero means uncached.
 const onlyGenesisSnapshot = -1
 
-// earliestCacheValue keeps snapshot-0 distinct from the uncached zero.
-func earliestCacheValue(snapshotVersion int64) int64 {
+// earliestCacheEntry keeps snapshot-0 distinct from the uncached zero.
+func earliestCacheEntry(snapshotVersion int64) int64 {
 	if snapshotVersion == 0 {
 		return onlyGenesisSnapshot
 	}
@@ -107,8 +107,7 @@ type DB struct {
 	snapshotWriterPool *pond.WorkerPool
 
 	// earliest retained snapshot version, filled lazily and refreshed by
-	// pruneSnapshots. Zero means not cached yet; onlyGenesisSnapshot means only
-	// snapshot-0 is left, so readers report initialVersion instead.
+	// pruneSnapshots; zero means not cached.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
@@ -670,7 +669,7 @@ func (db *DB) pruneSnapshots() {
 			db.logger.Error("failed to find first snapshot", "err", err)
 			return
 		}
-		db.earliestSnapshotCache.Store(earliestCacheValue(earliestVersion))
+		db.earliestSnapshotCache.Store(earliestCacheEntry(earliestVersion))
 
 		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
 		// the genesis placeholder snapshot has no corresponding wal entries yet.
@@ -1118,17 +1117,15 @@ func (db *DB) EarliestVersion() (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		// Cache the marker, not the fallback: SetInitialVersion can still change the
-		// fallback, and pruneSnapshots replaces the marker once snapshot-0 is gone.
-		v = earliestCacheValue(snapshotVersion)
+		// cache the marker, not the fallback; pruneSnapshots replaces it once snapshot-0 is gone.
+		v = earliestCacheEntry(snapshotVersion)
 		db.cacheEarliestVersion(v)
 	}
 	if v > 0 {
 		return v, nil
 	}
 	// snapshot-0 is the genesis placeholder; the first queryable height is
-	// initialVersion (defaults to 1 for standard chains). On the live DB,
-	// SetInitialVersion and snapshot reloads write it under mtx.
+	// initialVersion (defaults to 1 for standard chains).
 	db.mtx.Lock()
 	v = int64(db.initialVersion)
 	db.mtx.Unlock()

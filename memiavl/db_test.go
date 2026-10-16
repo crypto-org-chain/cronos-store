@@ -1466,7 +1466,7 @@ func TestEarliestVersion(t *testing.T) {
 	require.Equal(t, earliest, earliest2)
 }
 
-func TestEarliestVersionFallbackNotCached(t *testing.T) {
+func TestEarliestVersionCachesGenesisMarker(t *testing.T) {
 	testCases := []struct {
 		name       string
 		keepRecent uint32
@@ -1956,10 +1956,10 @@ func TestEarliestVersionCopyTakenBeforeSetInitialVersion(t *testing.T) {
 		InitialStores:   []string{testStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { require.NoError(t, db.Close()) }()
 
 	stale := db.CopyWithCacheSize(0)
-	defer stale.Close()
+	defer func() { require.NoError(t, stale.Close()) }()
 	require.NoError(t, db.SetInitialVersion(100))
 
 	// the stale copy fills the shared cache first; its own fallback must not reach newer readers.
@@ -1968,7 +1968,7 @@ func TestEarliestVersionCopyTakenBeforeSetInitialVersion(t *testing.T) {
 	require.EqualValues(t, 1, got)
 
 	fresh := db.CopyWithCacheSize(0)
-	defer fresh.Close()
+	defer func() { require.NoError(t, fresh.Close()) }()
 	for _, reader := range []*DB{db, fresh} {
 		got, err = reader.EarliestVersion()
 		require.NoError(t, err)
