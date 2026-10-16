@@ -715,7 +715,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
-	// Commit can return before the async writer stores its entry, and the corrupt one must come after it.
+	// the default async writer may not have written the entry yet, and the corrupt one must come after it.
 	require.NoError(t, db.WaitAsyncCommit())
 	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
@@ -1237,6 +1237,8 @@ func TestEarliestVersion(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err)
+		// the default async writer may not have written the entry yet.
+		require.NoError(t, db.WaitAsyncCommit())
 		require.NoError(t, db.RewriteSnapshot())
 		require.NoError(t, db.Reload())
 	}
@@ -1392,6 +1394,8 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
+	// the default async writer may not have written the entry yet.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
@@ -1412,7 +1416,6 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	require.EqualValues(t, 100, firstVersion)
 }
 
-// Lowers RLIMIT_NOFILE so a leaked fd per call would exhaust it quickly.
 func TestGetLatestVersionClosesWAL(t *testing.T) {
 	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
@@ -1438,7 +1441,7 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	version, err := GetLatestVersion(dir)
 	require.NoError(t, err)
 	require.EqualValues(t, 3, version)
-	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "the metadata and wal files must be closed")
+	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "no file under dir may stay open")
 }
 
 func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
