@@ -231,17 +231,6 @@ func (s *querySnapshot) release() error {
 	return nil
 }
 
-// snapshotCloser releases a reader's reference once, however often Close is called.
-type snapshotCloser struct {
-	once sync.Once
-	snap *querySnapshot
-}
-
-func (c *snapshotCloser) Close() (err error) {
-	c.once.Do(func() { err = c.snap.release() })
-	return err
-}
-
 const CommitInfoFileName = "commit_infos"
 
 var (
@@ -289,11 +278,11 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 }
 
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
-	info := rs.commitInfoFromDB(rs.db)
 	// no node cache: the snapshot is replaced every Commit, so its cache would start cold every block.
 	db := rs.db.CopyWithCacheSize(0)
 	// the last release can unmap this snapshot while a caller still holds a ResponseQuery referencing it.
 	db.SetZeroCopy(false)
+	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
 	return info
 }
@@ -452,6 +441,8 @@ func (rs *Store) closeDBForReload() {
 	if err := rs.closeDB(); err != nil {
 		rs.logger.Error("failed to close memiavl db before reload", "err", err)
 	}
+	// a failed reload must not leave stores over the trees just closed.
+	rs.stores = nil
 	// cached historical DBs would keep serving a history the reload unlinks.
 	if err := rs.historicalDBCache.invalidate(); err != nil {
 		rs.logger.Error("failed to close cached historical memiavl dbs before reload", "err", err)
@@ -526,7 +517,8 @@ func (rs *Store) wireListeners(stores map[types.StoreKey]types.CacheWrapper) map
 	return stores
 }
 
-func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.CacheMultiStore {
+func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) types.CacheMultiStore {
+	closer := newQueryCloser(release, rs.logger)
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
 	// add the transient/mem stores registered in current app.
@@ -543,7 +535,7 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, closer io.Closer) types.C
 		if !ok {
 			continue
 		}
-		stores[key] = memiavlstore.New(tree.Tree, rs.logger)
+		stores[key] = pinnedStore{Store: memiavlstore.New(tree.Tree, rs.logger), pin: closer}
 	}
 
 	return cachemulti.NewStore(stores, nil, nil, closer)
@@ -562,7 +554,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 	}
 	if snap != nil {
 		// the caller's Close releases the snapshot, so it outlives later reloads.
-		return rs.cacheMultiStoreFromDB(snap.db, &snapshotCloser{snap: snap}), nil
+		return rs.cacheMultiStoreFromDB(snap.db, snap.release), nil
 	}
 	// historicalDBCache isn't used here: the caller owns the returned store's
 	// lifetime (closed via the closer arg), so the cache's borrow/release model doesn't fit.
@@ -571,7 +563,7 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		return nil, err
 	}
 
-	return rs.cacheMultiStoreFromDB(db, db), nil
+	return rs.cacheMultiStoreFromDB(db, db.Close), nil
 }
 
 // acquireForVersion returns the published snapshot, with a reference to release, when
