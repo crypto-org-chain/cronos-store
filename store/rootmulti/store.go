@@ -433,21 +433,14 @@ func (rs *Store) closeDB() error {
 	return err
 }
 
-// closeDBForReload releases the current db and every cached historical db so a
-// replacement can be loaded over the same directory.
-//
-// Close errors are logged, not returned: closeDB drops the old db either way,
-// and aborting here would leave the store with no db at all.
-func (rs *Store) closeDBForReload() {
-	if err := rs.closeDB(); err != nil {
-		rs.logger.Error("failed to close memiavl db before reload", "err", err)
-	}
-	// a failed reload must not leave stores over the trees just closed.
+// closeDBForReload releases the current db, the mounted stores and every cached
+// historical db so a replacement can be loaded over the same directory. They are
+// dropped even when closing fails, so a retry can proceed.
+func (rs *Store) closeDBForReload() error {
+	err := rs.closeDB()
 	rs.stores = nil
 	// cached historical DBs would keep serving a history the reload unlinks.
-	if err := rs.historicalDBCache.invalidate(); err != nil {
-		rs.logger.Error("failed to close cached historical memiavl dbs before reload", "err", err)
-	}
+	return stderrors.Join(err, rs.historicalDBCache.invalidate())
 }
 
 // LastCommitID Implements interface Committer
@@ -721,7 +714,9 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	// the live trees are only written; reads go through copies.
 	opts.CacheSize = 0
 	// a previously loaded db holds the directory lock memiavl.Load needs.
-	rs.closeDBForReload()
+	if err := rs.closeDBForReload(); err != nil {
+		return fmt.Errorf("failed to close db: %w", err)
+	}
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return errors.Wrapf(err, "fail to load memiavl at %s", rs.dir)
@@ -889,7 +884,9 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("rollback height target %d exceeds max uint32", target)
 	}
 
-	rs.closeDBForReload()
+	if err := rs.closeDBForReload(); err != nil {
+		return fmt.Errorf("failed to close db: %w", err)
+	}
 
 	opts := rs.opts
 	opts.TargetVersion = uint32(target)
