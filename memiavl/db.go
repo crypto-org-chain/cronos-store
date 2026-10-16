@@ -831,7 +831,7 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	snapshotDir := snapshotName(db.lastCommitInfo.Version)
 	tmpDir := snapshotDir + TmpSuffix
 	path := filepath.Join(db.dir, tmpDir)
-	if err := writeSnapshotOwnPool(ctx, &db.MultiTree, path, db.snapshotWriterLimit); err != nil {
+	if err := writeSnapshotWithLimit(ctx, &db.MultiTree, path, db.snapshotWriterLimit); err != nil {
 		return errors.Join(err, os.RemoveAll(path))
 	}
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
@@ -1194,7 +1194,7 @@ func (db *DB) WriteSnapshotWithContext(ctx context.Context, dir string) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return writeSnapshotOwnPool(ctx, &db.MultiTree, dir, db.snapshotWriterLimit)
+	return writeSnapshotWithLimit(ctx, &db.MultiTree, dir, db.snapshotWriterLimit)
 }
 
 func snapshotName(version int64) string {
@@ -1298,14 +1298,14 @@ func walPath(root string) string {
 func initEmptyDB(dir string, initialVersion uint32, chainId string) error {
 	tmp := NewEmptyMultiTree(initialVersion, 0, chainId)
 	snapshotDir := snapshotName(0)
-	if err := writeSnapshotOwnPool(context.Background(), tmp, filepath.Join(dir, snapshotDir), DefaultSnapshotWriterLimit); err != nil {
+	if err := writeSnapshotWithLimit(context.Background(), tmp, filepath.Join(dir, snapshotDir), DefaultSnapshotWriterLimit); err != nil {
 		return err
 	}
 	return updateCurrentSymlink(dir, snapshotDir)
 }
 
 // Each write gets its own pool, so no worker or purger goroutine outlives it.
-func writeSnapshotOwnPool(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
+func writeSnapshotWithLimit(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
 	pool := pond.New(writerLimit, writerLimit*10)
 	defer pool.StopAndWait()
 	return mtree.WriteSnapshotWithContext(ctx, dir, pool)
