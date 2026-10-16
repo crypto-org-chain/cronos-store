@@ -1,8 +1,12 @@
 package memiavl
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func BenchmarkApplyChangeSet100(b *testing.B) {
@@ -93,4 +97,60 @@ func newBenchmarkDB(storeCount int) *DB {
 		MultiTree: *mtree,
 		logger:    NewNopLogger(),
 	}
+}
+
+// BenchmarkQueryCopyGet reads a published query copy (zero-copy off, as rootmulti
+// serves it) from parallel goroutines, with and without a cache, over hot key
+// sets of growing size. Each sub-benchmark's cache starts cold, like one block's.
+func BenchmarkQueryCopyGet(b *testing.B) {
+	const storeKeys = 200_000
+	db, err := Load(b.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{"s"}}, TestAppChainID)
+	require.NoError(b, err)
+	defer db.Close()
+	var cs ChangeSet
+	for i := 0; i < storeKeys; i++ {
+		cs.Pairs = append(cs.Pairs, &KVPair{Key: benchKey(i), Value: make([]byte, 64)})
+	}
+	require.NoError(b, db.ApplyChangeSets([]*NamedChangeSet{{Name: "s", Changeset: cs}}))
+	_, err = db.Commit()
+	require.NoError(b, err)
+	require.NoError(b, db.RewriteSnapshot())
+	require.NoError(b, db.Reload())
+
+	for _, cacheSize := range []int{0, 1000} {
+		for _, hot := range []int{16, 1_000, 16_000, storeKeys} {
+			b.Run(fmt.Sprintf("cache=%d/hot=%d", cacheSize, hot), func(b *testing.B) {
+				cp := db.CopyWithCacheSize(cacheSize)
+				defer cp.Close()
+				cp.SetZeroCopy(false)
+				tree := cp.TreeByName("s")
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					rng := rand.New(rand.NewSource(rand.Int63()))
+					for pb.Next() {
+						tree.Get(benchKey(rng.Intn(hot)))
+					}
+				})
+			})
+		}
+	}
+}
+
+// BenchmarkQueryCopyPublish is the per-block cost of the query copy rootmulti
+// publishes, for 20 stores, with and without a cache.
+func BenchmarkQueryCopyPublish(b *testing.B) {
+	db := newBenchmarkDB(20)
+	for _, cacheSize := range []int{0, 1000} {
+		b.Run(fmt.Sprintf("cache=%d", cacheSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = db.CopyWithCacheSize(cacheSize).Close()
+			}
+		})
+	}
+}
+
+func benchKey(i int) []byte {
+	return binary.BigEndian.AppendUint64(nil, uint64(i)*7919)
 }
