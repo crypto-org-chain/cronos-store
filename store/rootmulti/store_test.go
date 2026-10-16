@@ -18,6 +18,7 @@ import (
 
 	log "cosmossdk.io/log/v2"
 
+	"github.com/cosmos/cosmos-sdk/store/v2/rootmulti"
 	snapshottypes "github.com/cosmos/cosmos-sdk/store/v2/snapshots/types"
 	"github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
@@ -815,6 +816,102 @@ func TestReadPathsWithClosedDB(t *testing.T) {
 		_, err = rs.CacheMultiStoreWithVersion(0)
 		require.ErrorContains(t, err, "store is not loaded")
 	})
+}
+
+func TestCommitHashesAgreeAcrossReadPaths(t *testing.T) {
+	lastHash := make(map[bool][]byte)
+	for _, sdk46Compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sdk46Compact=%v", sdk46Compact), func(t *testing.T) {
+			rs := NewStore(t.TempDir(), log.NewNopLogger(), sdk46Compact, false, TestAppChainID)
+			key := types.NewKVStoreKey(testStoreName)
+			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			// sdk 0.46 compat hashes mem stores into the app hash.
+			rs.MountStoreWithDB(types.NewMemoryStoreKey("mem"), types.StoreTypeMemory, nil)
+			require.NoError(t, rs.LoadLatestVersion())
+			t.Cleanup(func() { rs.Close() })
+
+			for i := byte(1); i <= 3; i++ {
+				value := []byte{i}
+				rs.GetKVStore(key).Set([]byte("k"), value)
+				workingHash := rs.WorkingHash()
+				cid := rs.Commit()
+				require.Equal(t, workingHash, cid.Hash)
+				require.Equal(t, cid, rs.LastCommitID())
+
+				res, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: cid.Version, Prove: true})
+				require.NoError(t, err)
+				require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", value))
+				lastHash[sdk46Compact] = cid.Hash
+			}
+		})
+	}
+	require.NotEqual(t, lastHash[false], lastHash[true])
+}
+
+func TestLoadLatestVersionReloadsALoadedStore(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
+	rs.Commit()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
+	cid := rs.Commit()
+
+	_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
+	require.NoError(t, err)
+	require.Len(t, rs.historicalDBCache.entries, 1)
+	held, err := rs.CacheMultiStoreWithVersion(0)
+	require.NoError(t, err)
+
+	require.NoError(t, rs.LoadLatestVersion())
+	require.Empty(t, rs.historicalDBCache.entries)
+	require.Equal(t, cid, rs.LastCommitID())
+	res, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+	require.NoError(t, err)
+	require.Equal(t, []byte("v2"), res.Value)
+
+	// the reload closed the db the held reader came from; its snapshot stays mapped.
+	require.Equal(t, []byte("v2"), held.GetKVStore(key).Get([]byte("k")))
+	require.NoError(t, held.(io.Closer).Close())
+}
+
+func TestRestorePublishesTheRestoredHeight(t *testing.T) {
+	key := types.NewKVStoreKey(testStoreName)
+	src := NewStore(t.TempDir(), log.NewNopLogger(), false, true, TestAppChainID)
+	src.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, src.LoadLatestVersion())
+	t.Cleanup(func() { src.Close() })
+	src.GetKVStore(key).Set([]byte("k"), []byte("v1"))
+	src.Commit()
+	src.GetKVStore(key).Set([]byte("k"), []byte("v2"))
+	cid := src.Commit()
+
+	var buf bytes.Buffer
+	w := protoio.NewDelimitedWriter(&buf)
+	require.NoError(t, src.Snapshot(uint64(cid.Version), w))
+	require.NoError(t, w.Close())
+
+	// state sync restores into a node that loaded an empty store.
+	dst := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	dst.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, dst.LoadLatestVersion())
+	t.Cleanup(func() { dst.Close() })
+	held, err := dst.CacheMultiStoreWithVersion(0)
+	require.NoError(t, err)
+
+	r := protoio.NewDelimitedReader(&buf, 1<<20)
+	defer r.Close()
+	_, err = dst.Restore(uint64(cid.Version), 1, r)
+	require.NoError(t, err)
+
+	require.Equal(t, cid, dst.LastCommitID())
+	res, err := dst.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+	require.NoError(t, err)
+	require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", []byte("v2")))
+	require.Nil(t, held.GetKVStore(key).Get([]byte("k")))
+	require.NoError(t, held.(io.Closer).Close())
 }
 
 func TestRestoreFailureTearsDownReadState(t *testing.T) {
