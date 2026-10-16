@@ -1235,7 +1235,7 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		}(read)
 	}
 
-	rs.closeDBForReload()
+	require.NoError(t, rs.closeDBForReload())
 	close(done)
 	wg.Wait()
 	require.NoError(t, rs.Close())
