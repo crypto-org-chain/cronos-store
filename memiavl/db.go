@@ -1115,9 +1115,14 @@ func (db *DB) EarliestVersion() (int64, error) {
 			v = 1
 		}
 	}
-	// CompareAndSwap so a scan that raced a prune can't overwrite the prune's newer value.
-	db.earliestSnapshotCache.CompareAndSwap(0, v)
+	db.cacheEarliestVersion(v)
 	return v, nil
+}
+
+// cacheEarliestVersion fills only an empty cache, so a scan that raced a prune
+// can't overwrite the prune's newer value.
+func (db *DB) cacheEarliestVersion(v int64) {
+	db.earliestSnapshotCache.CompareAndSwap(0, v)
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.

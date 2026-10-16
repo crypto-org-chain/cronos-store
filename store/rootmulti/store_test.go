@@ -829,7 +829,15 @@ func TestCommitHashesAgreeAcrossReadPaths(t *testing.T) {
 			rs.MountStoreWithDB(types.NewMemoryStoreKey("mem"), types.StoreTypeMemory, nil)
 			require.NoError(t, rs.LoadLatestVersion())
 			t.Cleanup(func() { rs.Close() })
+			// the genesis app hash has no stores in it, mem stores included.
+			require.Equal(t, (&types.CommitInfo{}).CommitID(), rs.LastCommitID())
 
+			verify := func(cid types.CommitID, value []byte) {
+				res, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: cid.Version, Prove: true})
+				require.NoError(t, err)
+				require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", value))
+			}
+			var cids []types.CommitID
 			for i := byte(1); i <= 3; i++ {
 				value := []byte{i}
 				rs.GetKVStore(key).Set([]byte("k"), value)
@@ -837,11 +845,13 @@ func TestCommitHashesAgreeAcrossReadPaths(t *testing.T) {
 				cid := rs.Commit()
 				require.Equal(t, workingHash, cid.Hash)
 				require.Equal(t, cid, rs.LastCommitID())
-
-				res, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: cid.Version, Prove: true})
-				require.NoError(t, err)
-				require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", value))
+				verify(cid, value)
+				cids = append(cids, cid)
 				lastHash[sdk46Compact] = cid.Hash
+			}
+			// older heights prove from a db loaded from disk, not the published snapshot.
+			for i, cid := range cids[:len(cids)-1] {
+				verify(cid, []byte{byte(i + 1)})
 			}
 		})
 	}
@@ -949,6 +959,8 @@ func TestRestoreFailureTearsDownReadState(t *testing.T) {
 	require.Nil(t, rs.db)
 	require.Zero(t, rs.LatestVersion())
 	require.Empty(t, rs.LastCommitID().Hash, "no db is loaded, so no hash may be reported")
+	// the version still comes from disk: 0 would make CometBFT replay from genesis.
+	require.Equal(t, int64(2), rs.LastCommitID().Version)
 	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
 }
 
