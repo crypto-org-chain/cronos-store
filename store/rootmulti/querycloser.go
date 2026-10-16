@@ -16,7 +16,7 @@ import (
 // queryCloser releases a query store's db reference once, on Close. As a safety
 // net for SDK paths that skip Close (an out-of-gas gRPC query before
 // crypto-org-chain/cosmos-sdk#1849), it also releases it once the store becomes
-// unreachable, and logs that it had to.
+// unreachable, and logs a warning.
 type queryCloser struct {
 	release *releaseOnce
 }
@@ -38,7 +38,7 @@ func newQueryCloser(release func() error, logger log.Logger) *queryCloser {
 	c := &queryCloser{release: &releaseOnce{fn: release}}
 	runtime.AddCleanup(c, func(r *releaseOnce) {
 		if released, err := r.do(); released {
-			logger.Error("query store was not closed; released its db reference", "err", err)
+			logger.Warn("query store was not closed; released its db reference", "err", err)
 		}
 	}, c.release)
 	return c
