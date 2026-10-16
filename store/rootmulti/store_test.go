@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -924,6 +925,51 @@ func TestRestorePublishesTheRestoredHeight(t *testing.T) {
 	require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", []byte("v2")))
 	require.Nil(t, held.GetKVStore(key).Get([]byte("k")))
 	require.NoError(t, held.(io.Closer).Close())
+}
+
+func TestUnclosedQueryStoreIsReleased(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	rs.Commit()
+	refs := func() int64 { return rs.querySnapshot.Load().refs.Load() }
+
+	// the SDK can drop a query store without Close; an iterator from it must still pin the db.
+	it := func() types.Iterator {
+		cms, err := rs.CacheMultiStoreWithVersion(0)
+		require.NoError(t, err)
+		return cms.GetKVStore(key).Iterator(nil, nil)
+	}()
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+	require.EqualValues(t, 2, refs())
+	require.Equal(t, []byte("v"), it.Value())
+	require.NoError(t, it.Close())
+	it = nil
+
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return refs() == 1
+	}, 5*time.Second, 10*time.Millisecond, "an unreachable unclosed store must release its reference")
+}
+
+func TestFailedReloadDropsStores(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { rs.Close() })
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	rs.Commit()
+
+	// a mounted store with no tree and no upgrade adding it fails the reload after the old db closed.
+	rs.MountStoreWithDB(types.NewKVStoreKey("unknown"), types.StoreTypeIAVL, nil)
+	require.Error(t, rs.LoadLatestVersion())
+	require.Nil(t, rs.GetCommitStore(key), "stores over the closed trees must be dropped")
 }
 
 func TestRestoreFailureTearsDownReadState(t *testing.T) {
