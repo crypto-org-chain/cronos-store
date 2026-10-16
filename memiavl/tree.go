@@ -233,14 +233,22 @@ func (t *Tree) setInitialVersion(initialVersion uint32) {
 // The copy holds a reference to the source's mmap'd snapshot, which stays mapped
 // until every tree sharing it is closed, so Close the copy when done.
 func (t *Tree) Copy(cacheSize int) *Tree {
-	if _, ok := t.root.(*MemNode); ok {
-		// protect the existing `MemNode`s from get modified in-place
-		t.cowVersion = t.version
+	return t.copy(cacheSize, true)
+}
+
+func (t *Tree) copy(cacheSize int, pin bool) *Tree {
+	if root, ok := t.root.(*MemNode); ok {
+		// the root carries the highest node version, so uncommitted nodes are protected too.
+		t.cowVersion = max(t.cowVersion, t.version, root.version)
 	}
-	if t.snapshot != nil {
+	if pin && t.snapshot != nil {
 		t.snapshot.refs.Add(1)
 	}
 	newTree := *t
+	if !pin {
+		// Close must not release a reference this copy never took.
+		newTree.snapshot = nil
+	}
 	// recreate cache for the copy to keep eviction state independent per tree
 	newTree.cache = NewCache(cacheSize)
 	return &newTree

@@ -828,7 +828,7 @@ func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.readOnlyCopy(db.cacheSize)
+	return db.readOnlyCopy(db.cacheSize, true)
 }
 
 // CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
@@ -837,19 +837,28 @@ func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.readOnlyCopy(cacheSize)
+	return db.readOnlyCopy(cacheSize, true)
 }
 
 // A copy has no WAL and shares the source's directory, so writes through it
 // would be lost or would rewrite the source's snapshots.
-func (db *DB) readOnlyCopy(cacheSize int) *DB {
-	cloned := db.copy(cacheSize)
+func (db *DB) readOnlyCopy(cacheSize int, pin bool) *DB {
+	cloned := db.copy(cacheSize, pin)
 	cloned.readOnly = true
 	return cloned
 }
 
-func (db *DB) copy(cacheSize int) *DB {
-	mtree := db.MultiTree.Copy(cacheSize)
+// UnpinnedCopy is CopyWithCacheSize without a snapshot reference: it needs no Close and
+// is valid only until the second snapshot reload after it is taken, or until the DB closes.
+func (db *DB) UnpinnedCopy(cacheSize int) *DB {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	return db.readOnlyCopy(cacheSize, false)
+}
+
+func (db *DB) copy(cacheSize int, pin bool) *DB {
+	mtree := db.MultiTree.copy(cacheSize, pin)
 
 	cloned := &DB{
 		MultiTree:           *mtree,
@@ -921,8 +930,7 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 	}
 
 	// retain the outgoing generation for one reload cycle: readers of the live
-	// trees may still hold PersistedNodes into its mmap'd snapshot. Copies hold
-	// their own reference.
+	// trees and unpinned copies may still read its snapshot.
 	old := db.MultiTree
 	db.MultiTree = *mtree
 	db.retiredMultiTree = &old
@@ -970,7 +978,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	db.snapshotRewriteChan = ch
 	db.snapshotRewriteCancel = cancel
 
-	cloned := db.copy(0)
+	cloned := db.copy(0, true)
 	wal := db.walReader
 	logger, dir, version := db.logger, db.dir, cloned.Version()
 	zeroCopy, cacheSize, chainID := db.zeroCopy, db.cacheSize, db.chainId

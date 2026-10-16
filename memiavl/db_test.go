@@ -365,6 +365,40 @@ func TestCopyDuringReload(t *testing.T) {
 	require.NoError(t, <-errs)
 }
 
+func TestUnpinnedCopyTakesNoReference(t *testing.T) {
+	db, err := Load(t.TempDir(), Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	rewriteAndReload := func(key string) {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		require.NoError(t, db.RewriteSnapshot())
+		require.NoError(t, db.Reload())
+	}
+	rewriteAndReload("k1")
+	snapshot := db.TreeByName(testStoreName).snapshot
+
+	cp := db.UnpinnedCopy(0)
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
+
+	// closing one must not release the reference it never took.
+	require.NoError(t, db.UnpinnedCopy(0).Close())
+	require.NotNil(t, snapshot.nodesMap)
+
+	// an unpinned copy stays readable through the first reload after it is taken,
+	rewriteAndReload("k2")
+	require.NotNil(t, snapshot.nodesMap)
+	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
+	// but must not keep the generation mapped past the second.
+	rewriteAndReload("k3")
+	require.Nil(t, snapshot.nodesMap)
+}
+
 func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -402,9 +436,12 @@ func TestCopyRejectsWrites(t *testing.T) {
 	copies := []struct {
 		name string
 		copy func(db *DB) *DB
+		// an unpinned copy holds no snapshot reference, so it must not be closed.
+		pinned bool
 	}{
-		{"Copy", (*DB).Copy},
-		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }},
+		{"Copy", (*DB).Copy, true},
+		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }, true},
+		{"UnpinnedCopy", func(db *DB) *DB { return db.UnpinnedCopy(0) }, false},
 	}
 	writes := []struct {
 		name  string
@@ -444,13 +481,17 @@ func TestCopyRejectsWrites(t *testing.T) {
 				for _, w := range writes {
 					t.Run(c.name+"/"+w.name, func(t *testing.T) {
 						cp := c.copy(db)
-						defer func() { require.NoError(t, cp.Close()) }()
+						if c.pinned {
+							defer func() { require.NoError(t, cp.Close()) }()
+						}
 						require.ErrorIs(t, w.write(cp), errReadOnly)
 					})
 				}
 				cp := c.copy(db)
 				require.Panics(t, func() { cp.UpdateCommitInfo() })
-				require.NoError(t, cp.Close())
+				if c.pinned {
+					require.NoError(t, cp.Close())
+				}
 			}
 			// a rejected write must not swap the live snapshot.
 			after, err := os.Readlink(currentPath(dir))
