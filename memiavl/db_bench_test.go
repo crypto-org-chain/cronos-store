@@ -154,3 +154,63 @@ func BenchmarkQueryCopyPublish(b *testing.B) {
 func benchKey(i int) []byte {
 	return binary.BigEndian.AppendUint64(nil, uint64(i)*7919)
 }
+
+// BenchmarkCommitWithPublishedCopy is one block's writes and Commit, with and
+// without publishing a query copy after it as rootmulti does. A copy makes the
+// next block's writes clone the in-memory nodes it shares instead of mutating them.
+func BenchmarkCommitWithPublishedCopy(b *testing.B) {
+	const (
+		stores    = 4
+		storeKeys = 50_000
+	)
+	names := make([]string, stores)
+	for i := range names {
+		names[i] = fmt.Sprintf("store-%d", i)
+	}
+	for _, writes := range []int{50, 1000} {
+		for _, publish := range []bool{false, true} {
+			b.Run(fmt.Sprintf("writes=%d/publish=%v", writes, publish), func(b *testing.B) {
+				db, err := Load(b.TempDir(), Options{CreateIfMissing: true, InitialStores: names, SnapshotInterval: 1 << 30}, TestAppChainID)
+				require.NoError(b, err)
+				defer db.Close()
+				changeSets := func(keys func(int) int, perStore int) []*NamedChangeSet {
+					cs := make([]*NamedChangeSet, stores)
+					for s := range cs {
+						pairs := make([]*KVPair, perStore)
+						for i := range pairs {
+							pairs[i] = &KVPair{Key: benchKey(keys(i)), Value: make([]byte, 64)}
+						}
+						cs[s] = &NamedChangeSet{Name: names[s], Changeset: ChangeSet{Pairs: pairs}}
+					}
+					return cs
+				}
+				require.NoError(b, db.ApplyChangeSets(changeSets(func(i int) int { return i }, storeKeys)))
+				_, err = db.Commit()
+				require.NoError(b, err)
+				require.NoError(b, db.RewriteSnapshot())
+				require.NoError(b, db.Reload())
+
+				rng := rand.New(rand.NewSource(1))
+				var published *DB
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					require.NoError(b, db.ApplyChangeSets(changeSets(func(int) int { return rng.Intn(storeKeys) }, writes/stores)))
+					_, err := db.Commit()
+					require.NoError(b, err)
+					if publish {
+						cp := db.CopyWithCacheSize(0)
+						if published != nil {
+							require.NoError(b, published.Close())
+						}
+						published = cp
+					}
+				}
+				b.StopTimer()
+				if published != nil {
+					require.NoError(b, published.Close())
+				}
+			})
+		}
+	}
+}

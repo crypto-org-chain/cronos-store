@@ -1,6 +1,8 @@
 package rootmulti
 
 import (
+	"fmt"
+
 	"errors"
 	"io"
 	"math"
@@ -20,7 +22,9 @@ func (rs *Store) Restore(
 ) (types.SnapshotItem, error) {
 	// the importer needs the directory lock rs.db holds, and cached historical DBs
 	// would keep serving the history it replaces.
-	rs.closeDBForReload()
+	if err := rs.closeDBForReload(); err != nil {
+		return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
+	}
 
 	item, err := rs.restore(height, format, protoReader)
 	if err != nil {
