@@ -1931,6 +1931,7 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 		// breaks one rollback step and returns an idempotent repair.
 		malleate func(t *testing.T, dir string) (repair func())
 		expErr   string
+		expErrIs error
 		// what the failed rollback must have left on disk, beyond staying loadable.
 		failedState func(t *testing.T, dir string)
 		retryable   bool
@@ -1942,7 +1943,7 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Helper()
 				return blockSnapshotRemoval(t, dir, 4)
 			},
-			expErr:    "fail to prune snapshots",
+			expErr:    "fail to prune snapshots: version 4",
 			retryable: true,
 		},
 		{
@@ -1953,7 +1954,7 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Helper()
 				return blockSnapshotRemoval(t, dir, 2)
 			},
-			expErr:    "fail to prune snapshots",
+			expErr:    "fail to prune snapshots: version 2",
 			retryable: true,
 		},
 		{
@@ -1984,7 +1985,8 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				require.NoError(t, errors.Join(wl.TruncateFront(4), wl.Close()))
 				return func() {}
 			},
-			expErr: "outside the wal: out of range",
+			expErr:   "outside the wal: out of range",
+			expErrIs: wal.ErrOutOfRange,
 			failedState: func(t *testing.T, dir string) {
 				t.Helper()
 				current, err := os.Readlink(currentPath(dir))
@@ -2002,7 +2004,8 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				require.NoError(t, updateCurrentSymlink(dir, snapshotName(2)))
 				return func() {}
 			},
-			expErr: "outside the wal: out of range",
+			expErr:   "outside the wal: out of range",
+			expErrIs: wal.ErrOutOfRange,
 			failedState: func(t *testing.T, dir string) {
 				t.Helper()
 				current, err := os.Readlink(currentPath(dir))
@@ -2023,6 +2026,9 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			t.Cleanup(repair)
 			_, err := Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
 			require.ErrorContains(t, err, tc.expErr)
+			if tc.expErrIs != nil {
+				require.ErrorIs(t, err, tc.expErrIs)
+			}
 			repair()
 			if tc.failedState != nil {
 				tc.failedState(t, dir)
