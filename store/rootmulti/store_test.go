@@ -916,6 +916,8 @@ func TestRestorePublishesTheRestoredHeight(t *testing.T) {
 	src.Commit()
 	src.GetKVStore(key).Set([]byte("k"), []byte("v2"))
 	cid := src.Commit()
+	// the exporter reloads from disk, and Commit returns before the async WAL write lands.
+	require.NoError(t, src.db.WaitAsyncCommit())
 
 	var buf bytes.Buffer
 	w := protoio.NewDelimitedWriter(&buf)
