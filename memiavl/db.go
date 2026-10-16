@@ -124,7 +124,8 @@ type Options struct {
 	CacheSize int
 	// LoadForOverwriting if true rollbacks the state, specifically the Load method will
 	// truncate the versions after the `TargetVersion`, the `TargetVersion` becomes the latest version.
-	// it do nothing if the target version is `0`.
+	// it do nothing if the target version is `0`, and fails with wal.ErrOutOfRange, changing nothing,
+	// if the target is outside the WAL.
 	LoadForOverwriting bool
 
 	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.

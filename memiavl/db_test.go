@@ -1009,6 +1009,8 @@ func TestExclusiveLock(t *testing.T) {
 
 	db, err := Load(dir, Options{CreateIfMissing: true}, TestAppChainID)
 	require.NoError(t, err)
+	// stands in for the open writer's in-flight link update.
+	require.NoError(t, os.Symlink(snapshotName(0), currentTmpPath(dir)))
 
 	fdsBefore := countOpenFDsUnder(t, dir)
 	_, err = Load(dir, Options{}, TestAppChainID)
@@ -1019,19 +1021,19 @@ func TestExclusiveLock(t *testing.T) {
 	_, err = Load(dir, Options{}, TestAppChainID)
 	require.ErrorIs(t, err, filelock.ErrLocked)
 
-	// stands in for the open writer's in-flight link update.
-	require.NoError(t, os.Symlink(snapshotName(0), currentTmpPath(dir)))
 	roDB, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
 	require.NoError(t, roDB.Close())
 	_, err = os.Lstat(currentTmpPath(dir))
-	require.NoError(t, err, "a reader must not remove the writer's tmp current link")
+	require.NoError(t, err, "only the lock holder may remove the tmp current link")
 
 	require.NoError(t, db.Close())
 
 	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
+	_, err = os.Lstat(currentTmpPath(dir))
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestFastCommit(t *testing.T) {
@@ -1939,6 +1941,17 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
 				return blockSnapshotRemoval(t, dir, 4)
+			},
+			expErr:    "fail to prune snapshots",
+			retryable: true,
+		},
+		{
+			// snapshot 4, the old current, goes first, so the link must already have moved.
+			name:   "deletion fails after the old current snapshot is gone",
+			target: 1,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				return blockSnapshotRemoval(t, dir, 2)
 			},
 			expErr:    "fail to prune snapshots",
 			retryable: true,
