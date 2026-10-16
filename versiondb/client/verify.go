@@ -75,24 +75,17 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 			changeSetDir := args[0]
 
-			var mtree *memiavl.MultiTree
-			defer func() {
-				if mtree != nil {
-					_ = mtree.Close()
+			mtree := memiavl.NewEmptyMultiTree(0, 0, chainId)
+			if len(loadSnapshot) > 0 {
+				if mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId); err != nil {
+					return err
 				}
-			}()
+			}
+			defer mtree.Close()
 
 			// create fixed size task pool with big enough buffer.
 			pool := pond.New(concurrency, 0)
 			defer pool.StopAndWait()
-
-			mtree = memiavl.NewEmptyMultiTree(0, 0, chainId)
-			if len(loadSnapshot) > 0 {
-				mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId)
-				if err != nil {
-					return err
-				}
-			}
 
 			// without a snapshot to write, each worker closes its tree once hashed, so
 			// --concurrency bounds memory even for trees the loaded snapshot owns.
