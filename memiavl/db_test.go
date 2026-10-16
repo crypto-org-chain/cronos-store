@@ -2019,63 +2019,166 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 	}
 }
 
-func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
+func TestLoadReleasesResourcesOnFailure(t *testing.T) {
+	// a pending TruncateFront and TruncateBack at once is corrupt.
+	corruptWALDir := func(t *testing.T, dir string) {
+		t.Helper()
+		for _, name := range []string{"00000000000000000002.START", "00000000000000000002.END"} {
+			require.NoError(t, os.WriteFile(filepath.Join(walPath(dir), name), nil, 0o600))
+		}
+	}
+
 	testCases := []struct {
-		name     string
-		malleate func(t *testing.T, dir string, db *DB) uint32
+		name string
+		// skip building a committed db first; malleate then gets a nil db.
+		emptyDir bool
+		// root ignores directory permissions, which these cases rely on.
+		needsNonRoot bool
+		malleate     func(t *testing.T, dir string, db *DB) Options
+		expErr       string
 	}{
 		{
-			name: "wal open fails",
-			malleate: func(t *testing.T, dir string, _ *DB) uint32 {
+			name:         "tmp dir cleanup fails",
+			needsNonRoot: true,
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
 				t.Helper()
-				// a pending TruncateFront and TruncateBack at once is corrupt.
-				for _, name := range []string{"00000000000000000002.START", "00000000000000000002.END"} {
-					require.NoError(t, os.WriteFile(filepath.Join(walPath(dir), name), nil, 0o600))
-				}
-				return 0
+				locked := filepath.Join(dir, "snapshot-9"+TmpSuffix, "locked")
+				require.NoError(t, os.MkdirAll(locked, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(locked, "f"), nil, 0o600))
+				require.NoError(t, os.Chmod(locked, 0o500))
+				t.Cleanup(func() { require.NoError(t, os.Chmod(locked, 0o700)) })
+				return Options{}
 			},
+			expErr: "fail to cleanup tmp directories",
+		},
+		{
+			name: "target snapshot pruned",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(filepath.Join(dir, snapshotName(0))))
+				return Options{TargetVersion: 1}
+			},
+			expErr: "target version is pruned",
+		},
+		{
+			name: "snapshot load fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				require.NoError(t, os.Remove(filepath.Join(currentPath(dir), MetadataFileName)))
+				return Options{}
+			},
+			expErr: MetadataFileName + ": no such file or directory",
+		},
+		{
+			name: "wal open fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				corruptWALDir(t, dir)
+				return Options{}
+			},
+			expErr: "corrupt",
+		},
+		{
+			name: "read-only wal open fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				corruptWALDir(t, dir)
+				return Options{ReadOnly: true}
+			},
+			expErr: "corrupt",
 		},
 		{
 			name: "wal replay fails",
-			malleate: func(t *testing.T, _ string, db *DB) uint32 {
+			malleate: func(t *testing.T, _ string, db *DB) Options {
 				t.Helper()
-				return uint32(corruptTrailingWALEntry(t, db))
+				return Options{TargetVersion: uint32(corruptTrailingWALEntry(t, db))}
 			},
+			expErr: "unmarshal wal log failed",
+		},
+		{
+			name: "read-only wal replay fails",
+			malleate: func(t *testing.T, _ string, db *DB) Options {
+				t.Helper()
+				return Options{ReadOnly: true, TargetVersion: uint32(corruptTrailingWALEntry(t, db))}
+			},
+			expErr: "unmarshal wal log failed",
+		},
+		{
+			name: "rollback fails",
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				// a regular file where the current symlink belongs fails Readlink.
+				require.NoError(t, os.Remove(currentPath(dir)))
+				require.NoError(t, os.WriteFile(currentPath(dir), nil, 0o600))
+				return Options{TargetVersion: 3, LoadForOverwriting: true}
+			},
+			expErr: "fail to read current version",
+		},
+		{
+			name:         "rollback wal truncation fails",
+			needsNonRoot: true,
+			malleate: func(t *testing.T, dir string, _ *DB) Options {
+				t.Helper()
+				// a read-only wal dir fails TruncateBack.
+				require.NoError(t, os.Chmod(walPath(dir), 0o500))
+				t.Cleanup(func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) })
+				return Options{TargetVersion: 2, LoadForOverwriting: true}
+			},
+			expErr: "fail to truncate wal logs",
+		},
+		{
+			// the DB already owns its resources here, so Load must close it once, not twice.
+			name:     "initial upgrade fails",
+			emptyDir: true,
+			malleate: func(*testing.T, string, *DB) Options {
+				return Options{CreateIfMissing: true, InitialStores: []string{testStoreName, testStoreName}}
+			},
+			expErr: "memiavl tree name conflicts",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsNonRoot && os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
 			dir := t.TempDir()
-			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
-			require.NoError(t, err)
-			for i := 0; i < 3; i++ {
-				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
-				_, err := db.Commit()
+			var opts Options
+			if tc.emptyDir {
+				opts = tc.malleate(t, dir, nil)
+			} else {
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
 				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				// the genesis snapshot is empty and maps no files.
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Reload())
+				require.NoError(t, db.WaitAsyncCommit())
+				opts = tc.malleate(t, dir, db)
+				require.NoError(t, db.Close())
 			}
-			// the genesis snapshot is empty and maps no files.
-			require.NoError(t, db.RewriteSnapshot())
-			require.NoError(t, db.Reload())
-			require.NoError(t, db.WaitAsyncCommit())
-			targetVersion := tc.malleate(t, dir, db)
-			require.NoError(t, db.Close())
 
-			openFDs := func() int {
-				fdDir, err := os.Open("/dev/fd")
-				require.NoError(t, err)
-				defer fdDir.Close()
-				names, err := fdDir.Readdirnames(-1)
-				require.NoError(t, err)
-				return len(names)
-			}
 			// a GC-run finalizer could close a leaked fd and hide the leak.
 			defer debug.SetGCPercent(debug.SetGCPercent(-1))
-			before := openFDs()
+			before := countOpenFDsUnder(t, dir)
 
-			_, err = Load(dir, Options{ReadOnly: true, TargetVersion: targetVersion}, TestAppChainID)
-			require.Error(t, err)
-			require.Equal(t, before, openFDs(), "the loaded snapshot's files must be closed")
+			_, err := Load(dir, opts, TestAppChainID)
+			require.ErrorContains(t, err, tc.expErr)
+			// a repeated cleanup would join these WAL and lock close errors into the returned
+			// one; closing the tree twice is a harmless no-op.
+			for _, closed := range []error{wal.ErrClosed, os.ErrClosed, syscall.EBADF} {
+				require.NotErrorIs(t, err, closed, "cleanup must release everything exactly once")
+			}
+			require.Equal(t, before, countOpenFDsUnder(t, dir), "the loaded snapshot, wal and lock files must be closed")
+
+			// read-only loads never take the lock, so this only checks the writable cases.
+			lock, err := LockFile(filepath.Join(dir, LockFileName))
+			require.NoError(t, err, "a failed Load must release the db lock")
+			require.NoError(t, errors.Join(lock.Unlock(), lock.Destroy()))
 		})
 	}
 }
