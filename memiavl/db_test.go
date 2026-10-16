@@ -1019,9 +1019,13 @@ func TestExclusiveLock(t *testing.T) {
 	_, err = Load(dir, Options{}, TestAppChainID)
 	require.ErrorIs(t, err, filelock.ErrLocked)
 
+	// stands in for the open writer's in-flight link update.
+	require.NoError(t, os.Symlink(snapshotName(0), currentTmpPath(dir)))
 	roDB, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
 	require.NoError(t, roDB.Close())
+	_, err = os.Lstat(currentTmpPath(dir))
+	require.NoError(t, err, "a reader must not remove the writer's tmp current link")
 
 	require.NoError(t, db.Close())
 
@@ -1976,6 +1980,23 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				require.DirExists(t, filepath.Join(dir, snapshotName(4)))
 			},
 		},
+		{
+			name:   "target above the wal",
+			target: 6,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				// an older current makes a link move observable.
+				require.NoError(t, updateCurrentSymlink(dir, snapshotName(2)))
+				return func() {}
+			},
+			expErr: "outside the wal: out of range",
+			failedState: func(t *testing.T, dir string) {
+				t.Helper()
+				current, err := os.Readlink(currentPath(dir))
+				require.NoError(t, err)
+				require.Equal(t, snapshotName(2), current, "a cut-back that can't succeed must change nothing")
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2027,6 +2048,11 @@ func TestRollbackSucceeds(t *testing.T) {
 			target:   5,
 		},
 		{
+			name:     "target is a snapshot height",
+			malleate: func(*testing.T, string) {},
+			target:   4,
+		},
+		{
 			name: "target is the first wal entry",
 			malleate: func(t *testing.T, dir string) {
 				t.Helper()
@@ -2057,6 +2083,15 @@ func TestRollbackSucceeds(t *testing.T) {
 			require.NoError(t, db.Close())
 			_, err = os.Lstat(currentTmpPath(dir))
 			require.ErrorIs(t, err, os.ErrNotExist)
+
+			// a normal start sees the cut-back chain.
+			db, err = Load(dir, Options{}, TestAppChainID)
+			require.NoError(t, err)
+			require.EqualValues(t, tc.target, db.Version())
+			require.NoError(t, db.Close())
+			for v := int64(tc.target) + 1; v <= 5; v++ {
+				require.NoDirExists(t, filepath.Join(dir, snapshotName(v)))
+			}
 		})
 	}
 }

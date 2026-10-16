@@ -249,9 +249,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
 	var targetIndex uint64
 	if rollback {
-		// writer is set because Validate rejects LoadForOverwriting with ReadOnly. Check the range
-		// before replaying, mirroring tidwall/wal's TruncateBack ErrOutOfRange rule, so a rollback
-		// that can't succeed fails fast and leaves current, the snapshots and the WAL untouched.
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject a target TruncateBack
+		// can't reach (tidwall/wal's ErrOutOfRange rule) before replaying or touching the snapshots.
 		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
