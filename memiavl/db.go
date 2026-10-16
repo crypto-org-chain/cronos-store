@@ -208,6 +208,10 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err := removeTmpDirs(dir); err != nil {
 			return nil, fmt.Errorf("fail to cleanup tmp directories: %w", err)
 		}
+		// a crash inside updateCurrentSymlink leaves this behind, and it would fail every later link update.
+		if err := os.Remove(currentTmpPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("fail to cleanup tmp current link: %w", err)
+		}
 	}
 
 	snapshot := "current"
@@ -242,17 +246,12 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
-	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
-			return nil, err
-		}
-	}
-
+	var targetIndex uint64
 	if opts.LoadForOverwriting && opts.TargetVersion > 0 {
 		// writer is set because Validate rejects LoadForOverwriting with ReadOnly. Check the range
-		// first, mirroring tidwall/wal's TruncateBack ErrOutOfRange rule, so a cut-back that can't
-		// succeed changes nothing on disk.
-		targetIndex := walIndex(int64(opts.TargetVersion), mtree.initialVersion)
+		// before replaying, mirroring tidwall/wal's TruncateBack ErrOutOfRange rule, so a rollback
+		// that can't succeed fails fast and changes nothing on disk.
+		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
 			return nil, fmt.Errorf("fail to read wal first index: %w", err)
@@ -262,9 +261,17 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			return nil, fmt.Errorf("fail to read wal last index: %w", err)
 		}
 		if targetIndex == 0 || lastIndex == 0 || targetIndex < firstIndex || targetIndex > lastIndex {
-			return nil, fmt.Errorf("fail to truncate wal logs: target version %d: %w", opts.TargetVersion, wal.ErrOutOfRange)
+			return nil, fmt.Errorf("rollback target version %d is outside the wal: %w", opts.TargetVersion, wal.ErrOutOfRange)
 		}
+	}
 
+	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
+		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
+			return nil, err
+		}
+	}
+
+	if opts.LoadForOverwriting && opts.TargetVersion > 0 {
 		currentSnapshot, err := os.Readlink(currentPath(dir))
 		if err != nil {
 			return nil, fmt.Errorf("fail to read current version: %w", err)

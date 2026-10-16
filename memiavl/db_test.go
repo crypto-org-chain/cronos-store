@@ -2014,7 +2014,7 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 	}
 }
 
-func TestRollbackAtWALBoundaries(t *testing.T) {
+func TestRollbackSucceeds(t *testing.T) {
 	testCases := []struct {
 		name     string
 		malleate func(t *testing.T, dir string)
@@ -2032,6 +2032,14 @@ func TestRollbackAtWALBoundaries(t *testing.T) {
 				wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
 				require.NoError(t, err)
 				require.NoError(t, errors.Join(wl.TruncateFront(3), wl.Close()))
+			},
+			target: 3,
+		},
+		{
+			name: "a crash left the tmp current link behind",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.Symlink(snapshotName(2), currentTmpPath(dir)))
 			},
 			target: 3,
 		},
