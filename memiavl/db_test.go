@@ -715,6 +715,8 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
+	// Commit can return before the async writer stores its entry, and the corrupt one must come after it.
+	require.NoError(t, db.WaitAsyncCommit())
 	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
 
