@@ -7,6 +7,7 @@ import (
 	fmt "fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -1747,6 +1748,70 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 		version, err := GetLatestVersion(dir)
 		require.NoError(t, err)
 		require.EqualValues(t, 3, version)
+	}
+}
+
+func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	testCases := []struct {
+		name  string
+		cycle func(t *testing.T)
+	}{
+		{
+			// rootmulti opens and closes a read-only DB for every historical-height CacheMultiStoreWithVersion.
+			name: "read-only load",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
+			// creating a db writes the genesis snapshot in initEmptyDB.
+			name: "new db",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
+			name: "writable load with snapshot writes",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(dir, Options{SnapshotWriterLimit: 2}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+				_, err = db.Commit()
+				require.NoError(t, err)
+				require.NoError(t, db.RewriteSnapshot())
+				cp := db.Copy()
+				require.Equal(t, 2, cp.snapshotWriterLimit)
+				require.NoError(t, cp.WriteSnapshot(t.TempDir()))
+				require.NoError(t, cp.Close())
+				require.NoError(t, db.Close())
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := runtime.NumGoroutine()
+			for i := 0; i < 20; i++ {
+				tc.cycle(t)
+			}
+			// slack for testify's polling goroutine and the WAL writer goroutine still exiting; a leak adds at least one per cycle.
+			require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+5 },
+				time.Second, 10*time.Millisecond, "goroutines before the cycles: %d", before)
+		})
 	}
 }
 
