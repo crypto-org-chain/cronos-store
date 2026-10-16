@@ -176,7 +176,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		err      error
 		fileLock FileLock
 		mtree    *MultiTree
-		walLog   walReader
+		reader   walReader
+		writer   writeAheadLog
 	)
 	// until the DB takes ownership, an early return would leak the lock, the
 	// snapshot's mmaps and the WAL, and a retried Load could never re-lock the dir.
@@ -188,8 +189,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if mtree != nil {
 			retErr = errors.Join(retErr, mtree.Close())
 		}
-		if walLog != nil {
-			retErr = errors.Join(retErr, walLog.Close())
+		if reader != nil {
+			retErr = errors.Join(retErr, reader.Close())
 		}
 		if fileLock != nil {
 			retErr = errors.Join(retErr, fileLock.Unlock(), fileLock.Destroy())
@@ -223,13 +224,12 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
-	var (
-		reader walReader
-		writer writeAheadLog
-	)
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		reader, err = openReadOnlyWAL(walPath(dir))
+		var readOnly *readOnlyWAL
+		if readOnly, err = openReadOnlyWAL(walPath(dir)); err == nil {
+			reader = readOnly
+		}
 	} else {
 		var writable *wal.Log
 		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
@@ -239,8 +239,6 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	if err != nil {
 		return nil, err
 	}
-	// assigned only on success: a typed nil would pass the cleanup's nil check.
-	walLog = reader
 
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
