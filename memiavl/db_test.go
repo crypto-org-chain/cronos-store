@@ -1,19 +1,24 @@
 package memiavl
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	fmt "fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/wal"
+	"github.com/zbiljic/go-filelock"
 )
 
 const TestAppChainID = "test_chain"
@@ -262,6 +267,8 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 		CacheSize:          cacheSize,
 	}, TestAppChainID)
 	require.NoError(t, err)
+	// Close waits for the snapshot prune goroutine, which otherwise races with TempDir cleanup
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	cs := []*NamedChangeSet{
 		{
@@ -388,6 +395,69 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	// the next reload drops the DB's reference, which unmaps it only if the clone released its own.
 	rewriteAndReload("k2")
 	require.Nil(t, snapshot.nodesMap)
+}
+
+func TestCopyRejectsWrites(t *testing.T) {
+	copies := []struct {
+		name string
+		copy func(db *DB) *DB
+	}{
+		{"Copy", (*DB).Copy},
+		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }},
+	}
+	writes := []struct {
+		name  string
+		write func(cp *DB) error
+	}{
+		{"ApplyChangeSets", func(cp *DB) error {
+			return cp.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2"))
+		}},
+		{"ApplyChangeSet", func(cp *DB) error {
+			return cp.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: []byte("v2")}}})
+		}},
+		{"SaveVersion", func(cp *DB) error { _, err := cp.SaveVersion(true); return err }},
+		{"Commit", func(cp *DB) error { _, err := cp.Commit(); return err }},
+		{"SetInitialVersion", func(cp *DB) error { return cp.SetInitialVersion(100) }},
+		{"ApplyUpgrades", func(cp *DB) error { return cp.ApplyUpgrades([]*TreeNameUpgrade{{Name: "new"}}) }},
+		{"RewriteSnapshot", func(cp *DB) error { return cp.RewriteSnapshot() }},
+		{"RewriteSnapshotBackground", func(cp *DB) error { return cp.RewriteSnapshotBackground() }},
+	}
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			_, err = db.Commit()
+			require.NoError(t, err)
+			if readOnly {
+				require.NoError(t, db.Close())
+				db, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+			}
+			defer func() { require.NoError(t, db.Close()) }()
+			current, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+
+			for _, c := range copies {
+				for _, w := range writes {
+					t.Run(c.name+"/"+w.name, func(t *testing.T) {
+						cp := c.copy(db)
+						defer func() { require.NoError(t, cp.Close()) }()
+						require.ErrorIs(t, w.write(cp), errReadOnly)
+					})
+				}
+				cp := c.copy(db)
+				require.Panics(t, func() { cp.UpdateCommitInfo() })
+				require.NoError(t, cp.Close())
+			}
+			// a rejected write must not swap the live snapshot.
+			after, err := os.Readlink(currentPath(dir))
+			require.NoError(t, err)
+			require.Equal(t, current, after)
+			require.Equal(t, int64(1), db.Version())
+		})
+	}
 }
 
 func TestCloseDuringSnapshotPrune(t *testing.T) {
@@ -803,7 +873,7 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	require.Error(t, db.CatchupWAL(db.wal, -1), "negative endVersion must return an error")
+	require.Error(t, db.catchupWAL(db.walReader, -1), "negative endVersion must return an error")
 }
 
 // corruptTrailingWALEntry returns the version the corrupt entry pretends to be, so
@@ -811,15 +881,55 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
 
-	lastIndex, err := db.wal.LastIndex()
+	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
 
 	corruptIndex := lastIndex + 1
 	// carries an invalid protobuf wire type (field 13, wire type 6, both undefined),
 	// so WALEntry.Unmarshal reliably rejects it as corrupt.
-	require.NoError(t, db.wal.Write(corruptIndex, []byte("not a valid WALEntry")))
+	var batch wal.Batch
+	batch.Write(corruptIndex, []byte("not a valid WALEntry"))
+	require.NoError(t, db.walWriter.WriteBatch(&batch))
 
 	return walVersion(corruptIndex, db.initialVersion)
+}
+
+// Scoped to dir so descriptors that other tests open or close can't skew the count.
+func countOpenFDsUnder(t *testing.T, dir string) int {
+	t.Helper()
+
+	var files []*syscall.Stat_t
+	require.NoError(t, filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		files = append(files, info.Sys().(*syscall.Stat_t))
+		return nil
+	}))
+
+	fdDir, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot list open file descriptors: %v", err)
+	}
+	names, err := fdDir.Readdirnames(-1)
+	require.NoError(t, errors.Join(err, fdDir.Close()))
+
+	count := 0
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		require.NoError(t, err)
+
+		// fstat, not stat on /dev/fd/N: on macOS that reports the fd filesystem's device.
+		// Fails for the listing's own descriptor, which is closed by now.
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) != nil {
+			continue
+		}
+		if slices.ContainsFunc(files, func(f *syscall.Stat_t) bool { return f.Dev == st.Dev && f.Ino == st.Ino }) {
+			count++
+		}
+	}
+	return count
 }
 
 // injectSnapshotRewriteResult stubs a completed background snapshot rewrite, so
@@ -1058,21 +1168,32 @@ func TestInvalidOptions(t *testing.T) {
 }
 
 func TestExclusiveLock(t *testing.T) {
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
 	dir := t.TempDir()
 
 	db, err := Load(dir, Options{CreateIfMissing: true}, TestAppChainID)
 	require.NoError(t, err)
 
+	fdsBefore := countOpenFDsUnder(t, dir)
 	_, err = Load(dir, Options{}, TestAppChainID)
-	require.Error(t, err)
+	require.ErrorIs(t, err, filelock.ErrLocked)
+	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "a failed lock attempt must close the lock file")
 
-	_, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	// closing the failed attempt's lock file must not release the open DB's lock.
+	_, err = Load(dir, Options{}, TestAppChainID)
+	require.ErrorIs(t, err, filelock.ErrLocked)
+
+	roDB, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, roDB.Close())
 
 	require.NoError(t, db.Close())
 
-	_, err = Load(dir, Options{}, TestAppChainID)
+	db, err = Load(dir, Options{}, TestAppChainID)
 	require.NoError(t, err)
+	require.NoError(t, db.Close())
 }
 
 func TestFastCommit(t *testing.T) {
@@ -1323,6 +1444,18 @@ func TestEarliestVersion(t *testing.T) {
 	require.Equal(t, earliest, earliest2)
 }
 
+func TestCacheEarliestVersionKeepsAPrunedValue(t *testing.T) {
+	db := &DB{earliestSnapshotCache: new(atomic.Int64)}
+	// a prune stored 5 while a scan that saw snapshot 2 was in flight.
+	db.earliestSnapshotCache.Store(5)
+	db.cacheEarliestVersion(2)
+	require.EqualValues(t, 5, db.earliestSnapshotCache.Load())
+
+	db.earliestSnapshotCache.Store(0)
+	db.cacheEarliestVersion(2)
+	require.EqualValues(t, 2, db.earliestSnapshotCache.Load())
+}
+
 // TestEarliestVersionUnpruned verifies that EarliestVersion does not report
 // height 0 for unpruned stores that still have snapshot-0 on disk.
 func TestEarliestVersionUnpruned(t *testing.T) {
@@ -1386,10 +1519,14 @@ func TestSetInitialVersionRefreshesEarliestVersionCache(t *testing.T) {
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
-	require.EqualValues(t, 1, db.earliestSnapshotCache.Load())
+	earliest, err := db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, earliest)
 
 	require.NoError(t, db.SetInitialVersion(100))
-	require.EqualValues(t, 100, db.earliestSnapshotCache.Load())
+	earliest, err = db.EarliestVersion()
+	require.NoError(t, err)
+	require.EqualValues(t, 100, earliest)
 }
 
 func TestPruneSnapshotsFirstSnapshotVersionError(t *testing.T) {
@@ -1513,6 +1650,74 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestClosedDB(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			if readOnly {
+				require.NoError(t, db.Close())
+				db, err = Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, db.Close())
+			_, err = db.CommittedVersion()
+			require.ErrorIs(t, err, wal.ErrClosed)
+			require.NoError(t, db.Close())
+		})
+	}
+}
+
+func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
+	testCases := []struct {
+		name       string
+		malleate   func(t *testing.T, dir string)
+		expVersion int64
+	}{
+		{
+			// a state-sync restore leaves a snapshot and no wal entries.
+			name: "snapshot without wal entries",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				for i := 0; i < 3; i++ {
+					require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+					_, err := db.Commit()
+					require.NoError(t, err)
+				}
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Close())
+				require.NoError(t, os.RemoveAll(walPath(dir)))
+			},
+			expVersion: 3,
+		},
+		{
+			name: "nothing committed with initial version above 1",
+			malleate: func(t *testing.T, dir string) {
+				t.Helper()
+				db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, InitialVersion: 100}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+			expVersion: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.malleate(t, dir)
+
+			version, err := GetLatestVersion(dir)
+			require.NoError(t, err)
+			require.Equal(t, tc.expVersion, version)
+		})
+	}
+}
+
 func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing:   true,
@@ -1533,7 +1738,7 @@ func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
 	require.NoError(t, err)
 
 	// break the underlying wal so the writer's next write fails.
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	_, _ = commit()
 	time.Sleep(100 * time.Millisecond)
@@ -1573,7 +1778,7 @@ func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
 	_, err = commit()
 	require.NoError(t, err)
 
-	require.NoError(t, db.wal.Close())
+	require.NoError(t, db.walReader.Close())
 
 	sawError := false
 	for i := 0; i < 20; i++ {
@@ -1633,13 +1838,244 @@ func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// Load warms the cache, so a copy inherits it without the live db being queried.
 	cp := db.CopyWithCacheSize(0)
-	require.NotZero(t, cp.earliestSnapshotCache.Load())
-	earliest, err := db.EarliestVersion()
+	defer cp.Close()
+	// the cache is shared, so the copy's first scan fills it for the live db too.
+	earliest, err := cp.EarliestVersion()
 	require.NoError(t, err)
-	require.Equal(t, earliest, cp.earliestSnapshotCache.Load())
+	require.Equal(t, earliest, db.earliestSnapshotCache.Load())
 	require.Nil(t, cp.TreeByName(testStoreName).cache)
 	require.NotNil(t, db.TreeByName(testStoreName).cache)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
+}
+
+func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
+	}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.waitCommittedVersion(3, walCatchupTimeout))
+
+	// a half-written entry, as seen while the writer is mid-append.
+	tail := filepath.Join(walPath(dir), "00000000000000000001")
+	f, err := os.OpenFile(tail, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0x80, 0x01, 0x00})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	before, err := os.ReadFile(tail)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name string
+		open func() (int64, error)
+	}{
+		{
+			name: "Load",
+			open: func() (int64, error) {
+				ro, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				if err != nil {
+					return 0, err
+				}
+				return ro.Version(), ro.Close()
+			},
+		},
+		{
+			name: "GetLatestVersion",
+			open: func() (int64, error) { return GetLatestVersion(dir) },
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			version, err := tc.open()
+			require.NoError(t, err)
+			require.EqualValues(t, 3, version)
+
+			after, err := os.ReadFile(tail)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+		})
+	}
+}
+
+func TestReadOnlyLoadClosesTreeOnWALFailure(t *testing.T) {
+	testCases := []struct {
+		name     string
+		malleate func(t *testing.T, dir string, db *DB) uint32
+	}{
+		{
+			name: "wal open fails",
+			malleate: func(t *testing.T, dir string, _ *DB) uint32 {
+				t.Helper()
+				// a pending TruncateFront and TruncateBack at once is corrupt.
+				for _, name := range []string{"00000000000000000002.START", "00000000000000000002.END"} {
+					require.NoError(t, os.WriteFile(filepath.Join(walPath(dir), name), nil, 0o600))
+				}
+				return 0
+			},
+		},
+		{
+			name: "wal replay fails",
+			malleate: func(t *testing.T, _ string, db *DB) uint32 {
+				t.Helper()
+				return uint32(corruptTrailingWALEntry(t, db))
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+			require.NoError(t, err)
+			for i := 0; i < 3; i++ {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", i), "v")))
+				_, err := db.Commit()
+				require.NoError(t, err)
+			}
+			// the genesis snapshot is empty and maps no files.
+			require.NoError(t, db.RewriteSnapshot())
+			require.NoError(t, db.Reload())
+			require.NoError(t, db.WaitAsyncCommit())
+			targetVersion := tc.malleate(t, dir, db)
+			require.NoError(t, db.Close())
+
+			openFDs := func() int {
+				fdDir, err := os.Open("/dev/fd")
+				require.NoError(t, err)
+				defer fdDir.Close()
+				names, err := fdDir.Readdirnames(-1)
+				require.NoError(t, err)
+				return len(names)
+			}
+			// a GC-run finalizer could close a leaked fd and hide the leak.
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
+			before := openFDs()
+
+			_, err = Load(dir, Options{ReadOnly: true, TargetVersion: targetVersion}, TestAppChainID)
+			require.Error(t, err)
+			require.Equal(t, before, openFDs(), "the loaded snapshot's files must be closed")
+		})
+	}
+}
+
+func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
+	dir := t.TempDir()
+	logger := &recordingLogger{}
+	db, err := Load(dir, Options{
+		Logger:             logger,
+		CreateIfMissing:    true,
+		InitialStores:      []string{testStoreName},
+		SnapshotInterval:   2,
+		SnapshotKeepRecent: 2,
+	}, TestAppChainID)
+	require.NoError(t, err)
+	writerClosed := false
+	t.Cleanup(func() {
+		if !writerClosed {
+			_ = db.Close()
+		}
+	})
+
+	var (
+		wg         sync.WaitGroup
+		done       = make(chan struct{})
+		latest     atomic.Int64
+		hashes     sync.Map // version -> root hash
+		loads      atomic.Int64
+		loaded     atomic.Int64
+		loadErrs   sync.Map
+		mismatches sync.Map
+	)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				v := latest.Load()
+				if v == 0 {
+					continue
+				}
+				// mirrors rootmulti loadAtVersion
+				ro, err := Load(dir, Options{ReadOnly: true, TargetVersion: uint32(v)}, TestAppChainID)
+				loads.Add(1)
+				if err != nil {
+					loadErrs.Store(err.Error(), struct{}{})
+					continue
+				}
+				want, _ := hashes.Load(v)
+				if got := ro.TreeByName(testStoreName).RootHash(); ro.Version() != v || !bytes.Equal(want.([]byte), got) {
+					mismatches.Store(fmt.Sprintf("Load(%d): version %d, hash %X, want %X", v, ro.Version(), got, want), struct{}{})
+				}
+				loaded.Add(1)
+				_ = ro.Close()
+				if latestVersion, err := GetLatestVersion(dir); err != nil {
+					loadErrs.Store(err.Error(), struct{}{})
+				} else if latestVersion < v {
+					mismatches.Store(fmt.Sprintf("GetLatestVersion: %d, want >= %d", latestVersion, v), struct{}{})
+				}
+			}
+		}()
+	}
+	stopReaders := sync.OnceFunc(func() {
+		close(done)
+		wg.Wait()
+	})
+	t.Cleanup(stopReaders)
+
+	const versions = 300
+	for v := 1; v <= versions; v++ {
+		// Large entries widen the window where a reader sees a half-written tail
+		// entry, and roll WAL segments so pruning exercises TruncateFront.
+		value := make([]byte, 256*1024)
+		value[0] = byte(v)
+		require.NoError(t, db.ApplyChangeSets([]*NamedChangeSet{
+			{Name: testStoreName, Changeset: ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}},
+		}))
+		_, err := db.Commit()
+		require.NoError(t, err, "commit version %d", v)
+		require.NoError(t, db.waitCommittedVersion(int64(v), walCatchupTimeout))
+		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
+		latest.Store(int64(v))
+	}
+	stopReaders()
+
+	t.Logf("read-only loads: %d, succeeded: %d", loads.Load(), loaded.Load())
+	// a load can still fail if pruning removes its snapshot mid-load; it must never return wrong state.
+	loadErrs.Range(func(k, _ any) bool {
+		t.Log("read-only load error:", k)
+		return true
+	})
+	var wrong []string
+	mismatches.Range(func(k, _ any) bool {
+		wrong = append(wrong, k.(string))
+		return true
+	})
+	require.Empty(t, wrong)
+	require.Positive(t, loaded.Load())
+
+	lastHash := db.TreeByName(testStoreName).RootHash()
+	writerClosed = true
+	require.NoError(t, db.Close())
+	require.NotContains(t, logger.Errors(), "failed to truncate wal")
+
+	reopened, err := Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.Close()) }()
+	require.EqualValues(t, versions, reopened.Version())
+	require.Equal(t, lastHash, reopened.TreeByName(testStoreName).RootHash())
 }

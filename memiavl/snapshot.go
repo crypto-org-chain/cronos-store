@@ -192,11 +192,8 @@ func (snapshot *Snapshot) Close() error {
 		errs = append(errs, snapshot.kvsMap.Close())
 	}
 
-	// reset to an empty tree; field by field because the counter can't be copied.
-	snapshot.nodesMap, snapshot.leavesMap, snapshot.kvsMap = nil, nil, nil
-	snapshot.nodes, snapshot.leaves, snapshot.kvs = nil, nil, nil
-	snapshot.nodesLayout, snapshot.leavesLayout = Nodes{}, Leaves{}
-	snapshot.root = nil
+	// reset to an empty tree
+	*snapshot = Snapshot{version: snapshot.version}
 	return errors.Join(errs...)
 }
 
