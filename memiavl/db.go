@@ -249,8 +249,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	}
 
 	if opts.LoadForOverwriting && opts.TargetVersion > 0 {
-		// writer is set because Validate rejects LoadForOverwriting with ReadOnly. Check the
-		// range first, so a cut-back that can't succeed changes nothing on disk.
+		// writer is set because Validate rejects LoadForOverwriting with ReadOnly. Check the range
+		// first, mirroring tidwall/wal's TruncateBack ErrOutOfRange rule, so a cut-back that can't
+		// succeed changes nothing on disk.
 		targetIndex := walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
