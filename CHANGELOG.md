@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
 - [#137](https://github.com/crypto-org-chain/cronos-store/pull/137) fix(versiondb): compress flushed sst files
 - [#130](https://github.com/crypto-org-chain/cronos-store/pull/130) fix(memiavl): close opened trees on LoadMultiTree failure and lock file on LockFile failure
