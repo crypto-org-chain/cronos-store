@@ -238,7 +238,7 @@ func (t *Tree) Copy(cacheSize int) *Tree {
 		t.cowVersion = t.version
 	}
 	if t.snapshot != nil {
-		t.snapshot.copies.Add(1)
+		t.snapshot.refs.Add(1)
 	}
 	newTree := *t
 	// recreate cache for the copy to keep eviction state independent per tree
