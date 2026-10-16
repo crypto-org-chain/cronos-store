@@ -972,9 +972,8 @@ func TestCommitAfterCloseAtSnapshotIntervalDoesNotPanic(t *testing.T) {
 func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{
-		CreateIfMissing:     true,
-		InitialStores:       []string{testStoreName},
-		SnapshotWriterLimit: 1,
+		CreateIfMissing: true,
+		InitialStores:   []string{testStoreName},
 	}, TestAppChainID)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
@@ -985,24 +984,14 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	_, err = db.Commit()
 	require.NoError(t, err)
 
-	// hold the sole snapshot writer so a wal entry can land mid-rewrite, which
-	// the post-rewrite CatchupWAL then trips over.
-	release := make(chan struct{})
-	held := make(chan struct{})
-	db.snapshotWriterPool.Submit(func() {
-		close(held)
-		<-release
-	})
-	<-held
-
+	// a wal entry landing after the snapshot is written trips the catchup that follows.
 	var loaded *MultiTree
-	db.onCatchupMTreeLoaded = func(mtree *MultiTree) { loaded = mtree }
+	db.onCatchupMTreeLoaded = func(mtree *MultiTree) {
+		loaded = mtree
+		corruptTrailingWALEntry(t, db)
+	}
 
 	require.NoError(t, db.RewriteSnapshotBackground())
-
-	corruptTrailingWALEntry(t, db)
-
-	close(release)
 
 	select {
 	case result := <-db.snapshotRewriteChan:
@@ -1931,6 +1920,70 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 }
 
+func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	require.NoError(t, err)
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+	_, err = db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	testCases := []struct {
+		name  string
+		cycle func(t *testing.T)
+	}{
+		{
+			// rootmulti opens and closes a read-only DB for every historical-height CacheMultiStoreWithVersion.
+			name: "read-only load",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
+			// creating a db writes the genesis snapshot in initEmptyDB.
+			name: "new db",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(t.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+			},
+		},
+		{
+			name: "writable load with snapshot writes",
+			cycle: func(t *testing.T) {
+				t.Helper()
+				db, err := Load(dir, Options{SnapshotWriterLimit: 2}, TestAppChainID)
+				require.NoError(t, err)
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+				_, err = db.Commit()
+				require.NoError(t, err)
+				require.NoError(t, db.RewriteSnapshot())
+				cp := db.Copy()
+				require.Equal(t, 2, cp.snapshotWriterLimit)
+				require.NoError(t, cp.WriteSnapshot(t.TempDir()))
+				require.NoError(t, cp.Close())
+				require.NoError(t, db.Close())
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := runtime.NumGoroutine()
+			for i := 0; i < 20; i++ {
+				tc.cycle(t)
+			}
+			// slack for testify's polling goroutine and the WAL writer goroutine still exiting; a leak adds at least one per cycle.
+			require.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+5 },
+				time.Second, 10*time.Millisecond, "goroutines before the cycles: %d", before)
+		})
+	}
+}
+
 func TestClosedDB(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("readOnly=%v", readOnly), func(t *testing.T) {
@@ -2104,31 +2157,6 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
-}
-
-func TestCloseStopsSnapshotWriterPool(t *testing.T) {
-	// read-only DBs are opened and closed once per historical query.
-	before := runtime.NumGoroutine()
-
-	for i := 0; i < 20; i++ {
-		db, err := Load(t.TempDir(), Options{
-			CreateIfMissing: true,
-			InitialStores:   []string{testStoreName},
-		}, TestAppChainID)
-		require.NoError(t, err)
-		require.NoError(t, db.Close())
-	}
-
-	// Goroutine teardown is not instantaneous, so allow a short settle window.
-	var after int
-	for i := 0; i < 100; i++ {
-		after = runtime.NumGoroutine()
-		if after <= before+5 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("goroutines leaked across 20 Load/Close cycles: before=%d after=%d", before, after)
 }
 
 func TestCopyWithCacheSizeCarriesEarliestVersion(t *testing.T) {

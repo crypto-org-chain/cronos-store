@@ -95,10 +95,9 @@ type DB struct {
 	//   this method is the sole entry point for tree modifications, and there's no concurrency internally
 	//   (the background snapshot rewrite is handled separately), so we don't need locks in the Tree.
 	mtx sync.Mutex
-	// worker goroutine IdleTimeout = 5s
-	snapshotWriterPool *pond.WorkerPool
-	// copies share the pool and must not stop it on Close.
-	ownsWriterPool bool
+
+	// max concurrent tree writers within one snapshot write.
+	snapshotWriterLimit int
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
@@ -136,6 +135,7 @@ type Options struct {
 	// it do nothing if the target version is `0`.
 	LoadForOverwriting bool
 
+	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.
 	SnapshotWriterLimit int
 }
 
@@ -294,9 +294,6 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			return nil, fmt.Errorf("fail to prune snapshots: %w", err)
 		}
 	}
-	// create worker pool. recv tasks to write snapshot
-	workerPool := pond.New(opts.SnapshotWriterLimit, opts.SnapshotWriterLimit*10)
-
 	db := &DB{
 		MultiTree:              *mtree,
 		logger:                 opts.Logger,
@@ -309,8 +306,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
-		snapshotWriterPool:     workerPool,
-		ownsWriterPool:         true,
+		snapshotWriterLimit:    opts.SnapshotWriterLimit,
 		walSync:                writeAheadLog.Sync,
 		walDirSync:             fsyncDir,
 		earliestSnapshotCache:  new(atomic.Int64),
@@ -896,12 +892,12 @@ func (db *DB) copy(cacheSize int) *DB {
 	mtree := db.MultiTree.Copy(cacheSize)
 
 	cloned := &DB{
-		MultiTree:          *mtree,
-		logger:             db.logger,
-		dir:                db.dir,
-		snapshotWriterPool: db.snapshotWriterPool,
-		walSync:            db.walSync,
-		walDirSync:         db.walDirSync,
+		MultiTree:           *mtree,
+		logger:              db.logger,
+		dir:                 db.dir,
+		snapshotWriterLimit: db.snapshotWriterLimit,
+		walSync:             db.walSync,
+		walDirSync:          db.walDirSync,
 	}
 	// shared so a prune after this copy is taken still reaches its readers.
 	cloned.earliestSnapshotCache = db.earliestSnapshotCache
@@ -926,7 +922,7 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	snapshotDir := snapshotName(db.lastCommitInfo.Version)
 	tmpDir := snapshotDir + TmpSuffix
 	path := filepath.Join(db.dir, tmpDir)
-	if err := db.MultiTree.WriteSnapshotWithContext(ctx, path, db.snapshotWriterPool); err != nil {
+	if err := writeSnapshotWithLimit(ctx, &db.MultiTree, path, db.snapshotWriterLimit); err != nil {
 		return errors.Join(err, os.RemoveAll(path))
 	}
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
@@ -1088,13 +1084,6 @@ func (db *DB) Close() error {
 		}
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
-	}
-
-	// safe now that the rewrite goroutine is joined; otherwise pond's purger
-	// goroutine leaks on every Load.
-	if db.ownsWriterPool && db.snapshotWriterPool != nil {
-		db.snapshotWriterPool.StopAndWait()
-		db.snapshotWriterPool = nil
 	}
 
 	// wait for any in-flight prune goroutine to finish before closing the WAL.
@@ -1329,7 +1318,7 @@ func (db *DB) WriteSnapshotWithContext(ctx context.Context, dir string) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.MultiTree.WriteSnapshotWithContext(ctx, dir, db.snapshotWriterPool)
+	return writeSnapshotWithLimit(ctx, &db.MultiTree, dir, db.snapshotWriterLimit)
 }
 
 func snapshotName(version int64) string {
@@ -1433,14 +1422,18 @@ func walPath(root string) string {
 func initEmptyDB(dir string, initialVersion uint32, chainId string) error {
 	tmp := NewEmptyMultiTree(initialVersion, 0, chainId)
 	snapshotDir := snapshotName(0)
-	// create tmp worker pool
-	pool := pond.New(DefaultSnapshotWriterLimit, DefaultSnapshotWriterLimit*10)
-	defer pool.Stop()
-
-	if err := tmp.WriteSnapshot(filepath.Join(dir, snapshotDir), pool); err != nil {
+	if err := writeSnapshotWithLimit(context.Background(), tmp, filepath.Join(dir, snapshotDir), DefaultSnapshotWriterLimit); err != nil {
 		return err
 	}
 	return updateCurrentSymlink(dir, snapshotDir)
+}
+
+// within one call, at most writerLimit trees are written at once; concurrent calls
+// don't share the limit. The pool lives only for the call, so no goroutine outlives it.
+func writeSnapshotWithLimit(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
+	pool := pond.New(writerLimit, writerLimit*10)
+	defer pool.StopAndWait()
+	return mtree.WriteSnapshotWithContext(ctx, dir, pool)
 }
 
 // updateCurrentSymlink creates or replace the current symblic link atomically.
