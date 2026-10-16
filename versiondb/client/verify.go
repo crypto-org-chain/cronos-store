@@ -87,33 +87,11 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			pool := pond.New(concurrency, 0)
 			defer pool.StopAndWait()
 
-			// without a snapshot to write, each worker closes its tree once hashed, so
-			// --concurrency bounds memory even for trees the loaded snapshot owns.
 			keepTrees := len(saveSnapshot) > 0
 			verified := make([]verifiedStore, len(stores))
-			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) error {
-				store := stores[i]
-				tree := mtree.TreeByName(store)
-				// a loaded store with no change sets still belongs in the app hash.
-				fromSnapshot := tree != nil
-				if tree == nil {
-					tree = memiavl.New(0)
-				}
-				exists, err := verifyOneStore(ctx, tree, store, changeSetDir, targetVersion)
-				if err != nil {
-					return err
-				}
-				if !exists && !fromSnapshot {
-					// the store don't exist before target version, don't affect the commit info and app hash.
-					return nil
-				}
-				// hashed in the worker; the bump below only adds empty versions, so the hash holds.
-				verified[i] = verifiedStore{name: store, version: tree.Version(), hash: tree.RootHash()}
-				if keepTrees {
-					verified[i].tree = tree
-					return nil
-				}
-				return tree.Close()
+			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) (err error) {
+				verified[i], err = replayStore(ctx, mtree, stores[i], changeSetDir, targetVersion, keepTrees)
+				return err
 			})
 			if err != nil {
 				return err
@@ -218,6 +196,33 @@ type verifiedStore struct {
 	version int64
 	hash    []byte
 	tree    *memiavl.Tree
+}
+
+// replayStore replays one store onto its loaded tree, or a new one. Unless keepTree
+// is set for a snapshot write, the tree is closed once hashed, so --concurrency
+// bounds memory even for trees the loaded snapshot owns.
+func replayStore(ctx context.Context, mtree *memiavl.MultiTree, store, changeSetDir string, targetVersion int64, keepTree bool) (verifiedStore, error) {
+	tree := mtree.TreeByName(store)
+	// a loaded store with no change sets still belongs in the app hash.
+	fromSnapshot := tree != nil
+	if tree == nil {
+		tree = memiavl.New(0)
+	}
+	exists, err := verifyOneStore(ctx, tree, store, changeSetDir, targetVersion)
+	if err != nil {
+		return verifiedStore{}, err
+	}
+	if !exists && !fromSnapshot {
+		// the store don't exist before target version, don't affect the commit info and app hash.
+		return verifiedStore{}, nil
+	}
+	// the later version bump only adds empty versions, so this hash holds.
+	entry := verifiedStore{name: store, version: tree.Version(), hash: tree.RootHash()}
+	if keepTree {
+		entry.tree = tree
+		return entry, nil
+	}
+	return entry, tree.Close()
 }
 
 // verifyOneStore reports false without error if the store doesn't exist before targetVersion.

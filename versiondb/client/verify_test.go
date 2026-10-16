@@ -170,6 +170,31 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 	}
 }
 
+func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
+	for _, keepTree := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keepTree=%v", keepTree), func(t *testing.T) {
+			changeSetDir := t.TempDir()
+			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
+			mtree, err := memiavl.LoadMultiTree(writeBaseSnapshot(t, 0), true, 0, "")
+			require.NoError(t, err)
+			defer mtree.Close()
+
+			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, 0, keepTree)
+			require.NoError(t, err)
+			require.EqualValues(t, 3, entry.version)
+			tree := mtree.TreeByName(fooStore)
+			if keepTree {
+				require.Same(t, tree, entry.tree)
+				require.Equal(t, entry.hash, tree.RootHash())
+				return
+			}
+			require.Nil(t, entry.tree)
+			// a closed tree has no root, so it hashes like an empty one.
+			require.Equal(t, memiavl.New(0).RootHash(), tree.RootHash())
+		})
+	}
+}
+
 func TestVerifyStopsAfterFirstFailedStore(t *testing.T) {
 	changeSetDir := t.TempDir()
 
