@@ -1957,16 +1957,17 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			retryable: true,
 		},
 		{
+			// the target needs a replay from snapshot 2, so the check must run before it.
 			name:   "target below the wal",
-			target: 2,
+			target: 3,
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
 				wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
 				require.NoError(t, err)
-				require.NoError(t, errors.Join(wl.TruncateFront(3), wl.Close()))
+				require.NoError(t, errors.Join(wl.TruncateFront(4), wl.Close()))
 				return func() {}
 			},
-			expErr: "out of range",
+			expErr: "outside the wal: out of range",
 			failedState: func(t *testing.T, dir string) {
 				t.Helper()
 				current, err := os.Readlink(currentPath(dir))
@@ -2054,6 +2055,8 @@ func TestRollbackSucceeds(t *testing.T) {
 			require.NoError(t, err)
 			require.EqualValues(t, tc.target, db.Version())
 			require.NoError(t, db.Close())
+			_, err = os.Lstat(currentTmpPath(dir))
+			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
 }
