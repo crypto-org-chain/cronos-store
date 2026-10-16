@@ -1235,6 +1235,8 @@ func TestEarliestVersion(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err)
+		// the default async writer may not have written the entry yet.
+		require.NoError(t, db.WaitAsyncCommit())
 		require.NoError(t, db.RewriteSnapshot())
 		require.NoError(t, db.Reload())
 	}
@@ -1410,8 +1412,10 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	require.EqualValues(t, 100, firstVersion)
 }
 
-// Lowers RLIMIT_NOFILE so a leaked fd per call would exhaust it quickly.
 func TestGetLatestVersionClosesWAL(t *testing.T) {
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
 	dir := t.TempDir()
 
 	db, err := Load(dir, Options{
@@ -1429,22 +1433,11 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	}
 	require.NoError(t, db.Close())
 
-	var oldLimit syscall.Rlimit
-	require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_NOFILE, &oldLimit))
-	defer func() {
-		require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &oldLimit))
-	}()
-
-	const lowLimit = 64
-	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: lowLimit, Max: oldLimit.Max}))
-
-	// Well beyond lowLimit, so a leaked fd would surface as failures.
-	const iterations = lowLimit * 4
-	for i := 0; i < iterations; i++ {
-		version, err := GetLatestVersion(dir)
-		require.NoError(t, err)
-		require.EqualValues(t, 3, version)
-	}
+	fdsBefore := countOpenFDsUnder(t, dir)
+	version, err := GetLatestVersion(dir)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, version)
+	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "no file under dir may stay open")
 }
 
 func TestLoadAndSnapshotWritesLeaveNoGoroutines(t *testing.T) {
