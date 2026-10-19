@@ -140,16 +140,17 @@ func newBenchmarkDB(storeCount int) *DB {
 	}
 }
 
-// BenchmarkQueryCopyGet reads a published query copy (zero-copy off, as rootmulti
-// serves it) from parallel goroutines, with and without a cache, over hot key
-// sets of growing size. Each sub-benchmark's cache starts cold, like one block's.
-func BenchmarkQueryCopyGet(b *testing.B) {
-	const storeKeys = 200_000
+const queryCopyBenchKeys = 200_000
+
+// newQueryCopyBenchDB returns a DB whose single store "s" reads from its
+// mmap'd snapshot, like a published query copy between rewrites.
+func newQueryCopyBenchDB(b *testing.B) *DB {
+	b.Helper()
 	db, err := Load(b.TempDir(), Options{CreateIfMissing: true, InitialStores: []string{"s"}}, TestAppChainID)
 	require.NoError(b, err)
-	defer db.Close()
+	b.Cleanup(func() { _ = db.Close() })
 	var cs ChangeSet
-	for i := 0; i < storeKeys; i++ {
+	for i := 0; i < queryCopyBenchKeys; i++ {
 		cs.Pairs = append(cs.Pairs, &KVPair{Key: benchKey(i), Value: make([]byte, 64)})
 	}
 	require.NoError(b, db.ApplyChangeSets([]*NamedChangeSet{{Name: "s", Changeset: cs}}))
@@ -157,24 +158,60 @@ func BenchmarkQueryCopyGet(b *testing.B) {
 	require.NoError(b, err)
 	require.NoError(b, db.RewriteSnapshot())
 	require.NoError(b, db.Reload())
+	return db
+}
 
+// BenchmarkQueryCopyGet reads a published query copy from parallel goroutines,
+// by cache size and zero-copy setting, over hot key sets of growing size. Each
+// sub-benchmark's cache starts cold, like one block's.
+func BenchmarkQueryCopyGet(b *testing.B) {
+	db := newQueryCopyBenchDB(b)
 	for _, cacheSize := range []int{0, 1000} {
-		for _, hot := range []int{16, 1_000, 16_000, storeKeys} {
-			b.Run(fmt.Sprintf("cache=%d/hot=%d", cacheSize, hot), func(b *testing.B) {
-				cp := db.CopyWithCacheSize(cacheSize)
-				defer cp.Close()
-				cp.SetZeroCopy(false)
-				tree := cp.TreeByName("s")
-				b.ReportAllocs()
-				b.ResetTimer()
-				b.RunParallel(func(pb *testing.PB) {
-					rng := rand.New(rand.NewSource(rand.Int63()))
-					for pb.Next() {
-						tree.Get(benchKey(rng.Intn(hot)))
-					}
+		for _, zeroCopy := range []bool{false, true} {
+			for _, hot := range []int{16, 1_000, 16_000, queryCopyBenchKeys} {
+				b.Run(fmt.Sprintf("cache=%d/zerocopy=%v/hot=%d", cacheSize, zeroCopy, hot), func(b *testing.B) {
+					cp := db.CopyWithCacheSize(cacheSize)
+					defer cp.Close()
+					cp.SetZeroCopy(zeroCopy)
+					tree := cp.TreeByName("s")
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.RunParallel(func(pb *testing.PB) {
+						rng := rand.New(rand.NewSource(rand.Int63()))
+						for pb.Next() {
+							tree.Get(benchKey(rng.Intn(hot)))
+						}
+					})
 				})
-			})
+			}
 		}
+	}
+}
+
+// BenchmarkQueryCopyIterate scans 100 keys of a published query copy from
+// parallel goroutines, by zero-copy setting.
+func BenchmarkQueryCopyIterate(b *testing.B) {
+	db := newQueryCopyBenchDB(b)
+	for _, zeroCopy := range []bool{false, true} {
+		b.Run(fmt.Sprintf("zerocopy=%v", zeroCopy), func(b *testing.B) {
+			cp := db.CopyWithCacheSize(0)
+			defer cp.Close()
+			cp.SetZeroCopy(zeroCopy)
+			tree := cp.TreeByName("s")
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				rng := rand.New(rand.NewSource(rand.Int63()))
+				for pb.Next() {
+					it := tree.Iterator(benchKey(rng.Intn(queryCopyBenchKeys-100)), nil, true)
+					for i := 0; i < 100 && it.Valid(); i++ {
+						_, _ = it.Key(), it.Value()
+						it.Next()
+					}
+					_ = it.Close()
+				}
+			})
+		})
 	}
 }
 
