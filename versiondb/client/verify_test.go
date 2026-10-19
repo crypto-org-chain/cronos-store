@@ -3,8 +3,10 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -214,6 +216,23 @@ func TestVerifyStopsAfterFirstFailedStore(t *testing.T) {
 	err := cmd.Execute()
 	require.ErrorIs(t, err, context.Canceled)
 	require.NotContains(t, err.Error(), "not a directory", `"b" must be skipped once "a" failed`)
+}
+
+func TestVerifyFailsOnWorkerPanic(t *testing.T) {
+	changeSetDir := t.TempDir()
+	writeStoreChangeSet(t, changeSetDir, barStore, []int64{1})
+
+	// a key length of 2^64-1 makes readKVPair's allocation panic.
+	payload := append([]byte{0}, binary.AppendUvarint(nil, math.MaxUint64)...)
+	var header [16]byte
+	binary.LittleEndian.PutUint64(header[:], 1)
+	binary.LittleEndian.PutUint64(header[8:], uint64(len(payload)))
+	require.NoError(t, os.MkdirAll(filepath.Join(changeSetDir, fooStore), os.ModePerm))
+	require.NoError(t, os.WriteFile(filepath.Join(changeSetDir, fooStore, "block-1"), append(header[:], payload...), 0o600))
+
+	cmd := VerifyChangeSetCmd(nil)
+	cmd.SetArgs([]string{changeSetDir, "--" + flagStores, bothStores})
+	require.ErrorContains(t, cmd.Execute(), "panic in worker task")
 }
 
 func TestNormalizeStores(t *testing.T) {
