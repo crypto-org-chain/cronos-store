@@ -2007,7 +2007,7 @@ func TestRollback(t *testing.T) {
 				truncateWALFront(t, dir, 4)
 				return nil
 			},
-			expErr:       "outside the wal",
+			expErr:       "target version 3 is outside the wal",
 			expErrIs:     wal.ErrOutOfRange,
 			expCurrent:   4,
 			expSnapshots: []int64{0, 2, 4},
@@ -2021,7 +2021,7 @@ func TestRollback(t *testing.T) {
 				require.NoError(t, updateCurrentSymlink(dir, snapshotName(2)))
 				return nil
 			},
-			expErr:       "outside the wal",
+			expErr:       "target version 6 is outside the wal",
 			expErrIs:     wal.ErrOutOfRange,
 			expCurrent:   2,
 			expSnapshots: []int64{0, 2, 4},
@@ -2036,7 +2036,7 @@ func TestRollback(t *testing.T) {
 				require.NoError(t, os.RemoveAll(walPath(dir)))
 				return nil
 			},
-			expErr:       "outside the wal",
+			expErr:       "target version 9 is outside the wal",
 			expErrIs:     wal.ErrOutOfRange,
 			expCurrent:   13,
 			expSnapshots: []int64{0, 11, 13},
