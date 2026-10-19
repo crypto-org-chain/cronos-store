@@ -205,11 +205,11 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 
 			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, tc.targetVersion, snapshotDir)
 			require.NoError(t, err)
-			require.Equal(t, tc.expVersion, entry.version)
+			require.Equal(t, tc.expVersion, entry.commitID.Version)
 			tree := mtree.TreeByName(fooStore)
 			if tc.expKept {
 				require.Same(t, tree, entry.tree)
-				require.Equal(t, entry.hash, tree.RootHash())
+				require.Equal(t, entry.commitID.Hash, tree.RootHash())
 				return
 			}
 			require.Nil(t, entry.tree)

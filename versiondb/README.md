@@ -91,14 +91,14 @@ With default parameters it can finish in around 12minutes for testnet archive no
 
 When migrating an existing archive node to versiondb, it's recommended to rebuild the `application.db` from scratch to reclaim disk space faster, we provide a command to restore a single version of IAVL trees from memiavl snapshot.
 
+Without `--target-version`, `verify --save-snapshot` keeps every store's tree in memory until all stores are replayed, since the snapshot's version is known only then. Pass `--target-version` to write each store's snapshot as soon as it's replayed, which keeps peak memory to about `--concurrency` trees.
+
 ```bash
 $ # create memiavl snapshot
 $ cronosd changeset verify data --save-snapshot snapshot
 $ # restore application.db
 $ cronosd changeset restore-app-db snapshot application.db
 ```
-
-Without `--target-version`, `verify --save-snapshot` keeps every store's tree in memory until all stores are replayed, since the snapshot's version is known only then. Pass `--target-version` to write each store's snapshot as soon as it's replayed, which keeps peak memory to about `--concurrency` trees.
 
 Then replace the whole `application.db` in the node with the newly generated one.
 

@@ -104,7 +104,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			// a multitree snapshot needs every tree at one version, known once every store is replayed.
 			var latestVersion int64
 			for _, entry := range verified {
-				latestVersion = max(latestVersion, entry.version)
+				latestVersion = max(latestVersion, entry.commitID.Version)
 			}
 
 			storeInfos := make([]storetypes.StoreInfo, 0, len(verified))
@@ -114,10 +114,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 						return err
 					}
 				}
-				storeInfos = append(storeInfos, storetypes.StoreInfo{
-					Name:     entry.name,
-					CommitId: storetypes.CommitID{Version: entry.version, Hash: entry.hash},
-				})
+				storeInfos = append(storeInfos, storetypes.StoreInfo{Name: entry.name, CommitId: entry.commitID})
 			}
 
 			commitInfo := buildCommitInfo(storeInfos, latestVersion)
@@ -138,10 +135,13 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					return err
 				}
 
-				// the output keeps each store's own version; the saved trees were all advanced to latestVersion.
-				snapshotInfo := convertCommitInfo(&commitInfo)
-				for i := range snapshotInfo.StoreInfos {
-					snapshotInfo.StoreInfos[i].CommitId.Version = latestVersion
+				// the output keeps each store's own version, but every saved tree is at latestVersion.
+				snapshotInfo := &memiavl.CommitInfo{Version: latestVersion, StoreInfos: make([]memiavl.StoreInfo, len(commitInfo.StoreInfos))}
+				for i, info := range commitInfo.StoreInfos {
+					snapshotInfo.StoreInfos[i] = memiavl.StoreInfo{
+						Name:     info.Name,
+						CommitId: memiavl.CommitID{Version: latestVersion, Hash: info.CommitId.Hash},
+					}
 				}
 				// keeps the loaded InitialVersion, which memiavl uses to map versions to WAL indexes.
 				if err := mtree.WriteMetadata(saveSnapshot, snapshotInfo); err != nil {
@@ -201,10 +201,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 // verifiedStore holds one replayed store; tree is set only when its snapshot is still to be written.
 type verifiedStore struct {
-	name    string
-	version int64
-	hash    []byte
-	tree    *memiavl.Tree
+	name     string
+	commitID storetypes.CommitID
+	tree     *memiavl.Tree
 }
 
 // replayStore replays one store onto its loaded tree, or a new one, and closes the tree
@@ -233,7 +232,7 @@ func replayStore(ctx context.Context, mtree *memiavl.MultiTree, store, changeSet
 		}
 	}
 	// a later version bump only adds empty versions, so this hash holds.
-	entry := verifiedStore{name: store, version: tree.Version(), hash: tree.RootHash()}
+	entry := verifiedStore{name: store, commitID: lastCommitID(tree)}
 	switch {
 	case snapshotDir == "":
 	case targetVersion > 0:
@@ -371,23 +370,6 @@ func buildCommitInfo(storeInfos []storetypes.StoreInfo, version int64) storetype
 
 	return storetypes.CommitInfo{
 		Version:    version,
-		StoreInfos: storeInfos,
-	}
-}
-
-func convertCommitInfo(commitInfo *storetypes.CommitInfo) *memiavl.CommitInfo {
-	storeInfos := make([]memiavl.StoreInfo, len(commitInfo.StoreInfos))
-	for i, storeInfo := range commitInfo.StoreInfos {
-		storeInfos[i] = memiavl.StoreInfo{
-			Name: storeInfo.Name,
-			CommitId: memiavl.CommitID{
-				Version: storeInfo.CommitId.Version,
-				Hash:    storeInfo.CommitId.Hash,
-			},
-		}
-	}
-	return &memiavl.CommitInfo{
-		Version:    commitInfo.Version,
 		StoreInfos: storeInfos,
 	}
 }
