@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/alitto/pond"
@@ -140,6 +141,26 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 	}
 }
 
+// printedVersions maps each store in a verify result to its commit-info version.
+func printedVersions(t *testing.T, result []byte) map[string]string {
+	t.Helper()
+	var info struct {
+		StoreInfos []struct {
+			Name     string `json:"name"`
+			CommitID struct {
+				Version string `json:"version"`
+			} `json:"commitId"`
+		} `json:"storeInfos"`
+	}
+	_, body, _ := bytes.Cut(result, []byte("\n"))
+	require.NoError(t, json.Unmarshal(body, &info))
+	versions := make(map[string]string, len(info.StoreInfos))
+	for _, si := range info.StoreInfos {
+		versions[si.Name] = si.CommitID.Version
+	}
+	return versions
+}
+
 func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 	changeSetDir := t.TempDir()
 	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{1, 2, 3})
@@ -160,37 +181,38 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 	plain := verify()
 	require.Equal(t, plain, verify("--"+flagSaveSnapshot, filepath.Join(t.TempDir(), "snapshot")))
 
-	var info struct {
-		StoreInfos []struct {
-			Name     string `json:"name"`
-			CommitID struct {
-				Version string `json:"version"`
-			} `json:"commitId"`
-		} `json:"storeInfos"`
-	}
-	_, body, _ := bytes.Cut(plain, []byte("\n"))
-	require.NoError(t, json.Unmarshal(body, &info))
-	versions := make(map[string]string, len(info.StoreInfos))
-	for _, si := range info.StoreInfos {
-		versions[si.Name] = si.CommitID.Version
-	}
-	require.Equal(t, map[string]string{fooStore: "3", barStore: "1"}, versions)
+	require.Equal(t, map[string]string{fooStore: "3", barStore: "1"}, printedVersions(t, plain))
 }
 
 func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
-	for _, keepTree := range []bool{false, true} {
-		t.Run(fmt.Sprintf("keepTree=%v", keepTree), func(t *testing.T) {
+	testCases := []struct {
+		name          string
+		saveSnapshot  bool
+		targetVersion int64
+		expKept       bool
+	}{
+		{name: "no snapshot to write"},
+		{name: "snapshot written by the worker", saveSnapshot: true, targetVersion: 3},
+		{name: "snapshot version not known yet", saveSnapshot: true, expKept: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 			changeSetDir := t.TempDir()
 			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{2, 3})
 			mtree, err := memiavl.LoadMultiTree(writeBaseSnapshot(t, 0), true, 0, "")
 			require.NoError(t, err)
 			defer mtree.Close()
+			var snapshotDir string
+			if tc.saveSnapshot {
+				snapshotDir = t.TempDir()
+			}
 
-			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, 0, keepTree)
+			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, tc.targetVersion, snapshotDir)
 			require.NoError(t, err)
 			require.EqualValues(t, 3, entry.version)
 			tree := mtree.TreeByName(fooStore)
-			if keepTree {
+			if tc.expKept {
 				require.Same(t, tree, entry.tree)
 				require.Equal(t, entry.hash, tree.RootHash())
 				return
@@ -198,6 +220,12 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 			require.Nil(t, entry.tree)
 			// a closed tree has no root, so it hashes like an empty one.
 			require.Equal(t, memiavl.New(0).RootHash(), tree.RootHash())
+			if tc.saveSnapshot {
+				written, err := memiavl.OpenSnapshot(filepath.Join(snapshotDir, fooStore))
+				require.NoError(t, err)
+				defer written.Close()
+				require.EqualValues(t, 3, written.Version())
+			}
 		})
 	}
 }
@@ -319,9 +347,11 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 		name           string
 		initialVersion uint32
 		baseVersion    int64
+		targetVersion  bool
 	}{
 		{name: "no initial version", initialVersion: 0, baseVersion: 1},
 		{name: "initial version above one", initialVersion: 100, baseVersion: 100},
+		{name: "target version", initialVersion: 0, baseVersion: 1, targetVersion: true},
 	}
 
 	for _, tc := range testCases {
@@ -334,14 +364,21 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 			// Only "foo" has change sets past the snapshot; "bar" has none at all.
 			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{tc.baseVersion + 1, finalVersion})
 
+			args := []string{
+				changeSetDir,
+				"--" + flagStores, bothStores,
+				"--" + flagLoadSnapshot, baseDir,
+				"--" + flagSave,
+			}
+			// the loaded "bar" reaches the target too; without one it keeps its own version.
+			expVersions := map[string]string{fooStore: fmt.Sprint(finalVersion), barStore: fmt.Sprint(tc.baseVersion)}
+			if tc.targetVersion {
+				args = append(args, "--"+flagTargetVersion, fmt.Sprint(finalVersion))
+				expVersions[barStore] = fmt.Sprint(finalVersion)
+			}
 			verify := func(extra ...string) []byte {
 				cmd := VerifyChangeSetCmd(nil)
-				cmd.SetArgs(append([]string{
-					changeSetDir,
-					"--" + flagStores, bothStores,
-					"--" + flagLoadSnapshot, baseDir,
-					"--" + flagSave,
-				}, extra...))
+				cmd.SetArgs(append(slices.Clone(args), extra...))
 				require.NoError(t, cmd.Execute())
 				result := filepath.Join(changeSetDir, fmt.Sprintf("verified-%d", finalVersion))
 				bz, err := os.ReadFile(result)
@@ -352,6 +389,7 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 			withSnapshot := verify("--"+flagSaveSnapshot, outDir)
 			// without a snapshot to write, each worker closes its tree, including the unchanged loaded "bar".
 			require.Equal(t, withSnapshot, verify())
+			require.Equal(t, expVersions, printedVersions(t, withSnapshot))
 
 			loaded, err := memiavl.LoadMultiTree(outDir, false, 0, "")
 			require.NoError(t, err)
