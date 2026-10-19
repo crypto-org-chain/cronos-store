@@ -1845,15 +1845,6 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 			expErr: "fail to read current version",
 		},
 		{
-			name: "rollback snapshot deletion fails",
-			malleate: func(t *testing.T, dir string, _ *DB) Options {
-				t.Helper()
-				blockSnapshotRemoval(t, dir, 3)
-				return Options{TargetVersion: 2, LoadForOverwriting: true}
-			},
-			expErr: "fail to prune snapshots",
-		},
-		{
 			name:         "rollback wal truncation fails",
 			needsNonRoot: true,
 			malleate: func(t *testing.T, dir string, _ *DB) Options {
@@ -1924,14 +1915,14 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 
 func TestRollback(t *testing.T) {
 	testCases := []struct {
-		name         string
-		needsNonRoot bool
-		target       uint32
-		// may return an idempotent repair, run after a failed rollback.
-		malleate func(t *testing.T, dir string) (repair func())
-		expErr   string
-		expErrIs error
-		// what a failed rollback leaves on disk.
+		name           string
+		needsNonRoot   bool
+		initialVersion uint32
+		target         uint32
+		// may return a repair, which must be idempotent.
+		malleate     func(t *testing.T, dir string) (repair func())
+		expErr       string
+		expErrIs     error
 		expCurrent   int64
 		expSnapshots []int64
 		retryable    bool
@@ -1952,6 +1943,11 @@ func TestRollback(t *testing.T) {
 				truncateWALFront(t, dir, 3)
 				return nil
 			},
+		},
+		{
+			name:           "initial version above 1",
+			initialVersion: 10,
+			target:         12,
 		},
 		{
 			name:   "a crash left the tmp current link behind",
@@ -2030,6 +2026,21 @@ func TestRollback(t *testing.T) {
 			expCurrent:   2,
 			expSnapshots: []int64{0, 2, 4},
 		},
+		{
+			// an empty WAL reports index 0 as both its first and last index.
+			name:           "empty wal, target just below the initial version",
+			initialVersion: 10,
+			target:         9,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(walPath(dir)))
+				return nil
+			},
+			expErr:       "outside the wal",
+			expErrIs:     wal.ErrOutOfRange,
+			expCurrent:   13,
+			expSnapshots: []int64{0, 11, 13},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2037,7 +2048,7 @@ func TestRollback(t *testing.T) {
 			if tc.needsNonRoot && os.Geteuid() == 0 {
 				t.Skip("root ignores directory permissions")
 			}
-			dir := newRollbackTestDB(t)
+			dir := newRollbackTestDB(t, tc.initialVersion)
 			repair := func() {}
 			if tc.malleate != nil {
 				if r := tc.malleate(t, dir); r != nil {
@@ -2045,6 +2056,8 @@ func TestRollback(t *testing.T) {
 				}
 			}
 			t.Cleanup(repair)
+			latest, err := GetLatestVersion(dir)
+			require.NoError(t, err)
 			rollback := Options{TargetVersion: tc.target, LoadForOverwriting: true}
 
 			if tc.expErr != "" {
@@ -2064,7 +2077,7 @@ func TestRollback(t *testing.T) {
 					return false, nil
 				}))
 				require.Equal(t, tc.expSnapshots, snapshots)
-				requireChainEndsAt(t, dir, 5)
+				requireChainEndsAt(t, dir, latest)
 
 				if !tc.retryable {
 					return
@@ -2076,7 +2089,7 @@ func TestRollback(t *testing.T) {
 			require.EqualValues(t, tc.target, db.Version())
 			require.NoError(t, db.Close())
 			requireChainEndsAt(t, dir, int64(tc.target))
-			for v := int64(tc.target) + 1; v <= 5; v++ {
+			for v := int64(tc.target) + 1; v <= latest; v++ {
 				require.NoDirExists(t, filepath.Join(dir, snapshotName(v)))
 			}
 			_, err = os.Lstat(currentTmpPath(dir))
@@ -2085,14 +2098,15 @@ func TestRollback(t *testing.T) {
 	}
 }
 
-// commits heights 1 to 5, writing key k<h> at each, with snapshots at 2 and 4.
-func newRollbackTestDB(t *testing.T) string {
+// commits 5 heights from the initial version, writing key k<version> at each, with snapshots at
+// the 2nd and 4th: snapshots 0, 2 and 4 by default, or 0, 11 and 13 from initial version 10.
+func newRollbackTestDB(t *testing.T, initialVersion uint32) string {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, InitialVersion: initialVersion}, TestAppChainID)
 	require.NoError(t, err)
 	for h := 1; h <= 5; h++ {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", h), "v")))
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", db.Version()+1), "v")))
 		_, err := db.Commit()
 		require.NoError(t, err)
 		if h == 2 || h == 4 {

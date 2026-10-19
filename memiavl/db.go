@@ -249,7 +249,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
 	var targetIndex uint64
 	if rollback {
-		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject what TruncateBack would, before any disk change.
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject what TruncateBack would before touching the link or snapshots.
 		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
