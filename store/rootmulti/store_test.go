@@ -739,6 +739,14 @@ func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
 	}
 }
 
+func TestLiveDBOptionsDropTheNodeCache(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	rs.SetMemIAVLOptions(memiavl.Options{CacheSize: 1000})
+	require.Zero(t, rs.liveDBOptions().CacheSize)
+	// historical loads still size their cache from the config.
+	require.Equal(t, 1000, rs.opts.CacheSize)
+}
+
 func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
 	dir := t.TempDir()
 	db, err := memiavl.Load(dir, memiavl.Options{

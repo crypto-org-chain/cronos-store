@@ -192,6 +192,13 @@ func (c *historicalDBCache) evictAllLocked() error {
 
 // loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
 // memiavl.Load's silent fallback to the latest reachable version.
+// liveDBOptions drops the node cache: the live trees are only written; reads go through copies.
+func (rs *Store) liveDBOptions() memiavl.Options {
+	opts := rs.opts
+	opts.CacheSize = 0
+	return opts
+}
+
 func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
@@ -710,12 +717,10 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
-	opts := rs.opts
+	opts := rs.liveDBOptions()
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
-	// the live trees are only written; reads go through copies.
-	opts.CacheSize = 0
 	// a previously loaded db holds the directory lock memiavl.Load needs.
 	if err := rs.closeDBForReload(); err != nil {
 		return fmt.Errorf("failed to close db: %w", err)
@@ -891,7 +896,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("failed to close db: %w", err)
 	}
 
-	opts := rs.opts
+	opts := rs.liveDBOptions()
 	opts.TargetVersion = uint32(target)
 	opts.LoadForOverwriting = true
 

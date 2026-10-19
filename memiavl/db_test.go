@@ -294,6 +294,15 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 	}
 }
 
+func rewriteAndReload(t *testing.T, db *DB, key, value string) {
+	t.Helper()
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, value)))
+	_, err := db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+}
+
 func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -302,33 +311,21 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	require.NoError(t, err)
 
 	// commit a known key and make it snapshot-backed
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k", "v")
 
 	// a copy shares the live mmap'd snapshot
 	cp := db.Copy()
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// one more reload cycle: the old code munmaps the copy's snapshot here.
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k2", "v2")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k2", "v2")
 
 	// the copy must still read correctly from the retained generation
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// the DB drops that generation at the next reload; the copy's reference keeps it mapped.
 	snapshot := cp.TreeByName(testStoreName).snapshot
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k3", "v3")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k3", "v3")
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// the last holder unmaps it.
@@ -373,14 +370,7 @@ func TestUnpinnedCopyTakesNoReference(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
 
-	rewriteAndReload := func(key string) {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
-		_, err := db.Commit()
-		require.NoError(t, err)
-		require.NoError(t, db.RewriteSnapshot())
-		require.NoError(t, db.Reload())
-	}
-	rewriteAndReload("k1")
+	rewriteAndReload(t, db, "k1", "v")
 	snapshot := db.TreeByName(testStoreName).snapshot
 
 	cp := db.UnpinnedCopy(0)
@@ -391,11 +381,11 @@ func TestUnpinnedCopyTakesNoReference(t *testing.T) {
 	require.NotNil(t, snapshot.nodesMap)
 
 	// an unpinned copy stays readable through the first reload after it is taken,
-	rewriteAndReload("k2")
+	rewriteAndReload(t, db, "k2", "v")
 	require.NotNil(t, snapshot.nodesMap)
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
 	// but must not keep the generation mapped past the second.
-	rewriteAndReload("k3")
+	rewriteAndReload(t, db, "k3", "v")
 	require.Nil(t, snapshot.nodesMap)
 }
 
@@ -407,14 +397,7 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
 
-	rewriteAndReload := func(key string) {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
-		_, err := db.Commit()
-		require.NoError(t, err)
-		require.NoError(t, db.RewriteSnapshot())
-		require.NoError(t, db.Reload())
-	}
-	rewriteAndReload("k1")
+	rewriteAndReload(t, db, "k1", "v")
 	snapshot := db.TreeByName(testStoreName).snapshot
 
 	// a new version so the background rewrite writes a new snapshot; its clone holds
@@ -428,7 +411,7 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	}
 
 	// the next reload drops the DB's reference, which unmaps it only if the clone released its own.
-	rewriteAndReload("k2")
+	rewriteAndReload(t, db, "k2", "v")
 	require.Nil(t, snapshot.nodesMap)
 }
 
@@ -436,12 +419,10 @@ func TestCopyRejectsWrites(t *testing.T) {
 	copies := []struct {
 		name string
 		copy func(db *DB) *DB
-		// an unpinned copy holds no snapshot reference, so it must not be closed.
-		pinned bool
 	}{
-		{"Copy", (*DB).Copy, true},
-		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }, true},
-		{"UnpinnedCopy", func(db *DB) *DB { return db.UnpinnedCopy(0) }, false},
+		{"Copy", (*DB).Copy},
+		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }},
+		{"UnpinnedCopy", func(db *DB) *DB { return db.UnpinnedCopy(0) }},
 	}
 	writes := []struct {
 		name  string
@@ -481,17 +462,13 @@ func TestCopyRejectsWrites(t *testing.T) {
 				for _, w := range writes {
 					t.Run(c.name+"/"+w.name, func(t *testing.T) {
 						cp := c.copy(db)
-						if c.pinned {
-							defer func() { require.NoError(t, cp.Close()) }()
-						}
+						defer func() { require.NoError(t, cp.Close()) }()
 						require.ErrorIs(t, w.write(cp), errReadOnly)
 					})
 				}
 				cp := c.copy(db)
 				require.Panics(t, func() { cp.UpdateCommitInfo() })
-				if c.pinned {
-					require.NoError(t, cp.Close())
-				}
+				require.NoError(t, cp.Close())
 			}
 			// a rejected write must not swap the live snapshot.
 			after, err := os.Readlink(currentPath(dir))
