@@ -642,7 +642,7 @@ func TestQueryHistoricalHeightAllowsRenamedStore(t *testing.T) {
 	require.Equal(t, []byte("v"), res.Value)
 }
 
-func TestLatestHeightReadsOutliveTheirSnapshot(t *testing.T) {
+func TestLatestHeightReadsOutliveASnapshotRewrite(t *testing.T) {
 	testCases := []struct {
 		name string
 		// read returns the value of key and releases whatever it holds of the snapshot.
@@ -689,18 +689,52 @@ func TestLatestHeightReadsOutliveTheirSnapshot(t *testing.T) {
 
 			value := tc.read(t, rs, key)
 
-			// the DB unmaps a generation at the second reload after retiring it.
-			for i := 0; i < 2; i++ {
-				rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
-				rs.Commit()
-				require.NoError(t, rs.db.RewriteSnapshot())
-				require.NoError(t, rs.db.Reload())
-			}
+			// the DB keeps the retired generation mapped until its next reload.
+			rs.GetKVStore(key).Set([]byte("n"), []byte("v"))
+			rs.Commit()
+			require.NoError(t, rs.db.RewriteSnapshot())
+			require.NoError(t, rs.db.Reload())
 			rs.Commit()
 
 			// a read of an unmapped page panics here instead of crashing the test binary.
 			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 			require.Equal(t, want, value)
+		})
+	}
+}
+
+func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
+	testCases := []struct {
+		zeroCopy   bool
+		wantAllocs float64
+	}{
+		{zeroCopy: false, wantAllocs: 1},
+		{zeroCopy: true, wantAllocs: 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("zeroCopy=%v", tc.zeroCopy), func(t *testing.T) {
+			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			rs.SetMemIAVLOptions(memiavl.Options{ZeroCopy: tc.zeroCopy})
+			key := types.NewKVStoreKey(testStoreName)
+			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			require.NoError(t, rs.LoadLatestVersion())
+			t.Cleanup(func() { rs.Close() })
+			want := bytes.Repeat([]byte("v"), 1<<10)
+			rs.GetKVStore(key).Set([]byte("k"), want)
+			rs.Commit()
+			// only snapshot-backed trees honor the setting; in-memory ones are always zero-copy.
+			require.NoError(t, rs.db.RewriteSnapshot())
+			require.NoError(t, rs.db.Reload())
+			rs.Commit()
+
+			snap := rs.acquireQuerySnapshot()
+			defer rs.releaseQuerySnapshot(snap)
+			tree := snap.db.TreeByName(testStoreName)
+			k := []byte("k")
+			var got []byte
+			require.Equal(t, tc.wantAllocs, testing.AllocsPerRun(100, func() { got = tree.Get(k) }))
+			require.Equal(t, want, got)
 		})
 	}
 }
@@ -1162,7 +1196,7 @@ func TestAcquireQuerySnapshotSkipsReleasedSnapshot(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	live := newQuerySnapshot(nil, &types.CommitInfo{})
+	live := newQuerySnapshot(nil, &types.CommitInfo{}, nil)
 	rs.querySnapshot.Store(live)
 	require.Same(t, live, <-acquired)
 	require.EqualValues(t, 2, live.refs.Load())
@@ -1235,13 +1269,18 @@ func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 }
 
 // closeDB runs on the state-sync goroutine while ABCI queries keep arriving.
-func TestReadPathsRaceAgainstClose(t *testing.T) {
+func TestReadPathsRaceAgainstCloseAndReload(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
 	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	tkey := types.NewTransientStoreKey("transient")
+	rs.MountStoreWithDB(tkey, types.StoreTypeTransient, nil)
 	require.NoError(t, rs.LoadLatestVersion())
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	historical := rs.Commit().Version
+	rs.GetKVStore(key).Set([]byte("k"), []byte("w"))
 	rs.Commit()
+	require.NoError(t, rs.db.WaitAsyncCommit())
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1252,6 +1291,11 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		func() { _, _ = rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")}) },
 		func() {
 			if cms, err := rs.CacheMultiStoreWithVersion(0); err == nil {
+				_ = cms.(io.Closer).Close()
+			}
+		},
+		func() {
+			if cms, err := rs.CacheMultiStoreWithVersion(historical); err == nil {
 				_ = cms.(io.Closer).Close()
 			}
 		},
@@ -1271,6 +1315,16 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		}(read)
 	}
 
+	for i := 0; i < 10; i++ {
+		require.NoError(t, rs.LoadLatestVersion())
+	}
+	// query stores carry the reloaded transient store.
+	for _, version := range []int64{0, historical} {
+		cms, err := rs.CacheMultiStoreWithVersion(version)
+		require.NoError(t, err)
+		require.NotPanics(t, func() { cms.GetKVStore(tkey) })
+		require.NoError(t, cms.(io.Closer).Close())
+	}
 	require.NoError(t, rs.closeDBForReload())
 	close(done)
 	wg.Wait()

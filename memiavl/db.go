@@ -988,7 +988,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 		logger.Info("start rewriting snapshot", "version", version)
 		err := cloned.RewriteSnapshotWithContext(ctx)
 		// release the clone before handing back a result, so the generation it pins
-		// can be unmapped as soon as the DB retires it.
+		// can be unmapped once the DB drops it.
 		if cerr := cloned.Close(); cerr != nil {
 			logger.Error("failed to release snapshot rewrite copy", "err", cerr)
 		}
