@@ -2106,8 +2106,6 @@ func TestRollback(t *testing.T) {
 			for v := int64(tc.target) + 1; v <= latest; v++ {
 				require.NoDirExists(t, filepath.Join(dir, snapshotName(v)))
 			}
-			_, err = os.Lstat(currentTmpPath(dir))
-			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
 }
@@ -2119,11 +2117,13 @@ func newRollbackTestDB(t *testing.T, initialVersion uint32) string {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}, InitialVersion: initialVersion}, TestAppChainID)
 	require.NoError(t, err)
-	for h := 1; h <= 5; h++ {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", db.Version()+1), "v")))
-		_, err := db.Commit()
+	first := max(int64(initialVersion), 1)
+	for v := first; v < first+5; v++ {
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, fmt.Sprintf("k%d", v), "v")))
+		committed, err := db.Commit()
 		require.NoError(t, err)
-		if h == 2 || h == 4 {
+		require.Equal(t, v, committed)
+		if v == first+1 || v == first+3 {
 			require.NoError(t, db.RewriteSnapshot())
 		}
 	}

@@ -208,7 +208,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err := removeTmpDirs(dir); err != nil {
 			return nil, fmt.Errorf("fail to cleanup tmp directories: %w", err)
 		}
-		// left by a crash in updateCurrentSymlink, it would fail every later link update.
+		// under the lock, a leftover tmp link is from a crash and would block every later link update.
 		if err := os.Remove(currentTmpPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("fail to cleanup tmp current link: %w", err)
 		}
