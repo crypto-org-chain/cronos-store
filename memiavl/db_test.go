@@ -1999,7 +1999,22 @@ func TestRollback(t *testing.T) {
 			retryable:    true,
 		},
 		{
+			// a snapshot-height target needs no replay, so only the first-index bound rejects it.
 			name:   "target below the wal",
+			target: 2,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				truncateWALFront(t, dir, 3)
+				return nil
+			},
+			expErr:       "target version 2 is outside the wal",
+			expErrIs:     wal.ErrOutOfRange,
+			expCurrent:   4,
+			expSnapshots: []int64{0, 2, 4},
+		},
+		{
+			// catchupWAL would fail first if the check ran after it.
+			name:   "target below the wal needs a replay",
 			target: 3,
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
