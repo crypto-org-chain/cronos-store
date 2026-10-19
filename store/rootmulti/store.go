@@ -190,8 +190,6 @@ func (c *historicalDBCache) evictAllLocked() error {
 	return stderrors.Join(errs...)
 }
 
-// loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
-// memiavl.Load's silent fallback to the latest reachable version.
 // liveDBOptions drops the node cache: the live trees are only written; reads go through copies.
 func (rs *Store) liveDBOptions() memiavl.Options {
 	opts := rs.opts
@@ -199,6 +197,8 @@ func (rs *Store) liveDBOptions() memiavl.Options {
 	return opts
 }
 
+// loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
+// memiavl.Load's silent fallback to the latest reachable version.
 func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
 	opts.TargetVersion = uint32(version)
 	opts.ReadOnly = true
@@ -436,6 +436,12 @@ func (rs *Store) closeDB() error {
 		return nil
 	}
 
+	// mounted stores read unpinned copies of rs.db, so a store read after this close would hit unmapped memory.
+	for _, store := range rs.stores {
+		if ms, ok := store.(*memiavlstore.Store); ok {
+			ms.SetTree(memiavl.New(0))
+		}
+	}
 	err := rs.db.Close()
 	rs.db = nil
 	return err

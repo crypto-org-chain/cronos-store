@@ -739,12 +739,79 @@ func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
 	}
 }
 
-func TestLiveDBOptionsDropTheNodeCache(t *testing.T) {
+func TestLiveDBLoadsWithoutNodeCache(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	rs.SetMemIAVLOptions(memiavl.Options{CacheSize: 1000})
-	require.Zero(t, rs.liveDBOptions().CacheSize)
+	rs.SetMemIAVLOptions(memiavl.Options{CacheSize: 1000, ZeroCopy: true})
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	defer rs.Close()
+	keys := make([][]byte, 200)
+	for i := range keys {
+		keys[i] = []byte(fmt.Sprintf("k%03d", i))
+		rs.GetKVStore(key).Set(keys[i], []byte("v"))
+	}
+	target := rs.Commit().Version
+	// reload from the snapshot: set fills a cache, so only a fresh tree misses.
+	require.NoError(t, rs.db.RewriteSnapshot())
+	require.NoError(t, rs.db.Reload())
+	rs.GetKVStore(key).Set([]byte("late"), []byte("v"))
+	rs.Commit()
+
+	// a cached tree allocates an entry on every miss; a zero-copy tree without one allocates nothing.
+	requireNoCache := func() {
+		tree := rs.db.TreeByName(testStoreName)
+		i := 0
+		require.Zero(t, testing.AllocsPerRun(100, func() {
+			tree.Get(keys[i%len(keys)])
+			i++
+		}))
+	}
+	requireNoCache()
+	require.NoError(t, rs.RollbackToVersion(target))
+	requireNoCache()
 	// historical loads still size their cache from the config.
 	require.Equal(t, 1000, rs.opts.CacheSize)
+}
+
+func TestMountedStoreReadsEmptyAfterDBCloses(t *testing.T) {
+	testCases := []struct {
+		name  string
+		close func(t *testing.T, rs *Store)
+	}{
+		{name: "Close", close: func(t *testing.T, rs *Store) {
+			t.Helper()
+			require.NoError(t, rs.Close())
+		}},
+		{name: "reload", close: func(t *testing.T, rs *Store) {
+			t.Helper()
+			require.NoError(t, rs.LoadLatestVersion())
+			t.Cleanup(func() { rs.Close() })
+		}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			key := types.NewKVStoreKey(testStoreName)
+			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+			require.NoError(t, rs.LoadLatestVersion())
+			rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+			rs.Commit()
+			// back the mounted store with the mmap'd snapshot.
+			require.NoError(t, rs.db.RewriteSnapshot())
+			require.NoError(t, rs.db.Reload())
+			rs.Commit()
+			// like baseapp's check state, a store held across the close.
+			kv := rs.GetKVStore(key)
+			require.Equal(t, []byte("v"), kv.Get([]byte("k")))
+
+			tc.close(t, rs)
+			// a read of an unmapped page panics here instead of crashing the test binary.
+			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+			require.Nil(t, kv.Get([]byte("k")))
+		})
+	}
 }
 
 func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
