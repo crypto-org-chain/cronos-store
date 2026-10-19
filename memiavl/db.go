@@ -124,8 +124,7 @@ type Options struct {
 	CacheSize int
 	// LoadForOverwriting if true rollbacks the state, specifically the Load method will
 	// truncate the versions after the `TargetVersion`, the `TargetVersion` becomes the latest version.
-	// it does nothing if the target version is `0`, and fails with wal.ErrOutOfRange before touching
-	// the snapshots or the WAL if the target is outside the WAL.
+	// it does nothing if the target version is `0`, and fails with wal.ErrOutOfRange if the target is outside the WAL.
 	LoadForOverwriting bool
 
 	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.
@@ -209,7 +208,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err := removeTmpDirs(dir); err != nil {
 			return nil, fmt.Errorf("fail to cleanup tmp directories: %w", err)
 		}
-		// a crash inside updateCurrentSymlink leaves this behind, and it would fail every later link update.
+		// left by a crash in updateCurrentSymlink, it would fail every later link update.
 		if err := os.Remove(currentTmpPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("fail to cleanup tmp current link: %w", err)
 		}
@@ -250,8 +249,8 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
 	var targetIndex uint64
 	if rollback {
-		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject a target TruncateBack
-		// can't reach (tidwall/wal's ErrOutOfRange rule) before replaying or touching the snapshots.
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly.
+		// fail before replaying or touching snapshots if TruncateBack would reject the target.
 		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
@@ -261,7 +260,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err != nil {
 			return nil, fmt.Errorf("fail to read wal last index: %w", err)
 		}
-		if targetIndex == 0 || lastIndex == 0 || targetIndex < firstIndex || targetIndex > lastIndex {
+		if targetIndex == 0 || targetIndex < firstIndex || targetIndex > lastIndex {
 			return nil, fmt.Errorf("rollback target version %d is outside the wal: %w", opts.TargetVersion, wal.ErrOutOfRange)
 		}
 	}
@@ -279,15 +278,14 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 
 		if snapshot != currentSnapshot {
-			// the link moves first: the older snapshot is valid with both the full and the cut-back WAL.
+			// move the link first: the older snapshot is valid with both the full and the cut-back WAL.
 			opts.Logger.Info("downgrade current link to", "snapshot", snapshot)
 			if err := updateCurrentSymlink(dir, snapshot); err != nil {
 				return nil, fmt.Errorf("fail to update current snapshot link: %w", err)
 			}
 		}
 
-		// delete newer snapshots before cutting back the WAL, so none outlives the heights it
-		// covers and a failed or interrupted rollback can be re-run.
+		// delete newer snapshots before the WAL cut, so none outlives its heights and a failed rollback can be re-run.
 		if err := traverseSnapshots(dir, false, func(version int64) (bool, error) {
 			if version <= int64(opts.TargetVersion) {
 				return true, nil

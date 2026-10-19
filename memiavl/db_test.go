@@ -1922,20 +1922,46 @@ func TestLoadReleasesResourcesOnFailure(t *testing.T) {
 	}
 }
 
-func TestFailedRollbackLeavesLoadableState(t *testing.T) {
+func TestRollback(t *testing.T) {
 	testCases := []struct {
-		name string
-		// root ignores directory permissions, which this case relies on.
+		name         string
 		needsNonRoot bool
 		target       uint32
-		// breaks one rollback step and returns an idempotent repair.
+		// may return an idempotent repair, run after a failed rollback.
 		malleate func(t *testing.T, dir string) (repair func())
 		expErr   string
 		expErrIs error
-		// what the failed rollback must have left on disk, beyond staying loadable.
-		failedState func(t *testing.T, dir string)
-		retryable   bool
+		// what a failed rollback leaves on disk.
+		expCurrent   int64
+		expSnapshots []int64
+		retryable    bool
 	}{
+		{
+			name:   "target is the last wal entry",
+			target: 5,
+		},
+		{
+			name:   "target is a snapshot height",
+			target: 4,
+		},
+		{
+			name:   "target is the first wal entry",
+			target: 3,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				truncateWALFront(t, dir, 3)
+				return nil
+			},
+		},
+		{
+			name:   "a crash left the tmp current link behind",
+			target: 3,
+			malleate: func(t *testing.T, dir string) func() {
+				t.Helper()
+				require.NoError(t, os.Symlink(snapshotName(2), currentTmpPath(dir)))
+				return nil
+			},
+		},
 		{
 			name:   "newer snapshot deletion fails",
 			target: 3,
@@ -1943,8 +1969,10 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Helper()
 				return blockSnapshotRemoval(t, dir, 4)
 			},
-			expErr:    "fail to prune snapshots: version 4",
-			retryable: true,
+			expErr:       "fail to prune snapshots: version 4",
+			expCurrent:   2,
+			expSnapshots: []int64{0, 2, 4},
+			retryable:    true,
 		},
 		{
 			// snapshot 4, the old current, goes first, so the link must already have moved.
@@ -1954,8 +1982,10 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Helper()
 				return blockSnapshotRemoval(t, dir, 2)
 			},
-			expErr:    "fail to prune snapshots: version 2",
-			retryable: true,
+			expErr:       "fail to prune snapshots: version 2",
+			expCurrent:   0,
+			expSnapshots: []int64{0, 2},
+			retryable:    true,
 		},
 		{
 			name:         "wal truncation fails",
@@ -1967,12 +1997,10 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				require.NoError(t, os.Chmod(walPath(dir), 0o500))
 				return func() { require.NoError(t, os.Chmod(walPath(dir), 0o700)) }
 			},
-			expErr: "fail to truncate wal logs",
-			failedState: func(t *testing.T, dir string) {
-				t.Helper()
-				require.NoDirExists(t, filepath.Join(dir, snapshotName(4)), "newer snapshots must go before the wal cut")
-			},
-			retryable: true,
+			expErr:       "fail to truncate wal logs",
+			expCurrent:   2,
+			expSnapshots: []int64{0, 2},
+			retryable:    true,
 		},
 		{
 			// the target needs a replay from snapshot 2, so the check must run before it.
@@ -1980,20 +2008,13 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 			target: 3,
 			malleate: func(t *testing.T, dir string) func() {
 				t.Helper()
-				wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
-				require.NoError(t, err)
-				require.NoError(t, errors.Join(wl.TruncateFront(4), wl.Close()))
-				return func() {}
+				truncateWALFront(t, dir, 4)
+				return nil
 			},
-			expErr:   "outside the wal: out of range",
-			expErrIs: wal.ErrOutOfRange,
-			failedState: func(t *testing.T, dir string) {
-				t.Helper()
-				current, err := os.Readlink(currentPath(dir))
-				require.NoError(t, err)
-				require.Equal(t, snapshotName(4), current, "a cut-back that can't succeed must change nothing")
-				require.DirExists(t, filepath.Join(dir, snapshotName(4)))
-			},
+			expErr:       "outside the wal",
+			expErrIs:     wal.ErrOutOfRange,
+			expCurrent:   4,
+			expSnapshots: []int64{0, 2, 4},
 		},
 		{
 			name:   "target above the wal",
@@ -2002,16 +2023,12 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Helper()
 				// an older current makes a link move observable.
 				require.NoError(t, updateCurrentSymlink(dir, snapshotName(2)))
-				return func() {}
+				return nil
 			},
-			expErr:   "outside the wal: out of range",
-			expErrIs: wal.ErrOutOfRange,
-			failedState: func(t *testing.T, dir string) {
-				t.Helper()
-				current, err := os.Readlink(currentPath(dir))
-				require.NoError(t, err)
-				require.Equal(t, snapshotName(2), current, "a cut-back that can't succeed must change nothing")
-			},
+			expErr:       "outside the wal",
+			expErrIs:     wal.ErrOutOfRange,
+			expCurrent:   2,
+			expSnapshots: []int64{0, 2, 4},
 		},
 	}
 
@@ -2021,96 +2038,49 @@ func TestFailedRollbackLeavesLoadableState(t *testing.T) {
 				t.Skip("root ignores directory permissions")
 			}
 			dir := newRollbackTestDB(t)
-
-			repair := tc.malleate(t, dir)
+			repair := func() {}
+			if tc.malleate != nil {
+				if r := tc.malleate(t, dir); r != nil {
+					repair = r
+				}
+			}
 			t.Cleanup(repair)
-			_, err := Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
-			require.ErrorContains(t, err, tc.expErr)
-			if tc.expErrIs != nil {
-				require.ErrorIs(t, err, tc.expErrIs)
-			}
-			repair()
-			if tc.failedState != nil {
-				tc.failedState(t, dir)
-			}
+			rollback := Options{TargetVersion: tc.target, LoadForOverwriting: true}
 
-			// a normal start after the failed rollback still sees the pre-rollback chain.
-			db, err := Load(dir, Options{}, TestAppChainID)
-			require.NoError(t, err)
-			require.EqualValues(t, 5, db.Version())
-			require.Equal(t, []byte("v"), db.TreeByName(testStoreName).Get([]byte("k5")))
-			require.NoError(t, db.Close())
+			if tc.expErr != "" {
+				_, err := Load(dir, rollback, TestAppChainID)
+				require.ErrorContains(t, err, tc.expErr)
+				if tc.expErrIs != nil {
+					require.ErrorIs(t, err, tc.expErrIs)
+				}
+				repair()
 
-			if !tc.retryable {
-				return
-			}
-			// re-running the rollback completes it.
-			db, err = Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
-			require.NoError(t, err)
-			require.EqualValues(t, tc.target, db.Version())
-			require.Nil(t, db.TreeByName(testStoreName).Get([]byte("k4")))
-			require.NoError(t, db.Close())
-			require.NoDirExists(t, filepath.Join(dir, snapshotName(4)))
-		})
-	}
-}
-
-func TestRollbackSucceeds(t *testing.T) {
-	testCases := []struct {
-		name     string
-		malleate func(t *testing.T, dir string)
-		target   uint32
-	}{
-		{
-			name:     "target is the last wal entry",
-			malleate: func(*testing.T, string) {},
-			target:   5,
-		},
-		{
-			name:     "target is a snapshot height",
-			malleate: func(*testing.T, string) {},
-			target:   4,
-		},
-		{
-			name: "target is the first wal entry",
-			malleate: func(t *testing.T, dir string) {
-				t.Helper()
-				wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+				current, err := os.Readlink(currentPath(dir))
 				require.NoError(t, err)
-				require.NoError(t, errors.Join(wl.TruncateFront(3), wl.Close()))
-			},
-			target: 3,
-		},
-		{
-			name: "a crash left the tmp current link behind",
-			malleate: func(t *testing.T, dir string) {
-				t.Helper()
-				require.NoError(t, os.Symlink(snapshotName(2), currentTmpPath(dir)))
-			},
-			target: 3,
-		},
-	}
+				require.Equal(t, snapshotName(tc.expCurrent), current)
+				var snapshots []int64
+				require.NoError(t, traverseSnapshots(dir, true, func(v int64) (bool, error) {
+					snapshots = append(snapshots, v)
+					return false, nil
+				}))
+				require.Equal(t, tc.expSnapshots, snapshots)
+				requireChainEndsAt(t, dir, 5)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := newRollbackTestDB(t)
-			tc.malleate(t, dir)
+				if !tc.retryable {
+					return
+				}
+			}
 
-			db, err := Load(dir, Options{TargetVersion: tc.target, LoadForOverwriting: true}, TestAppChainID)
+			db, err := Load(dir, rollback, TestAppChainID)
 			require.NoError(t, err)
 			require.EqualValues(t, tc.target, db.Version())
 			require.NoError(t, db.Close())
-			_, err = os.Lstat(currentTmpPath(dir))
-			require.ErrorIs(t, err, os.ErrNotExist)
-
-			// a normal start sees the cut-back chain.
-			db, err = Load(dir, Options{}, TestAppChainID)
-			require.NoError(t, err)
-			require.EqualValues(t, tc.target, db.Version())
-			require.NoError(t, db.Close())
+			requireChainEndsAt(t, dir, int64(tc.target))
 			for v := int64(tc.target) + 1; v <= 5; v++ {
 				require.NoDirExists(t, filepath.Join(dir, snapshotName(v)))
 			}
+			_, err = os.Lstat(currentTmpPath(dir))
+			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
 }
@@ -2133,8 +2103,24 @@ func newRollbackTestDB(t *testing.T) string {
 	return dir
 }
 
-// makes deleting a snapshot fail and returns an idempotent repair: a file where the
-// rename target belongs survives removeTmpDirs, and renaming a dir onto a file fails.
+func requireChainEndsAt(t *testing.T, dir string, version int64) {
+	t.Helper()
+	db, err := Load(dir, Options{}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	require.Equal(t, version, db.Version())
+	require.NotNil(t, db.TreeByName(testStoreName).Get([]byte(fmt.Sprintf("k%d", version))))
+	require.Nil(t, db.TreeByName(testStoreName).Get([]byte(fmt.Sprintf("k%d", version+1))))
+}
+
+func truncateWALFront(t *testing.T, dir string, index uint64) {
+	t.Helper()
+	wl, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	require.NoError(t, err)
+	require.NoError(t, errors.Join(wl.TruncateFront(index), wl.Close()))
+}
+
+// a file at the rename target makes the snapshot deletion fail; returns an idempotent repair.
 func blockSnapshotRemoval(t *testing.T, dir string, version int64) func() {
 	t.Helper()
 	blocker := filepath.Join(dir, snapshotName(version)+TmpSuffix)
