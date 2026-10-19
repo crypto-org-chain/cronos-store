@@ -98,6 +98,8 @@ $ # restore application.db
 $ cronosd changeset restore-app-db snapshot application.db
 ```
 
+Without `--target-version`, `verify --save-snapshot` keeps every store's tree in memory until all stores are replayed, since the snapshot's version is known only then. Pass `--target-version` to write each store's snapshot as soon as it's replayed, which keeps peak memory to about `--concurrency` trees.
+
 Then replace the whole `application.db` in the node with the newly generated one.
 
 It only takes a few minutes to run on our testnet archive node, it only suppot generating rocksdb `application.db` right now, so please set `app-db-backend="rocksdb"` in `app.toml`.

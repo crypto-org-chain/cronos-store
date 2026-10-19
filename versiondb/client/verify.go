@@ -102,7 +102,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			})
 
 			// a multitree snapshot needs every tree at one version, known once every store is replayed.
-			latestVersion := targetVersion
+			var latestVersion int64
 			for _, entry := range verified {
 				latestVersion = max(latestVersion, entry.version)
 			}
@@ -227,7 +227,7 @@ func replayStore(ctx context.Context, mtree *memiavl.MultiTree, store, changeSet
 		return verifiedStore{}, nil
 	}
 	if targetVersion > 0 {
-		// a loaded store without change sets reaches the target like the others.
+		// like the live path, every store reaches the target, including a loaded one without change sets.
 		if err := advanceTreeVersion(tree, targetVersion); err != nil {
 			return verifiedStore{}, err
 		}
@@ -315,13 +315,6 @@ func verifyOneStore(ctx context.Context, tree *memiavl.Tree, store, changeSetDir
 
 	if err != nil {
 		return false, err
-	}
-
-	// no more changesets for this store; catch up to targetVersion like the live path would.
-	if targetVersion > 0 {
-		if err := advanceTreeVersion(tree, targetVersion); err != nil {
-			return false, err
-		}
 	}
 
 	return true, nil

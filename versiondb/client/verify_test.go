@@ -77,13 +77,6 @@ func TestVerifyOneStore(t *testing.T) {
 			expVersion:    3,
 		},
 		{
-			name:          "catches up to target version",
-			ctx:           context.Background(),
-			versions:      []int64{1},
-			targetVersion: 5,
-			expVersion:    5,
-		},
-		{
 			name:       "stops replaying once canceled",
 			ctx:        canceled,
 			versions:   []int64{1, 2},
@@ -189,11 +182,13 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 		name          string
 		saveSnapshot  bool
 		targetVersion int64
+		expVersion    int64
 		expKept       bool
 	}{
-		{name: "no snapshot to write"},
-		{name: "snapshot written by the worker", saveSnapshot: true, targetVersion: 3},
-		{name: "snapshot version not known yet", saveSnapshot: true, expKept: true},
+		{name: "no snapshot to write", expVersion: 3},
+		{name: "catches up to target version", targetVersion: 5, expVersion: 5},
+		{name: "snapshot written by the worker", saveSnapshot: true, targetVersion: 3, expVersion: 3},
+		{name: "snapshot version not known yet", saveSnapshot: true, expVersion: 3, expKept: true},
 	}
 
 	for _, tc := range testCases {
@@ -210,7 +205,7 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 
 			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, tc.targetVersion, snapshotDir)
 			require.NoError(t, err)
-			require.EqualValues(t, 3, entry.version)
+			require.Equal(t, tc.expVersion, entry.version)
 			tree := mtree.TreeByName(fooStore)
 			if tc.expKept {
 				require.Same(t, tree, entry.tree)
@@ -224,7 +219,7 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 				written, err := memiavl.OpenSnapshot(filepath.Join(snapshotDir, fooStore))
 				require.NoError(t, err)
 				defer written.Close()
-				require.EqualValues(t, 3, written.Version())
+				require.EqualValues(t, tc.expVersion, written.Version())
 			}
 		})
 	}
