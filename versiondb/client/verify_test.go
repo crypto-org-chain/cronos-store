@@ -135,6 +135,9 @@ func TestVerifySaveSnapshotIsLoadableWithoutTargetVersion(t *testing.T) {
 		require.NotNil(t, tree)
 		require.Equal(t, int64(3), tree.Version())
 	}
+	for _, si := range mtree.LastCommitInfo().StoreInfos {
+		require.EqualValues(t, 3, si.CommitId.Version, si.Name)
+	}
 }
 
 func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
@@ -153,12 +156,13 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 		return bz
 	}
 
-	// only the save path keeps and bumps the trees; both must report every store at version 3.
+	// only the save path keeps and bumps the trees; both report each store at its own version.
 	plain := verify()
 	require.Equal(t, plain, verify("--"+flagSaveSnapshot, filepath.Join(t.TempDir(), "snapshot")))
 
 	var info struct {
 		StoreInfos []struct {
+			Name     string `json:"name"`
 			CommitID struct {
 				Version string `json:"version"`
 			} `json:"commitId"`
@@ -166,10 +170,11 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 	}
 	_, body, _ := bytes.Cut(plain, []byte("\n"))
 	require.NoError(t, json.Unmarshal(body, &info))
-	require.Len(t, info.StoreInfos, 2)
+	versions := make(map[string]string, len(info.StoreInfos))
 	for _, si := range info.StoreInfos {
-		require.Equal(t, "3", si.CommitID.Version)
+		versions[si.Name] = si.CommitID.Version
 	}
+	require.Equal(t, map[string]string{fooStore: "3", barStore: "1"}, versions)
 }
 
 func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
@@ -254,9 +259,9 @@ func TestNormalizeStores(t *testing.T) {
 		},
 		{
 			// what a double space in --stores splits into
-			name:   "rejects an empty name",
-			stores: []string{fooStore, "", barStore},
-			expErr: `invalid store name ""`,
+			name:      "skips empty names",
+			stores:    []string{fooStore, "", barStore, ""},
+			expStores: []string{fooStore, barStore},
 		},
 		{
 			name:   "rejects the current directory",

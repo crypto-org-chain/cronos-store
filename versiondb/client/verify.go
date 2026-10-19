@@ -101,7 +101,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				return entry.name == ""
 			})
 
-			// a multitree snapshot needs every tree at one version, known only after Wait.
+			// a multitree snapshot needs every tree at one version, known once every store is replayed.
 			latestVersion := targetVersion
 			for _, entry := range verified {
 				latestVersion = max(latestVersion, entry.version)
@@ -116,7 +116,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				}
 				storeInfos = append(storeInfos, storetypes.StoreInfo{
 					Name:     entry.name,
-					CommitId: storetypes.CommitID{Version: latestVersion, Hash: entry.hash},
+					CommitId: storetypes.CommitID{Version: entry.version, Hash: entry.hash},
 				})
 			}
 
@@ -134,8 +134,13 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 					return err
 				}
 
+				// the output keeps each store's own version; the saved trees were all advanced to latestVersion.
+				snapshotInfo := convertCommitInfo(&commitInfo)
+				for i := range snapshotInfo.StoreInfos {
+					snapshotInfo.StoreInfos[i].CommitId.Version = latestVersion
+				}
 				// keeps the loaded InitialVersion, which memiavl uses to map versions to WAL indexes.
-				if err := mtree.WriteMetadata(saveSnapshot, convertCommitInfo(&commitInfo)); err != nil {
+				if err := mtree.WriteMetadata(saveSnapshot, snapshotInfo); err != nil {
 					return err
 				}
 			}
@@ -312,6 +317,10 @@ func normalizeStores(stores []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(stores))
 	normalized := make([]string, 0, len(stores))
 	for _, store := range stores {
+		// a double space in --stores splits into an empty name.
+		if store == "" {
+			continue
+		}
 		name := filepath.Clean(store)
 		if name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
 			return nil, fmt.Errorf("invalid store name %q: must be a single directory name", store)
