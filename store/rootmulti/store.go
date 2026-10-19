@@ -214,12 +214,14 @@ type querySnapshot struct {
 	// a copy of rs.db, so it stays open after rs.db closes, until refs reaches zero.
 	db             *memiavl.DB
 	lastCommitInfo *types.CommitInfo
+	// rs.stores when published; a reload replaces that field but never mutates the map.
+	stores map[types.StoreKey]types.CommitStore
 	// one for the publish slot plus one per reader; db is closed at zero.
 	refs atomic.Int64
 }
 
-func newQuerySnapshot(db *memiavl.DB, lastCommitInfo *types.CommitInfo) *querySnapshot {
-	snap := &querySnapshot{db: db, lastCommitInfo: lastCommitInfo}
+func newQuerySnapshot(db *memiavl.DB, lastCommitInfo *types.CommitInfo, stores map[types.StoreKey]types.CommitStore) *querySnapshot {
+	snap := &querySnapshot{db: db, lastCommitInfo: lastCommitInfo, stores: stores}
 	snap.refs.Store(1)
 	return snap
 }
@@ -279,10 +281,10 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
-	// zero-copy follows rs.db: results stay mapped until the DB drops their generation, one reload after retiring it.
+	// zero-copy follows rs.db: results stay mapped until the DB drops their generation, one reload after retiring it or on close.
 	db := rs.db.CopyWithCacheSize(0)
 	info := rs.commitInfoFromDB(db)
-	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
+	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
 	return info
 }
 
@@ -491,12 +493,12 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
-func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) types.CacheMultiStore {
+func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, mounted map[types.StoreKey]types.CommitStore, release func() error) types.CacheMultiStore {
 	closer := newQueryCloser(release, rs.logger)
 	stores := make(map[types.StoreKey]types.CacheWrapper)
 
 	// add the transient/mem stores registered in current app.
-	for k, store := range rs.stores {
+	for k, store := range mounted {
 		if store.GetStoreType() != types.StoreTypeIAVL {
 			stores[k] = store
 		}
@@ -520,13 +522,13 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, release func() error) typ
 //
 // version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	snap, err := rs.acquireForVersion(version)
+	snap, mounted, err := rs.acquireForVersion(version)
 	if err != nil {
 		return nil, err
 	}
 	if snap != nil {
 		// the caller's Close releases the snapshot, so it outlives later reloads.
-		return rs.cacheMultiStoreFromDB(snap.db, snap.release), nil
+		return rs.cacheMultiStoreFromDB(snap.db, mounted, snap.release), nil
 	}
 	// historicalDBCache isn't used here: the returned store's lifetime is owned
 	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
@@ -536,25 +538,27 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		return nil, err
 	}
 
-	return rs.cacheMultiStoreFromDB(db, db.Close), nil
+	return rs.cacheMultiStoreFromDB(db, mounted, db.Close), nil
 }
 
 // acquireForVersion returns the published snapshot, with a reference to release, when
-// version is 0 or its height, and (nil, nil) for any other height, which callers load from disk.
-func (rs *Store) acquireForVersion(version int64) (*querySnapshot, error) {
-	snap := rs.acquireQuerySnapshot()
+// version is 0 or its height, and a nil snapshot for any other height, which callers load
+// from disk. mounted is the snapshot's stores either way.
+func (rs *Store) acquireForVersion(version int64) (snap *querySnapshot, mounted map[types.StoreKey]types.CommitStore, err error) {
+	snap = rs.acquireQuerySnapshot()
 	if snap == nil {
-		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
+		return nil, nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
 	if version == 0 || version == snap.lastCommitInfo.Version {
-		return snap, nil
+		return snap, snap.stores, nil
 	}
+	mounted = snap.stores
 	// a historical load can queue; don't keep the latest generation mapped meanwhile.
 	rs.releaseQuerySnapshot(snap)
 	if version < 0 || version > math.MaxUint32 {
-		return nil, fmt.Errorf("version out of range: %d", version)
+		return nil, nil, fmt.Errorf("version out of range: %d", version)
 	}
-	return nil, nil
+	return nil, mounted, nil
 }
 
 // GetStore Implements interface MultiStore
@@ -937,7 +941,7 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	version := req.Height
 
-	snap, err := rs.acquireForVersion(version)
+	snap, _, err := rs.acquireForVersion(version)
 	if err != nil {
 		return nil, err
 	}

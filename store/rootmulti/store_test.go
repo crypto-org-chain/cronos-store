@@ -1173,7 +1173,7 @@ func TestAcquireQuerySnapshotSkipsReleasedSnapshot(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	live := newQuerySnapshot(nil, &types.CommitInfo{})
+	live := newQuerySnapshot(nil, &types.CommitInfo{}, nil)
 	rs.querySnapshot.Store(live)
 	require.Same(t, live, <-acquired)
 	require.EqualValues(t, 2, live.refs.Load())
@@ -1246,13 +1246,18 @@ func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 }
 
 // closeDB runs on the state-sync goroutine while ABCI queries keep arriving.
-func TestReadPathsRaceAgainstClose(t *testing.T) {
+func TestReadPathsRaceAgainstCloseAndReload(t *testing.T) {
 	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
 	key := types.NewKVStoreKey(testStoreName)
 	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	tkey := types.NewTransientStoreKey("transient")
+	rs.MountStoreWithDB(tkey, types.StoreTypeTransient, nil)
 	require.NoError(t, rs.LoadLatestVersion())
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	historical := rs.Commit().Version
+	rs.GetKVStore(key).Set([]byte("k"), []byte("w"))
 	rs.Commit()
+	require.NoError(t, rs.db.WaitAsyncCommit())
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1263,6 +1268,11 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		func() { _, _ = rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")}) },
 		func() {
 			if cms, err := rs.CacheMultiStoreWithVersion(0); err == nil {
+				_ = cms.(io.Closer).Close()
+			}
+		},
+		func() {
+			if cms, err := rs.CacheMultiStoreWithVersion(historical); err == nil {
 				_ = cms.(io.Closer).Close()
 			}
 		},
@@ -1282,6 +1292,16 @@ func TestReadPathsRaceAgainstClose(t *testing.T) {
 		}(read)
 	}
 
+	for i := 0; i < 10; i++ {
+		require.NoError(t, rs.LoadLatestVersion())
+	}
+	// query stores carry the reloaded transient store.
+	for _, version := range []int64{0, historical} {
+		cms, err := rs.CacheMultiStoreWithVersion(version)
+		require.NoError(t, err)
+		require.NotPanics(t, func() { cms.GetKVStore(tkey) })
+		require.NoError(t, cms.(io.Closer).Close())
+	}
 	require.NoError(t, rs.closeDBForReload())
 	close(done)
 	wg.Wait()
