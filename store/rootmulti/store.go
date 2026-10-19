@@ -279,9 +279,8 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
+	// zero-copy follows rs.db: results stay mapped until the DB drops their generation, one reload after retiring it.
 	db := rs.db.CopyWithCacheSize(0)
-	// the last release can unmap this snapshot while a caller still holds a ResponseQuery referencing it.
-	db.SetZeroCopy(false)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info))
 	return info
