@@ -249,7 +249,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
 	var targetIndex uint64
 	if rollback {
-		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject what TruncateBack would before touching the link or snapshots.
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly.
 		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
@@ -277,7 +277,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 
 		if snapshot != currentSnapshot {
-			// move the link first: the older snapshot is valid with both the full and the cut-back WAL.
+			// move the link first: current may point at a snapshot deleted below.
 			opts.Logger.Info("downgrade current link to", "snapshot", snapshot)
 			if err := updateCurrentSymlink(dir, snapshot); err != nil {
 				return nil, fmt.Errorf("fail to update current snapshot link: %w", err)

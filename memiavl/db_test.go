@@ -1999,7 +1999,6 @@ func TestRollback(t *testing.T) {
 			retryable:    true,
 		},
 		{
-			// the target needs a replay from snapshot 2, so the check must run before it.
 			name:   "target below the wal",
 			target: 3,
 			malleate: func(t *testing.T, dir string) func() {
