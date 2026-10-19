@@ -249,8 +249,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
 	var targetIndex uint64
 	if rollback {
-		// writer is set: Validate rejects LoadForOverwriting with ReadOnly.
-		// fail before replaying or touching snapshots if TruncateBack would reject the target.
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly. Reject what TruncateBack would, before any disk change.
 		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
 		firstIndex, err := writer.FirstIndex()
 		if err != nil {
@@ -285,7 +284,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 			}
 		}
 
-		// delete newer snapshots before the WAL cut, so none outlives its heights and a failed rollback can be re-run.
+		// delete newer snapshots before the WAL cut, so no snapshot is ever newer than the WAL.
 		if err := traverseSnapshots(dir, false, func(version int64) (bool, error) {
 			if version <= int64(opts.TargetVersion) {
 				return true, nil
