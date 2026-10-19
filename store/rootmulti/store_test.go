@@ -1478,6 +1478,8 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 					_ = it.Close()
 				}),
 				checkTx(func() { store.GetKVStore(key).Get([]byte("k")) }),
+				// hashes the mounted tree, which races WorkingHash if its copy is taken before hashing.
+				checkTx(func() { store.GetCommitStore(key).LastCommitID() }),
 				func() {
 					cms, err := store.CacheMultiStoreWithVersion(0)
 					if err != nil {
