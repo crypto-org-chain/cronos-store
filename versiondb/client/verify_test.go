@@ -77,6 +77,14 @@ func TestVerifyOneStore(t *testing.T) {
 			expVersion:    3,
 		},
 		{
+			// the rest of the target is caught up by replayStore, not by a later change set.
+			name:          "stops before a change set past the target",
+			ctx:           context.Background(),
+			versions:      []int64{1, 6, 9},
+			targetVersion: 5,
+			expVersion:    1,
+		},
+		{
 			name:       "stops replaying once canceled",
 			ctx:        canceled,
 			versions:   []int64{1, 2},
@@ -269,7 +277,8 @@ func TestVerifyLoadedSnapshotAgainstTargetVersion(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			changeSetDir := t.TempDir()
-			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{101})
+			// one file spanning the target, as changeset dump writes them.
+			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{100, 101})
 
 			cmd := VerifyChangeSetCmd(nil)
 			cmd.SetArgs([]string{
@@ -342,6 +351,11 @@ func TestNormalizeStores(t *testing.T) {
 			name:      "skips empty names",
 			stores:    []string{fooStore, "", barStore, ""},
 			expStores: []string{fooStore, barStore},
+		},
+		{
+			name:   "rejects a blank list",
+			stores: []string{"", ""},
+			expErr: "no store to verify",
 		},
 		{
 			name:   "rejects the current directory",
@@ -439,7 +453,6 @@ func TestVerifyKeepsLoadedStoresWithoutChangeSets(t *testing.T) {
 				return bz
 			}
 			withSnapshot := verify("--"+flagSaveSnapshot, outDir)
-			// without a snapshot to write, each worker closes its tree, including the unchanged loaded "bar".
 			require.Equal(t, withSnapshot, verify())
 			require.Equal(t, expVersions, printedVersions(t, withSnapshot))
 

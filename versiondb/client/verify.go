@@ -87,14 +87,16 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				return fmt.Errorf("loaded snapshot version %d is newer than target version %d", mtree.Version(), targetVersion)
 			}
 
-			// create fixed size task pool with big enough buffer.
+			// create fixed size task pool.
 			pool := pond.New(concurrency, 0)
 			defer pool.StopAndWait()
 
 			verified := make([]*storetypes.StoreInfo, len(stores))
 			err = memiavl.RunWorkerGroup(cmd.Context(), pool, stores, func(ctx context.Context, i int) (err error) {
-				verified[i], err = replayStore(ctx, mtree, stores[i], changeSetDir, targetVersion, saveSnapshot)
-				return err
+				if verified[i], err = replayStore(ctx, mtree, stores[i], changeSetDir, targetVersion, saveSnapshot); err != nil {
+					return fmt.Errorf("store %s: %w", stores[i], err)
+				}
+				return nil
 			})
 			if err != nil {
 				return err
@@ -249,6 +251,9 @@ func verifyOneStore(ctx context.Context, tree *memiavl.Tree, store, changeSetDir
 					// skip old change sets
 					return true, nil
 				}
+				if targetVersion > 0 && version > targetVersion {
+					return false, nil
+				}
 
 				// changesets only cover versions this store touched; bump through the gap so it
 				// stays in lockstep with the live path, which advances every store every block.
@@ -308,6 +313,9 @@ func normalizeStores(stores []string) ([]string, error) {
 		}
 		seen[name] = struct{}{}
 		normalized = append(normalized, name)
+	}
+	if len(normalized) == 0 {
+		return nil, errors.New("no store to verify")
 	}
 	return normalized, nil
 }
