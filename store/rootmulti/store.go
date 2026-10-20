@@ -114,9 +114,10 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		return nil, fmt.Errorf("historicalDBCache: cache is closed")
 	}
 
-	// directory replaced mid-load: this DB may map unlinked files, don't cache it.
+	// directory replaced mid-load: this DB may map unlinked files, so it serves only this caller.
 	if c.generation != generation {
-		return nil, fmt.Errorf("historicalDBCache: store reloaded while loading version %d", version)
+		dbInserted = true
+		return &historicalDBEntry{version: version, db: db, refs: 1, evicted: true}, nil
 	}
 
 	// another goroutine may have loaded the same version while we were doing I/O.
@@ -393,14 +394,24 @@ func (rs *Store) Commit() types.CommitID {
 	}
 
 	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
+	rs.repointStores()
 
 	return rs.publishQuerySnapshot().CommitID()
+}
+
+// repointStores points the mounted stores at rs.db's trees. A store an upgrade
+// added after a rollback target has no tree there, so it gets an empty one.
+func (rs *Store) repointStores() {
+	for key, store := range rs.stores {
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			continue
+		}
+		tree := rs.db.TreeByName(key.Name())
+		if tree == nil {
+			tree = memiavl.New(0)
+		}
+		store.(*memiavlstore.Store).SetTree(tree)
+	}
 }
 
 func (rs *Store) Close() error {
@@ -674,6 +685,9 @@ func (rs *Store) LoadLatestVersionAndUpgrade(upgrades *types.StoreUpgrades) erro
 
 // LoadVersionAndUpgrade Implements interface CommitMultiStore
 // used by node startup with UpgradeStoreLoader
+//
+// A loaded store is closed first, since memiavl.Load needs the directory lock it
+// holds; after an error the Store is left unloaded and must be loaded again.
 func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgrades) error {
 	if version > math.MaxUint32 {
 		return fmt.Errorf("version overflows uint32: %d", version)
@@ -870,7 +884,8 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("rollback height target %d exceeds max uint32", target)
 	}
 
-	if err := rs.closeDBForReload(); err != nil {
+	// the mounted stores stay; only the db and the history it held are replaced.
+	if err := stderrors.Join(rs.closeDB(), rs.historicalDBCache.invalidate()); err != nil {
 		return fmt.Errorf("failed to close db: %w", err)
 	}
 
@@ -883,6 +898,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	if err != nil {
 		return err
 	}
+	rs.repointStores()
 	rs.publishQuerySnapshot()
 
 	return nil

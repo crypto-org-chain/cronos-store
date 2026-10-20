@@ -460,7 +460,7 @@ func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	require.Nil(t, rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
+func TestHistoricalDBCacheServesButDoesNotCacheLoadRacingInvalidate(t *testing.T) {
 	store, versions := newTestStore(t, 2)
 	defer store.Close()
 
@@ -470,19 +470,19 @@ func TestHistoricalDBCacheDiscardsLoadRacingInvalidate(t *testing.T) {
 		return loadAtVersion(store.dir, store.opts, store.chainId, targetVersion)
 	}
 
-	var loaded *memiavl.DB
-	_, err := cache.borrow(targetVersion, func() (*memiavl.DB, error) {
+	racing, err := cache.borrow(targetVersion, func() (*memiavl.DB, error) {
 		db, err := loadFn()
-		loaded = db
 		// a reload lands between the load and caching its result.
 		require.NoError(t, cache.invalidate())
 		return db, err
 	})
-	require.ErrorContains(t, err, "reloaded while loading")
-	require.Empty(t, loaded.Trees(), "the discarded DB must be closed")
+	require.NoError(t, err)
+	require.EqualValues(t, targetVersion, racing.db.Version())
 	cache.mu.Lock()
 	require.Empty(t, cache.entries)
 	cache.mu.Unlock()
+	cache.release(racing)
+	require.Empty(t, racing.db.Trees(), "the uncached DB must be closed on release")
 
 	entry, err := cache.borrow(targetVersion, loadFn)
 	require.NoError(t, err)
@@ -1402,6 +1402,29 @@ func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
 	require.Equal(t, []byte("v1"), res.Value)
 }
 
+func TestRollbackToVersionKeepsMountedStores(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	key := types.NewKVStoreKey(testStoreName)
+	tkey := types.NewTransientStoreKey("transient")
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	rs.MountStoreWithDB(tkey, types.StoreTypeTransient, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	t.Cleanup(func() { require.NoError(t, rs.Close()) })
+	for _, v := range []string{"v1", "v2"} {
+		rs.GetKVStore(key).Set([]byte("k"), []byte(v))
+		rs.Commit()
+	}
+
+	require.NoError(t, rs.RollbackToVersion(1))
+	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
+	require.Equal(t, []byte("v1"), rs.CacheMultiStore().GetKVStore(key).Get([]byte("k")))
+	cms, err := rs.CacheMultiStoreWithVersion(0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), cms.GetKVStore(key).Get([]byte("k")))
+	require.NotPanics(t, func() { cms.GetKVStore(tkey) })
+	require.NoError(t, cms.(io.Closer).Close())
+}
+
 func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
 	for _, tc := range storeUpgradeCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1430,6 +1453,10 @@ func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
 			require.NoError(t, rs.LoadLatestVersion())
 			require.NoError(t, rs.RollbackToVersion(1))
 			require.Equal(t, int64(1), rs.LastCommitID().Version)
+			// a store the upgrade added has no tree at the target, so it reads empty.
+			for _, name := range tc.mountedStores {
+				require.NotPanics(t, func() { rs.GetKVStore(rs.keysByName[name]).Get([]byte("k")) })
+			}
 			require.NoError(t, rs.Close())
 
 			// the next start runs the upgrade again.
