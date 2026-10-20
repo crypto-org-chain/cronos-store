@@ -182,7 +182,7 @@ func (s *CompactSuite) TestCompactVersionDB() {
 				return
 			}
 
-			// LZ4 and uncompressed files become ZSTD with a dictionary; a rewrite with unchanged compression stays close to 1
+			// LZ4 becomes ZSTD; a rewrite with unchanged compression stays close to 1
 			s.Require().Less(float64(after)/float64(before), 0.8)
 			filesAfter := s.liveSSTFiles(dir)
 			for name := range filesBefore {

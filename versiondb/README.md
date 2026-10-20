@@ -87,7 +87,9 @@ User can control the peak ram usage by controlling the `--concurrency` and `--so
 
 With default parameters it can finish in around 12minutes for testnet archive node on our test node (8cores, peak RSS 2G).
 
-Ingested sst files are LZ4 compressed. `restore-versiondb` leaves ZSTD files without a dictionary, or uncompressed ones in v1.9.0 and earlier. With the node stopped, recompress them with ZSTD and a dictionary:
+#### Compact VersionDB
+
+Ingested sst files are LZ4 compressed. Files from `restore-versiondb` are ZSTD without a dictionary (uncompressed in v1.9.0 and earlier). With the node stopped, recompress them with ZSTD and a dictionary:
 
 ```bash
 $ cronosd changeset compact-versiondb /home/.cronosd/data/versiondb --rate-limit 100
