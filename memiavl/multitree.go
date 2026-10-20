@@ -555,6 +555,8 @@ func walVersion(index uint64, initialVersion uint32) int64 {
 	return int64(index)
 }
 
+var errMissingCommitInfo = errors.New("missing commit info")
+
 func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	// load commit info
 	path := filepath.Join(dir, MetadataFileName)

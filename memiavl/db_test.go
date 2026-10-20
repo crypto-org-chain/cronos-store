@@ -669,22 +669,73 @@ func TestInitialVersion(t *testing.T) {
 }
 
 func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
+	baseOpts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
+	// fakeSnapshot adds a snapshot dir at version, with a torn metadata file.
+	fakeSnapshot := func(t *testing.T, dir string, version int64) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, snapshotName(version)), os.ModePerm))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(version), MetadataFileName), nil, 0o600))
+	}
+
 	testCases := []struct {
-		name string
-		// commit writes a WAL entry, so the DB is no longer an uncommitted genesis.
+		name     string
+		dbOpts   func(Options) Options
 		commit   bool
-		readOnly bool
-		expErr   string
+		prepare  func(t *testing.T, dir string)
+		loadOpts func(Options) Options
+		// the torn snapshot-0 must stay as it is, and Load fail.
+		refused bool
 	}{
 		{name: "uncommitted genesis is recreated"},
-		{name: "a committed db still fails", commit: true, expErr: "missing commit info"},
-		{name: "a read-only load still fails", readOnly: true, expErr: "missing commit info"},
+		{
+			name: "uncommitted genesis without a WAL is recreated",
+			prepare: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(walPath(dir)))
+			},
+		},
+		{name: "a committed db fails", commit: true, refused: true},
+		{
+			name:   "a db committed synchronously fails",
+			dbOpts: func(o Options) Options { o.AsyncCommitBuffer = -1; return o },
+			commit: true, refused: true,
+		},
+		{
+			name: "a db with another snapshot fails",
+			prepare: func(t *testing.T, dir string) {
+				t.Helper()
+				fakeSnapshot(t, dir, 5)
+			},
+			refused: true,
+		},
+		{
+			name: "a db whose current is another snapshot fails",
+			prepare: func(t *testing.T, dir string) {
+				t.Helper()
+				fakeSnapshot(t, dir, 5)
+				require.NoError(t, updateCurrentSymlink(dir, snapshotName(5)))
+			},
+			refused: true,
+		},
+		{
+			name:     "a load for a target version fails",
+			loadOpts: func(o Options) Options { o.TargetVersion = 1; return o },
+			refused:  true,
+		},
+		{
+			name:     "a load that may not create the db fails",
+			loadOpts: func(o Options) Options { o.CreateIfMissing = false; return o },
+			refused:  true,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			opts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
+			opts := baseOpts
+			if tc.dbOpts != nil {
+				opts = tc.dbOpts(opts)
+			}
 			db, err := Load(dir, opts, TestAppChainID)
 			require.NoError(t, err)
 			// SetInitialVersion rewrites snapshot-0/__metadata in place.
@@ -697,19 +748,25 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			require.NoError(t, db.Close())
 
 			// a crash mid-rewrite can leave the file empty, which unmarshals cleanly with no commit info.
-			require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
+			genesisMetadata := filepath.Join(dir, snapshotName(0), MetadataFileName)
+			require.NoError(t, os.WriteFile(genesisMetadata, nil, 0o600))
+			if tc.prepare != nil {
+				tc.prepare(t, dir)
+			}
 
-			loadOpts := opts
-			if tc.readOnly {
-				loadOpts = Options{ReadOnly: true}
+			loadOpts := baseOpts
+			if tc.loadOpts != nil {
+				loadOpts = tc.loadOpts(loadOpts)
 			}
 			db, err = Load(dir, loadOpts, TestAppChainID)
-			if tc.expErr != "" {
-				require.ErrorContains(t, err, tc.expErr)
+			if tc.refused {
+				require.ErrorIs(t, err, errMissingCommitInfo)
+				bz, err := os.ReadFile(genesisMetadata)
+				require.NoError(t, err)
+				require.Empty(t, bz, "a refused recovery must not rewrite snapshot-0")
 				return
 			}
 			require.NoError(t, err)
-			defer func() { require.NoError(t, db.Close()) }()
 			require.Zero(t, db.Version())
 			// InitChain sets the initial version again on restart.
 			require.NoError(t, db.SetInitialVersion(100))
@@ -717,6 +774,12 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			v, err := db.Commit()
 			require.NoError(t, err)
 			require.EqualValues(t, 100, v)
+			require.NoError(t, db.Close())
+
+			db, err = Load(dir, baseOpts, TestAppChainID)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+			require.EqualValues(t, 100, db.Version())
 		})
 	}
 }

@@ -108,7 +108,7 @@ type DB struct {
 	snapshotWriterLimit int
 
 	// earliest retained snapshot version, filled lazily and refreshed by
-	// pruneSnapshots; zero means not cached.
+	// pruneSnapshots; zero means not cached, earliestIsGenesis means snapshot-0.
 	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
@@ -234,8 +234,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 
 	path := filepath.Join(dir, snapshot)
 	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
-	if errors.Is(err, errMissingCommitInfo) && opts.CreateIfMissing && !opts.ReadOnly && opts.TargetVersion == 0 {
-		mtree, err = recoverTornGenesis(dir, path, opts, chainId, err)
+	// CreateIfMissing rules out ReadOnly, so the lock is held here.
+	if errors.Is(err, errMissingCommitInfo) && opts.CreateIfMissing && opts.TargetVersion == 0 {
+		mtree, err = recoverTornGenesis(dir, opts, chainId, err)
 	}
 	if err != nil {
 		return nil, err
@@ -1469,13 +1470,10 @@ func atomicRemoveDir(path string) error {
 	return os.RemoveAll(tmpPath)
 }
 
-// createDBIfNotExist detects if db does not exist and try to initialize an empty one.
-var errMissingCommitInfo = errors.New("missing commit info")
-
-// recoverTornGenesis recreates snapshot-0 when a crash tore it before any commit:
+// recoverTornGenesis rewrites snapshot-0 when a crash tore it before any commit:
 // SetInitialVersion rewrites it in place, and InitChain sets the version again on
 // restart. Any other DB keeps loadErr, since its state can't be rebuilt.
-func recoverTornGenesis(dir, path string, opts Options, chainId string, loadErr error) (*MultiTree, error) {
+func recoverTornGenesis(dir string, opts Options, chainId string, loadErr error) (*MultiTree, error) {
 	genesis, err := isUncommittedGenesis(dir)
 	if err != nil {
 		return nil, errors.Join(loadErr, err)
@@ -1483,14 +1481,11 @@ func recoverTornGenesis(dir, path string, opts Options, chainId string, loadErr 
 	if !genesis {
 		return nil, loadErr
 	}
-	// a crash after this removal leaves no current metadata, which Load recreates too.
-	if err := os.RemoveAll(filepath.Join(dir, snapshotName(0))); err != nil {
-		return nil, errors.Join(loadErr, err)
-	}
+	opts.Logger.Info("recreating snapshot-0, torn before any commit", "dir", dir)
 	if err := initEmptyDB(dir, opts.InitialVersion, chainId); err != nil {
 		return nil, errors.Join(loadErr, err)
 	}
-	return LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	return LoadMultiTree(currentPath(dir), opts.ZeroCopy, opts.CacheSize, chainId)
 }
 
 // isUncommittedGenesis reports whether current is snapshot-0, the only snapshot,
@@ -1510,17 +1505,24 @@ func isUncommittedGenesis(dir string) (bool, error) {
 	if !onlyGenesis {
 		return false, nil
 	}
-	if _, err := os.Stat(walPath(dir)); os.IsNotExist(err) {
-		return true, nil
-	}
-	walLog, err := wal.Open(walPath(dir), &wal.Options{NoCopy: true})
-	if err != nil {
-		return false, err
-	}
-	last, err := walLog.LastIndex()
-	return last == 0 && err == nil, errors.Join(err, walLog.Close())
+	last, err := walLastIndex(dir)
+	return last == 0, err
 }
 
+// walLastIndex reads the WAL without repairing it, so a live writer's log is left as is.
+func walLastIndex(dir string) (uint64, error) {
+	if _, err := os.Stat(walPath(dir)); os.IsNotExist(err) {
+		return 0, nil
+	}
+	reader, err := openReadOnlyWAL(walPath(dir))
+	if err != nil {
+		return 0, err
+	}
+	last, err := reader.LastIndex()
+	return last, errors.Join(err, reader.Close())
+}
+
+// createDBIfNotExist detects if db does not exist and try to initialize an empty one.
 func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error {
 	_, err := os.Stat(filepath.Join(dir, "current", MetadataFileName))
 	if err != nil && os.IsNotExist(err) {
@@ -1550,15 +1552,8 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	reader, err := openReadOnlyWAL(walPath(dir))
+	lastIndex, err := walLastIndex(dir)
 	if err != nil {
-		return 0, err
-	}
-	lastIndex, err := reader.LastIndex()
-	if err != nil {
-		return 0, errors.Join(err, reader.Close())
-	}
-	if err := reader.Close(); err != nil {
 		return 0, err
 	}
 	if lastIndex == 0 {
