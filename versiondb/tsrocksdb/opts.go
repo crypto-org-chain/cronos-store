@@ -78,6 +78,17 @@ func openVersionDB(dir string, opts *grocksdb.Options) (*grocksdb.DB, *grocksdb.
 	return db, cfHandles[1], nil
 }
 
+func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {
+	opts := grocksdb.NewDefaultOptions()
+	// a manual compaction otherwise runs on a single thread
+	opts.SetMaxSubcompactions(uint32(runtime.NumCPU()))
+	if rateBytesPerSec > 0 {
+		// refill period and fairness are rocksdb's defaults; SetRateLimiter takes ownership of the limiter
+		opts.SetRateLimiter(grocksdb.NewGenericRateLimiter(rateBytesPerSec, 100_000, 10, grocksdb.RateLimiterModeWritesOnly, false))
+	}
+	return opts
+}
+
 // OpenVersionDBForReadOnly open versiondb in readonly mode
 func OpenVersionDBForReadOnly(dir string, errorIfWalFileExists bool) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, error) {
 	opts := grocksdb.NewDefaultOptions()
