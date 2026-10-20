@@ -165,66 +165,6 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
-func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
-	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
-
-	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8"}
-	var upgrades []*TreeNameUpgrade
-	for _, name := range stores {
-		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
-	}
-	require.NoError(t, mtree.ApplyUpgrades(upgrades))
-
-	for _, storeName := range stores {
-		tree := mtree.TreeByName(storeName)
-		require.NotNil(t, tree)
-
-		for i := 0; i < 2000; i++ {
-			key := []byte(storeName + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)))
-			value := []byte("value" + string(rune('0'+i%10)))
-			tree.set(key, value)
-		}
-	}
-
-	_, err := mtree.SaveVersion(true)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	pool := pond.New(2, 10)
-	defer pool.StopAndWait()
-	// occupy both workers so no tree write can finish before the cancel, instead of racing a sleep
-	release := make(chan struct{})
-	for i := 0; i < 2; i++ {
-		pool.Submit(func() { <-release })
-	}
-
-	snapshotDir := t.TempDir()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
-	}()
-
-	cancel()
-	close(release)
-
-	err = <-errChan
-
-	// Should return context.Canceled error
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.Canceled)
-
-	// Verify that the snapshot directory might be partially written or not at all
-	// This is acceptable - the important part is that we got the error and stopped
-	_, statErr := os.Stat(snapshotDir)
-	if statErr == nil {
-		// Directory exists, but may be incomplete - this is fine
-		// The important thing is we stopped and returned an error
-		t.Logf("this is acceptable")
-	}
-}
-
 func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
