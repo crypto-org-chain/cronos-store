@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#103](https://github.com/crypto-org-chain/cronos-store/pull/103) fix(memiavl,store): fsync WAL entry before acknowledging Commit
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load

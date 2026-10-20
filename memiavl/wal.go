@@ -122,6 +122,7 @@ type writeAheadLog interface {
 	WriteBatch(b *wal.Batch) error
 	TruncateFront(index uint64) error
 	TruncateBack(index uint64) error
+	Sync() error
 }
 
 var (
