@@ -193,6 +193,13 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 
 	pool := pond.New(2, 10)
 	defer pool.StopAndWait()
+	// hold both workers so the writes stay queued until after cancel.
+	release := make(chan struct{})
+	releaseWorkers := sync.OnceFunc(func() { close(release) })
+	defer releaseWorkers()
+	for i := 0; i < 2; i++ {
+		pool.Submit(func() { <-release })
+	}
 
 	snapshotDir := t.TempDir()
 
@@ -201,23 +208,17 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
 	}()
 
-	time.Sleep(5 * time.Millisecond)
+	// the 2 blockers plus one write per store.
+	require.Eventually(t, func() bool {
+		return pool.SubmittedTasks() == uint64(2+len(stores))
+	}, 10*time.Second, time.Millisecond)
 	cancel()
+	releaseWorkers()
 
 	err = <-errChan
-
-	// Should return context.Canceled error
-	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
-
-	// Verify that the snapshot directory might be partially written or not at all
-	// This is acceptable - the important part is that we got the error and stopped
-	_, statErr := os.Stat(snapshotDir)
-	if statErr == nil {
-		// Directory exists, but may be incomplete - this is fine
-		// The important thing is we stopped and returned an error
-		t.Logf("this is acceptable")
-	}
+	// the commit info is written only after every tree, so a canceled write leaves none.
+	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
 }
 
 func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
