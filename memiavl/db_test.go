@@ -668,22 +668,57 @@ func TestInitialVersion(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsTruncatedMetadata(t *testing.T) {
-	dir := t.TempDir()
-	opts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
-	db, err := Load(dir, opts, TestAppChainID)
-	require.NoError(t, err)
-	// SetInitialVersion rewrites snapshot-0/__metadata in place.
-	require.NoError(t, db.SetInitialVersion(100))
-	require.NoError(t, db.Close())
+func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
+	testCases := []struct {
+		name string
+		// commit writes a WAL entry, so the DB is no longer an uncommitted genesis.
+		commit   bool
+		readOnly bool
+		expErr   string
+	}{
+		{name: "uncommitted genesis is recreated"},
+		{name: "a committed db still fails", commit: true, expErr: "missing commit info"},
+		{name: "a read-only load still fails", readOnly: true, expErr: "missing commit info"},
+	}
 
-	// A crash mid-rewrite can leave the file empty, which unmarshals cleanly with no commit info.
-	// Load then fails with a clear error instead of panicking; the node still can't start until
-	// snapshot-0 is written atomically.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}
+			db, err := Load(dir, opts, TestAppChainID)
+			require.NoError(t, err)
+			// SetInitialVersion rewrites snapshot-0/__metadata in place.
+			require.NoError(t, db.SetInitialVersion(100))
+			if tc.commit {
+				require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+				_, err = db.Commit()
+				require.NoError(t, err)
+			}
+			require.NoError(t, db.Close())
 
-	_, err = Load(dir, opts, TestAppChainID)
-	require.ErrorContains(t, err, "missing commit info")
+			// a crash mid-rewrite can leave the file empty, which unmarshals cleanly with no commit info.
+			require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
+
+			loadOpts := opts
+			if tc.readOnly {
+				loadOpts = Options{ReadOnly: true}
+			}
+			db, err = Load(dir, loadOpts, TestAppChainID)
+			if tc.expErr != "" {
+				require.ErrorContains(t, err, tc.expErr)
+				return
+			}
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+			require.Zero(t, db.Version())
+			// InitChain sets the initial version again on restart.
+			require.NoError(t, db.SetInitialVersion(100))
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			v, err := db.Commit()
+			require.NoError(t, err)
+			require.EqualValues(t, 100, v)
+		})
+	}
 }
 
 func TestLoadVersion(t *testing.T) {

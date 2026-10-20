@@ -569,7 +569,7 @@ func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	// Every writer sets CommitInfo, so nil means the file is truncated or
 	// corrupt (an empty file unmarshals cleanly); fail instead of dereferencing.
 	if metadata.CommitInfo == nil {
-		return nil, fmt.Errorf("metadata file %s is missing commit info", path)
+		return nil, fmt.Errorf("metadata file %s: %w", path, errMissingCommitInfo)
 	}
 	if metadata.CommitInfo.Version > math.MaxUint32 {
 		return nil, fmt.Errorf("commit info version overflows uint32: %d", metadata.CommitInfo.Version)

@@ -234,6 +234,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 
 	path := filepath.Join(dir, snapshot)
 	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	if errors.Is(err, errMissingCommitInfo) && opts.CreateIfMissing && !opts.ReadOnly && opts.TargetVersion == 0 {
+		mtree, err = recoverTornGenesis(dir, path, opts, chainId, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1467,6 +1470,57 @@ func atomicRemoveDir(path string) error {
 }
 
 // createDBIfNotExist detects if db does not exist and try to initialize an empty one.
+var errMissingCommitInfo = errors.New("missing commit info")
+
+// recoverTornGenesis recreates snapshot-0 when a crash tore it before any commit:
+// SetInitialVersion rewrites it in place, and InitChain sets the version again on
+// restart. Any other DB keeps loadErr, since its state can't be rebuilt.
+func recoverTornGenesis(dir, path string, opts Options, chainId string, loadErr error) (*MultiTree, error) {
+	genesis, err := isUncommittedGenesis(dir)
+	if err != nil {
+		return nil, errors.Join(loadErr, err)
+	}
+	if !genesis {
+		return nil, loadErr
+	}
+	// a crash after this removal leaves no current metadata, which Load recreates too.
+	if err := os.RemoveAll(filepath.Join(dir, snapshotName(0))); err != nil {
+		return nil, errors.Join(loadErr, err)
+	}
+	if err := initEmptyDB(dir, opts.InitialVersion, chainId); err != nil {
+		return nil, errors.Join(loadErr, err)
+	}
+	return LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+}
+
+// isUncommittedGenesis reports whether current is snapshot-0, the only snapshot,
+// with an empty WAL: nothing was ever committed.
+func isUncommittedGenesis(dir string) (bool, error) {
+	target, err := os.Readlink(currentPath(dir))
+	if err != nil || target != snapshotName(0) {
+		return false, nil
+	}
+	onlyGenesis := true
+	if err := traverseSnapshots(dir, true, func(version int64) (bool, error) {
+		onlyGenesis = version == 0
+		return !onlyGenesis, nil
+	}); err != nil {
+		return false, err
+	}
+	if !onlyGenesis {
+		return false, nil
+	}
+	if _, err := os.Stat(walPath(dir)); os.IsNotExist(err) {
+		return true, nil
+	}
+	walLog, err := wal.Open(walPath(dir), &wal.Options{NoCopy: true})
+	if err != nil {
+		return false, err
+	}
+	last, err := walLog.LastIndex()
+	return last == 0 && err == nil, errors.Join(err, walLog.Close())
+}
+
 func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error {
 	_, err := os.Stat(filepath.Join(dir, "current", MetadataFileName))
 	if err != nil && os.IsNotExist(err) {
