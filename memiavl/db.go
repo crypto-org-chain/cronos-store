@@ -1137,12 +1137,13 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		}
 	}
 
+	scan := newWALScan(walLog)
 	for idx := firstIndex; idx <= lastIndex; idx++ {
 		if len(result) == len(targets) {
 			break
 		}
 
-		data, err := walLog.Read(idx)
+		data, err := scan.Read(idx)
 		if err != nil {
 			return nil, err
 		}

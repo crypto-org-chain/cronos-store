@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -141,14 +140,19 @@ type readOnlyWAL struct {
 	lastIndex  uint64
 	closed     atomic.Bool
 
-	mu     sync.Mutex  // guards loading and evicting non-tail segment entries
-	cached *walSegment // most recently read non-tail segment
+	// the non-tail segment loaded last, for the next read that starts in it.
+	recent atomic.Pointer[loadedWALSegment]
+}
+
+type loadedWALSegment struct {
+	seg     *walSegment
+	entries [][]byte
 }
 
 type walSegment struct {
 	index   uint64 // index of the first entry
 	path    string
-	entries [][]byte // loaded only for the tail and cached segments
+	entries [][]byte // loaded at open for the tail only
 }
 
 func openReadOnlyWAL(dir string) (l *readOnlyWAL, err error) {
@@ -277,6 +281,31 @@ func (l *readOnlyWAL) LastIndex() (uint64, error) {
 
 // Read returns a slice of the segment buffer, which must not be modified.
 func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
+	return (&readOnlyWALScan{log: l}).Read(index)
+}
+
+type walIndexReader interface {
+	Read(index uint64) ([]byte, error)
+}
+
+// newWALScan returns a reader for one goroutine's reads of log. On a read-only WAL it
+// keeps the segment it last read, so concurrent scans of different segments don't
+// make each other reload, and no read waits on another's file read.
+func newWALScan(log walReader) walIndexReader {
+	if l, ok := log.(*readOnlyWAL); ok {
+		return &readOnlyWALScan{log: l}
+	}
+	return log
+}
+
+type readOnlyWALScan struct {
+	log     *readOnlyWAL
+	seg     *walSegment
+	entries [][]byte
+}
+
+func (s *readOnlyWALScan) Read(index uint64) ([]byte, error) {
+	l := s.log
 	if l.closed.Load() {
 		return nil, wal.ErrClosed
 	}
@@ -284,31 +313,37 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 		return nil, wal.ErrNotFound
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
-
-	// the tail is loaded at open and never evicted, so only older segments need the lock.
-	if seg != l.segments[len(l.segments)-1] {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-	}
-	if seg.entries == nil {
-		entries, torn, err := readWALEntries(seg.path)
+	if seg != s.seg {
+		entries, err := l.segmentEntries(seg)
 		if err != nil {
 			return nil, err
 		}
-		if torn {
-			// only the tail can hold an entry the writer is still appending.
-			return nil, wal.ErrCorrupt
-		}
-		if l.cached != nil {
-			l.cached.entries = nil
-		}
-		seg.entries, l.cached = entries, seg
+		s.seg, s.entries = seg, entries
 	}
 	offset := index - seg.index
-	if offset >= uint64(len(seg.entries)) {
+	if offset >= uint64(len(s.entries)) {
 		return nil, wal.ErrCorrupt
 	}
-	return seg.entries[offset], nil
+	return s.entries[offset], nil
+}
+
+func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
+	if seg.entries != nil {
+		return seg.entries, nil
+	}
+	if recent := l.recent.Load(); recent != nil && recent.seg == seg {
+		return recent.entries, nil
+	}
+	entries, torn, err := readWALEntries(seg.path)
+	if err != nil {
+		return nil, err
+	}
+	if torn {
+		// only the tail can hold an entry the writer is still appending.
+		return nil, wal.ErrCorrupt
+	}
+	l.recent.Store(&loadedWALSegment{seg: seg, entries: entries})
+	return entries, nil
 }
 
 func (l *readOnlyWAL) Close() error {

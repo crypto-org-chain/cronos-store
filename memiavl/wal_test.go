@@ -353,6 +353,28 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
+func (s *ReadOnlyWALTestSuite) TestScanHoldsOnlyItsSegment() {
+	l, err := openReadOnlyWAL(s.dir)
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(l.Close()) }()
+
+	scan := newWALScan(l)
+	_, err = scan.Read(1)
+	s.Require().NoError(err)
+	s.removeSegments(1)
+	_, err = l.Read(2)
+	s.Require().NoError(err, "the segment loaded last serves the next read in it")
+
+	// another reader's load replaces that segment, but the scan keeps its own.
+	_, err = l.Read(6)
+	s.Require().NoError(err)
+	_, err = l.Read(2)
+	s.Require().ErrorIs(err, fs.ErrNotExist)
+	data, err := scan.Read(3)
+	s.Require().NoError(err, "a scan keeps the segment it is reading")
+	s.Require().Equal(roWALEntry(3), data)
+}
+
 func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 	l, err := openReadOnlyWAL(s.dir)
 	s.Require().NoError(err)
@@ -365,10 +387,11 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// different strides keep readers evicting each other's cached segment.
+			// different strides make each reader's scan switch segments at different times.
+			scan := newWALScan(l)
 			for n := uint64(0); n < roWALEntries*10; n++ {
 				i := n*g%roWALEntries + 1
-				data, err := l.Read(i)
+				data, err := scan.Read(i)
 				if err != nil {
 					errs <- fmt.Errorf("index %d: %w", i, err)
 					return
