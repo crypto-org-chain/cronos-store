@@ -423,13 +423,28 @@ func TestHistoricalDBCacheConcurrent(t *testing.T) {
 	require.NoError(t, cache.close())
 }
 
-func TestCacheMultiStoreWriteBack(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+// newLoadedStore mounts testStoreName and closes the store at cleanup.
+func newLoadedStore(t *testing.T, opts memiavl.Options) (*Store, types.StoreKey) {
+	t.Helper()
 
-	key := types.NewKVStoreKey("test")
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	rs.SetMemIAVLOptions(opts)
+	key := types.NewKVStoreKey(testStoreName)
 	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
 	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	// Close is a no-op on a store the test already closed.
+	t.Cleanup(func() { require.NoError(t, rs.Close()) })
+	return rs, key
+}
+
+func rewriteAndReload(t *testing.T, rs *Store) {
+	t.Helper()
+	require.NoError(t, rs.db.RewriteSnapshot())
+	require.NoError(t, rs.db.Reload())
+}
+
+func TestCacheMultiStoreWriteBack(t *testing.T) {
+	rs, key := newLoadedStore(t, memiavl.Options{})
 
 	cms := rs.CacheMultiStore()
 	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
@@ -440,25 +455,8 @@ func TestCacheMultiStoreWriteBack(t *testing.T) {
 	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-func TestCloseClearsQuerySnapshot(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	rs.Commit()
-
-	require.NoError(t, rs.Close())
-	require.Nil(t, rs.querySnapshot.Load(), "Close must drop the querySnapshot before closing rs.db")
-}
-
 func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, key := newLoadedStore(t, memiavl.Options{})
 	rs.AddListeners([]types.StoreKey{key})
 
 	rs.Commit()
@@ -649,19 +647,13 @@ func TestLatestHeightReadsOutliveASnapshotRewrite(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-			rs.SetMemIAVLOptions(memiavl.Options{ZeroCopy: true})
-			key := types.NewKVStoreKey(testStoreName)
-			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-			require.NoError(t, rs.LoadLatestVersion())
-			t.Cleanup(func() { rs.Close() })
+			rs, key := newLoadedStore(t, memiavl.Options{ZeroCopy: true})
 
 			want := bytes.Repeat([]byte("v"), 1<<16)
 			rs.GetKVStore(key).Set([]byte("k"), want)
 			rs.Commit()
 			// publish a snapshot whose trees read from the mmap'd snapshot files.
-			require.NoError(t, rs.db.RewriteSnapshot())
-			require.NoError(t, rs.db.Reload())
+			rewriteAndReload(t, rs)
 			rs.Commit()
 
 			value := tc.read(t, rs, key)
@@ -669,8 +661,7 @@ func TestLatestHeightReadsOutliveASnapshotRewrite(t *testing.T) {
 			// the DB keeps the retired generation mapped until its next reload.
 			rs.GetKVStore(key).Set([]byte("n"), []byte("v"))
 			rs.Commit()
-			require.NoError(t, rs.db.RewriteSnapshot())
-			require.NoError(t, rs.db.Reload())
+			rewriteAndReload(t, rs)
 			rs.Commit()
 
 			// a read of an unmapped page panics here instead of crashing the test binary.
@@ -691,18 +682,12 @@ func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("zeroCopy=%v", tc.zeroCopy), func(t *testing.T) {
-			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-			rs.SetMemIAVLOptions(memiavl.Options{ZeroCopy: tc.zeroCopy})
-			key := types.NewKVStoreKey(testStoreName)
-			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-			require.NoError(t, rs.LoadLatestVersion())
-			t.Cleanup(func() { rs.Close() })
+			rs, key := newLoadedStore(t, memiavl.Options{ZeroCopy: tc.zeroCopy})
 			want := bytes.Repeat([]byte("v"), 1<<10)
 			rs.GetKVStore(key).Set([]byte("k"), want)
 			rs.Commit()
 			// only snapshot-backed trees honor the setting; in-memory ones are always zero-copy.
-			require.NoError(t, rs.db.RewriteSnapshot())
-			require.NoError(t, rs.db.Reload())
+			rewriteAndReload(t, rs)
 			rs.Commit()
 
 			snap := rs.acquireQuerySnapshot()
@@ -831,27 +816,77 @@ func TestCacheMultiStoreWithVersionHistoricalHeightSkipsDeletedStore(t *testing.
 	require.NotPanics(t, func() { cms.GetKVStore(testKey) })
 }
 
-func TestReadPathsWithClosedDB(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+func TestTornDownStoreServesNoReads(t *testing.T) {
+	// a stream the importer rejects, so Restore fails before reloading.
+	var rejected bytes.Buffer
+	w := protoio.NewDelimitedWriter(&rejected)
+	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
+		Item: &snapshottypes.SnapshotItem_IAVL{
+			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Value: []byte("v"), Height: 0, Version: 1},
+		},
+	}))
+	require.NoError(t, w.Close())
 
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	rs.Commit()
+	testCases := []struct {
+		name     string
+		teardown func(rs *Store) error
+		// a reload that fails after closing the db also drops the mounted stores and cached historical dbs.
+		failedReload bool
+	}{
+		{"Close", (*Store).Close, false},
+		// Restore's teardown.
+		{"closeDB", (*Store).closeDB, false},
+		{"failed LoadLatestVersion", func(rs *Store) error {
+			// a mounted store with no tree and no upgrade adding it fails the reload after the old db closed.
+			rs.MountStoreWithDB(types.NewKVStoreKey("unknown"), types.StoreTypeIAVL, nil)
+			return rs.LoadLatestVersion()
+		}, true},
+		{"failed Restore", func(rs *Store) error {
+			r := protoio.NewDelimitedReader(bytes.NewReader(rejected.Bytes()), 1<<20)
+			defer r.Close()
+			_, err := rs.Restore(1, 1, r)
+			return err
+		}, true},
+	}
 
-	// Restore's teardown.
-	require.NoError(t, rs.closeDB())
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, key := newLoadedStore(t, memiavl.Options{})
+			for _, v := range []string{"v1", "v2"} {
+				rs.GetKVStore(key).Set([]byte("k"), []byte(v))
+				rs.Commit()
+			}
+			// populate the historical cache.
+			_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
+			require.NoError(t, err)
+			require.Len(t, rs.historicalDBCache.entries, 1)
 
-	require.NotPanics(t, func() {
-		require.Zero(t, rs.LatestVersion())
-		require.Zero(t, rs.EarliestVersion())
+			err = tc.teardown(rs)
+			if tc.failedReload {
+				require.Error(t, err)
+				require.Nil(t, rs.GetCommitStore(key), "stores over the closed trees must be dropped")
+				require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
+			} else {
+				require.NoError(t, err)
+			}
 
-		_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
-		require.ErrorContains(t, err, "store is not loaded")
+			require.Nil(t, rs.db)
+			require.Nil(t, rs.querySnapshot.Load(), "the querySnapshot must be dropped before rs.db closes")
+			require.NotPanics(t, func() {
+				require.Zero(t, rs.LatestVersion())
+				require.Zero(t, rs.EarliestVersion())
 
-		_, err = rs.CacheMultiStoreWithVersion(0)
-		require.ErrorContains(t, err, "store is not loaded")
-	})
+				_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+				require.ErrorContains(t, err, "store is not loaded")
+
+				_, err = rs.CacheMultiStoreWithVersion(0)
+				require.ErrorContains(t, err, "store is not loaded")
+			})
+			require.Empty(t, rs.LastCommitID().Hash, "no db is loaded, so no hash may be reported")
+			// the version still comes from disk: 0 would make CometBFT replay from genesis.
+			require.Equal(t, int64(2), rs.LastCommitID().Version)
+		})
+	}
 }
 
 func TestCommitHashesAgreeAcrossReadPaths(t *testing.T) {
@@ -895,11 +930,7 @@ func TestCommitHashesAgreeAcrossReadPaths(t *testing.T) {
 }
 
 func TestLoadLatestVersionReloadsALoadedStore(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, key := newLoadedStore(t, memiavl.Options{})
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
 	rs.Commit()
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
@@ -942,10 +973,7 @@ func TestRestorePublishesTheRestoredHeight(t *testing.T) {
 	require.NoError(t, w.Close())
 
 	// state sync restores into a node that loaded an empty store.
-	dst := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	dst.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, dst.LoadLatestVersion())
-	t.Cleanup(func() { dst.Close() })
+	dst, dstKey := newLoadedStore(t, memiavl.Options{})
 	held, err := dst.CacheMultiStoreWithVersion(0)
 	require.NoError(t, err)
 
@@ -958,16 +986,12 @@ func TestRestorePublishesTheRestoredHeight(t *testing.T) {
 	res, err := dst.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
 	require.NoError(t, err)
 	require.NoError(t, rootmulti.DefaultProofRuntime().VerifyValue(res.ProofOps, cid.Hash, "/"+testStoreName+"/k", []byte("v2")))
-	require.Nil(t, held.GetKVStore(key).Get([]byte("k")))
+	require.Nil(t, held.GetKVStore(dstKey).Get([]byte("k")))
 	require.NoError(t, held.(io.Closer).Close())
 }
 
 func TestUnclosedQueryStoreIsReleased(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, key := newLoadedStore(t, memiavl.Options{})
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
 	rs.Commit()
 	refs := func() int64 { return rs.querySnapshot.Load().refs.Load() }
@@ -1023,68 +1047,8 @@ func TestPinnedStoreKeepsCloserReachable(t *testing.T) {
 	}
 }
 
-func TestFailedReloadDropsStores(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
-	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
-	rs.Commit()
-
-	// a mounted store with no tree and no upgrade adding it fails the reload after the old db closed.
-	rs.MountStoreWithDB(types.NewKVStoreKey("unknown"), types.StoreTypeIAVL, nil)
-	require.Error(t, rs.LoadLatestVersion())
-	require.Nil(t, rs.GetCommitStore(key), "stores over the closed trees must be dropped")
-}
-
-func TestRestoreFailureTearsDownReadState(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
-
-	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
-	rs.Commit()
-	rs.GetKVStore(key).Set([]byte("k"), []byte("v2"))
-	rs.Commit()
-
-	// populate the historical cache.
-	_, err := rs.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: 1})
-	require.NoError(t, err)
-	require.Len(t, rs.historicalDBCache.entries, 1)
-
-	// a stream the importer rejects, so Restore fails before reloading.
-	var buf bytes.Buffer
-	w := protoio.NewDelimitedWriter(&buf)
-	require.NoError(t, w.WriteMsg(&snapshottypes.SnapshotItem{
-		Item: &snapshottypes.SnapshotItem_IAVL{
-			IAVL: &snapshottypes.SnapshotIAVLItem{Key: []byte("k"), Value: []byte("v"), Height: 0, Version: 1},
-		},
-	}))
-	require.NoError(t, w.Close())
-	r := protoio.NewDelimitedReader(&buf, 1<<20)
-	defer r.Close()
-
-	_, err = rs.Restore(1, 1, r)
-	require.Error(t, err)
-
-	require.Nil(t, rs.db)
-	require.Zero(t, rs.LatestVersion())
-	require.Empty(t, rs.LastCommitID().Hash, "no db is loaded, so no hash may be reported")
-	// the version still comes from disk: 0 would make CometBFT replay from genesis.
-	require.Equal(t, int64(2), rs.LastCommitID().Version)
-	require.Empty(t, rs.historicalDBCache.entries, "cached historical dbs must be dropped with the directory")
-}
-
 func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-
-	key := types.NewKVStoreKey("test")
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, _ := newLoadedStore(t, memiavl.Options{})
 
 	require.NoError(t, rs.SetInitialVersion(5))
 	require.Equal(t, int64(5), rs.EarliestVersion())
@@ -1095,11 +1059,7 @@ func TestSetInitialVersionRefreshesQuerySnapshot(t *testing.T) {
 }
 
 func TestReadPathsReleaseQuerySnapshot(t *testing.T) {
-	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, key := newLoadedStore(t, memiavl.Options{})
 	for _, v := range []string{"v1", "v2"} {
 		rs.GetKVStore(key).Set([]byte("k"), []byte(v))
 		rs.Commit()
@@ -1192,8 +1152,7 @@ func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 				for i := 0; i < 2; i++ {
 					rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
 					rs.Commit()
-					require.NoError(t, rs.db.RewriteSnapshot())
-					require.NoError(t, rs.db.Reload())
+					rewriteAndReload(t, rs)
 				}
 			},
 		},
@@ -1208,11 +1167,7 @@ func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-			key := types.NewKVStoreKey(testStoreName)
-			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-			require.NoError(t, rs.LoadLatestVersion())
-			t.Cleanup(func() { rs.Close() })
+			rs, key := newLoadedStore(t, memiavl.Options{})
 
 			const numKeys = 20
 			for i := 0; i < numKeys; i++ {
@@ -1220,8 +1175,7 @@ func TestHeldQuerySnapshotOutlivesItsGeneration(t *testing.T) {
 			}
 			rs.Commit()
 			// publish a snapshot whose trees read from the mmap'd snapshot files.
-			require.NoError(t, rs.db.RewriteSnapshot())
-			require.NoError(t, rs.db.Reload())
+			rewriteAndReload(t, rs)
 			rs.Commit()
 
 			cms, err := rs.CacheMultiStoreWithVersion(0)
@@ -1354,12 +1308,7 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 }
 
 func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
-	dir := t.TempDir()
-	store := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
-	key := types.NewKVStoreKey(testStoreName)
-	store.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, store.LoadLatestVersion())
-	defer store.Close()
+	store, key := newLoadedStore(t, memiavl.Options{})
 
 	// enough keys for multi-level paths, so each commit rewrites shared inner nodes.
 	commit := func(i int) {
@@ -1433,13 +1382,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 }
 
 func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
-	dir := t.TempDir()
-	rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
-
-	key := types.NewKVStoreKey(testStoreName)
-	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-	require.NoError(t, rs.LoadLatestVersion())
-	t.Cleanup(func() { rs.Close() })
+	rs, key := newLoadedStore(t, memiavl.Options{})
 
 	rs.GetKVStore(key).Set([]byte("k"), []byte("v1"))
 	rs.Commit()
