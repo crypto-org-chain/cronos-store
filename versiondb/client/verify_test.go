@@ -170,25 +170,24 @@ func TestVerifyResultSameWithAndWithoutSaveSnapshot(t *testing.T) {
 		return bz
 	}
 
-	// only the save path keeps and bumps the trees; both report each store at its own version.
+	// only the saved snapshot bumps lagging trees; both report each store at its own version.
 	plain := verify()
 	require.Equal(t, plain, verify("--"+flagSaveSnapshot, filepath.Join(t.TempDir(), "snapshot")))
 
 	require.Equal(t, map[string]string{fooStore: "3", barStore: "1"}, printedVersions(t, plain))
 }
 
-func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
+func TestReplayStoreClosesTree(t *testing.T) {
 	testCases := []struct {
 		name          string
 		saveSnapshot  bool
 		targetVersion int64
 		expVersion    int64
-		expKept       bool
 	}{
 		{name: "no snapshot to write", expVersion: 3},
 		{name: "catches up to target version", targetVersion: 5, expVersion: 5},
-		{name: "snapshot written by the worker", saveSnapshot: true, targetVersion: 3, expVersion: 3},
-		{name: "snapshot version not known yet", saveSnapshot: true, expVersion: 3, expKept: true},
+		{name: "snapshot written at the target version", saveSnapshot: true, targetVersion: 5, expVersion: 5},
+		{name: "snapshot written at the store's own version", saveSnapshot: true, expVersion: 3},
 	}
 
 	for _, tc := range testCases {
@@ -203,16 +202,10 @@ func TestReplayStoreClosesTreeUnlessKept(t *testing.T) {
 				snapshotDir = t.TempDir()
 			}
 
-			entry, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, tc.targetVersion, snapshotDir)
+			info, err := replayStore(context.Background(), mtree, fooStore, changeSetDir, tc.targetVersion, snapshotDir)
 			require.NoError(t, err)
-			require.Equal(t, tc.expVersion, entry.commitID.Version)
+			require.Equal(t, tc.expVersion, info.CommitId.Version)
 			tree := mtree.TreeByName(fooStore)
-			if tc.expKept {
-				require.Same(t, tree, entry.tree)
-				require.Equal(t, entry.commitID.Hash, tree.RootHash())
-				return
-			}
-			require.Nil(t, entry.tree)
 			// a closed tree has no root, so it hashes like an empty one.
 			require.Equal(t, memiavl.New(0).RootHash(), tree.RootHash())
 			if tc.saveSnapshot {
@@ -284,6 +277,7 @@ func TestVerifyLoadedSnapshotAgainstTargetVersion(t *testing.T) {
 				"--" + flagStores, bothStores,
 				"--" + flagLoadSnapshot, writeBaseSnapshot(t, 100),
 				"--" + flagTargetVersion, fmt.Sprint(tc.targetVersion),
+				"--" + flagSave,
 			})
 			err := cmd.Execute()
 			if tc.expErr != "" {
@@ -291,6 +285,9 @@ func TestVerifyLoadedSnapshotAgainstTargetVersion(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			bz, err := os.ReadFile(filepath.Join(changeSetDir, fmt.Sprintf("verified-%d", tc.targetVersion)))
+			require.NoError(t, err)
+			require.Equal(t, map[string]string{fooStore: "100", barStore: "100"}, printedVersions(t, bz))
 		})
 	}
 }
