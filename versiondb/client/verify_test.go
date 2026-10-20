@@ -263,6 +263,20 @@ func TestVerifyFailsOnWorkerPanic(t *testing.T) {
 	require.ErrorContains(t, cmd.Execute(), "panic in worker task")
 }
 
+func TestVerifyRejectsLoadedSnapshotPastTargetVersion(t *testing.T) {
+	changeSetDir := t.TempDir()
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{101})
+
+	cmd := VerifyChangeSetCmd(nil)
+	cmd.SetArgs([]string{
+		changeSetDir,
+		"--" + flagStores, bothStores,
+		"--" + flagLoadSnapshot, writeBaseSnapshot(t, 100),
+		"--" + flagTargetVersion, "50",
+	})
+	require.ErrorContains(t, cmd.Execute(), "loaded snapshot version 100 is newer than target version 50")
+}
+
 func TestNormalizeStores(t *testing.T) {
 	testCases := []struct {
 		name      string

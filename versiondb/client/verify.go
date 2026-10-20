@@ -81,6 +81,10 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				if mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId); err != nil {
 					return err
 				}
+				// no change set can bring a tree back down to the target.
+				if targetVersion > 0 && mtree.Version() > targetVersion {
+					return errors.Join(fmt.Errorf("loaded snapshot version %d is newer than target version %d", mtree.Version(), targetVersion), mtree.Close())
+				}
 			}
 			defer mtree.Close()
 
@@ -108,11 +112,16 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 			}
 
 			storeInfos := make([]storetypes.StoreInfo, 0, len(verified))
+			var (
+				kept  []verifiedStore
+				names []string
+			)
 			for _, entry := range verified {
 				if entry.tree != nil {
 					if err := advanceTreeVersion(entry.tree, latestVersion); err != nil {
 						return err
 					}
+					kept, names = append(kept, entry), append(names, entry.name)
 				}
 				storeInfos = append(storeInfos, storetypes.StoreInfo{Name: entry.name, CommitId: entry.commitID})
 			}
@@ -121,16 +130,9 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 
 			if len(saveSnapshot) > 0 {
 				// without --target-version, the trees replayStore kept are written now that latestVersion is known.
-				kept := slices.DeleteFunc(slices.Clone(verified), func(entry verifiedStore) bool {
-					return entry.tree == nil
-				})
-				names := make([]string, len(kept))
-				for i, entry := range kept {
-					names[i] = entry.name
-				}
 				if err := memiavl.RunWorkerGroup(cmd.Context(), pool, names, func(ctx context.Context, i int) error {
-					entry := kept[i]
-					return entry.tree.WriteSnapshotWithContext(ctx, filepath.Join(saveSnapshot, entry.name))
+					tree := kept[i].tree
+					return errors.Join(tree.WriteSnapshotWithContext(ctx, filepath.Join(saveSnapshot, names[i])), tree.Close())
 				}); err != nil {
 					return err
 				}
@@ -200,6 +202,7 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 }
 
 // verifiedStore holds one replayed store; tree is set only when its snapshot is still to be written.
+// The zero value, with an empty name, marks a store absent at the target; normalizeStores drops empty names.
 type verifiedStore struct {
 	name     string
 	commitID storetypes.CommitID
@@ -209,7 +212,7 @@ type verifiedStore struct {
 // replayStore replays one store onto its loaded tree, or a new one, and closes the tree
 // once it is hashed, and written to snapshotDir if set, so --concurrency bounds memory
 // even for trees the loaded snapshot owns. Without targetVersion the snapshot's version
-// is known only after every store, so the tree is kept for the caller to write.
+// is known only after every store, so the tree is kept for the caller to write and close.
 func replayStore(ctx context.Context, mtree *memiavl.MultiTree, store, changeSetDir string, targetVersion int64, snapshotDir string) (verifiedStore, error) {
 	tree := mtree.TreeByName(store)
 	// a loaded store with no change sets still belongs in the app hash.
@@ -233,15 +236,14 @@ func replayStore(ctx context.Context, mtree *memiavl.MultiTree, store, changeSet
 	}
 	// a later version bump only adds empty versions, so this hash holds.
 	entry := verifiedStore{name: store, commitID: lastCommitID(tree)}
-	switch {
-	case snapshotDir == "":
-	case targetVersion > 0:
+	if snapshotDir != "" && targetVersion == 0 {
+		entry.tree = tree
+		return entry, nil
+	}
+	if snapshotDir != "" {
 		if err := tree.WriteSnapshotWithContext(ctx, filepath.Join(snapshotDir, store)); err != nil {
 			return verifiedStore{}, errors.Join(err, tree.Close())
 		}
-	default:
-		entry.tree = tree
-		return entry, nil
 	}
 	return entry, tree.Close()
 }
