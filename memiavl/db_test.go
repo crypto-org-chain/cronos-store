@@ -683,6 +683,10 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 		commit   bool
 		prepare  func(t *testing.T, dir string)
 		loadOpts func(Options) Options
+		// garbage replaces the empty torn metadata.
+		garbage []byte
+		// when set, the recovered DB is not given an initial version again.
+		expFirstVersion int64
 		// the torn snapshot-0 must stay as it is, and Load fail.
 		refused bool
 	}{
@@ -709,13 +713,14 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			refused: true,
 		},
 		{
-			name: "a db whose current is another snapshot fails",
-			prepare: func(t *testing.T, dir string) {
-				t.Helper()
-				fakeSnapshot(t, dir, 5)
-				require.NoError(t, updateCurrentSymlink(dir, snapshotName(5)))
-			},
+			name:    "a garbage metadata file fails",
+			garbage: []byte{0xff, 0xff, 0xff},
 			refused: true,
+		},
+		{
+			name:            "recreated with the configured initial version",
+			loadOpts:        func(o Options) Options { o.InitialVersion = 50; return o },
+			expFirstVersion: 50,
 		},
 		{
 			name:     "a load for a target version fails",
@@ -749,7 +754,7 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 
 			// a crash mid-rewrite can leave the file empty, which unmarshals cleanly with no commit info.
 			genesisMetadata := filepath.Join(dir, snapshotName(0), MetadataFileName)
-			require.NoError(t, os.WriteFile(genesisMetadata, nil, 0o600))
+			require.NoError(t, os.WriteFile(genesisMetadata, tc.garbage, 0o600))
 			if tc.prepare != nil {
 				tc.prepare(t, dir)
 			}
@@ -760,26 +765,33 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			}
 			db, err = Load(dir, loadOpts, TestAppChainID)
 			if tc.refused {
-				require.ErrorIs(t, err, errMissingCommitInfo)
+				require.Error(t, err)
+				if tc.garbage == nil {
+					require.ErrorIs(t, err, errMissingCommitInfo)
+				}
 				bz, err := os.ReadFile(genesisMetadata)
 				require.NoError(t, err)
-				require.Empty(t, bz, "a refused recovery must not rewrite snapshot-0")
+				require.True(t, bytes.Equal(tc.garbage, bz), "a refused recovery must not rewrite snapshot-0")
 				return
 			}
 			require.NoError(t, err)
 			require.Zero(t, db.Version())
-			// InitChain sets the initial version again on restart.
-			require.NoError(t, db.SetInitialVersion(100))
+			expVersion := tc.expFirstVersion
+			if expVersion == 0 {
+				// InitChain sets the initial version again on restart.
+				require.NoError(t, db.SetInitialVersion(100))
+				expVersion = 100
+			}
 			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 			v, err := db.Commit()
 			require.NoError(t, err)
-			require.EqualValues(t, 100, v)
+			require.Equal(t, expVersion, v)
 			require.NoError(t, db.Close())
 
 			db, err = Load(dir, baseOpts, TestAppChainID)
 			require.NoError(t, err)
 			defer func() { require.NoError(t, db.Close()) }()
-			require.EqualValues(t, 100, db.Version())
+			require.Equal(t, expVersion, db.Version())
 		})
 	}
 }

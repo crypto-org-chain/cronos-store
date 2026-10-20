@@ -1470,9 +1470,8 @@ func atomicRemoveDir(path string) error {
 	return os.RemoveAll(tmpPath)
 }
 
-// recoverTornGenesis rewrites snapshot-0 when a crash tore it before any commit:
-// SetInitialVersion rewrites it in place, and InitChain sets the version again on
-// restart. Any other DB keeps loadErr, since its state can't be rebuilt.
+// SetInitialVersion rewrites snapshot-0 in place, and InitChain reruns on restart,
+// so a snapshot-0 torn before any commit can be rebuilt; any other DB keeps loadErr.
 func recoverTornGenesis(dir string, opts Options, chainId string, loadErr error) (*MultiTree, error) {
 	genesis, err := isUncommittedGenesis(dir)
 	if err != nil {
@@ -1488,13 +1487,8 @@ func recoverTornGenesis(dir string, opts Options, chainId string, loadErr error)
 	return LoadMultiTree(currentPath(dir), opts.ZeroCopy, opts.CacheSize, chainId)
 }
 
-// isUncommittedGenesis reports whether current is snapshot-0, the only snapshot,
-// with an empty WAL: nothing was ever committed.
+// isUncommittedGenesis reports whether snapshot-0 is the only snapshot and the WAL is empty.
 func isUncommittedGenesis(dir string) (bool, error) {
-	target, err := os.Readlink(currentPath(dir))
-	if err != nil || target != snapshotName(0) {
-		return false, nil
-	}
 	onlyGenesis := true
 	if err := traverseSnapshots(dir, true, func(version int64) (bool, error) {
 		onlyGenesis = version == 0
@@ -1506,14 +1500,11 @@ func isUncommittedGenesis(dir string) (bool, error) {
 		return false, nil
 	}
 	last, err := walLastIndex(dir)
-	return last == 0, err
+	return err == nil && last == 0, err
 }
 
 // walLastIndex reads the WAL without repairing it, so a live writer's log is left as is.
 func walLastIndex(dir string) (uint64, error) {
-	if _, err := os.Stat(walPath(dir)); os.IsNotExist(err) {
-		return 0, nil
-	}
 	reader, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
