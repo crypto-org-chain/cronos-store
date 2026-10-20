@@ -234,8 +234,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 
 	path := filepath.Join(dir, snapshot)
 	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
-	// CreateIfMissing rules out ReadOnly, so the lock is held here.
-	if errors.Is(err, errMissingCommitInfo) && opts.CreateIfMissing && opts.TargetVersion == 0 {
+	if errors.Is(err, errMissingCommitInfo) && fileLock != nil && opts.CreateIfMissing && opts.TargetVersion == 0 {
 		mtree, err = recoverTornGenesis(dir, opts, chainId, err)
 	}
 	if err != nil {

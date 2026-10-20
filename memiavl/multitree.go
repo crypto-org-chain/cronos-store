@@ -566,7 +566,7 @@ func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	}
 	var metadata MultiTreeMetadata
 	if err := metadata.Unmarshal(bz); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("metadata file %s: %w", path, err)
 	}
 	// Every writer sets CommitInfo, so nil means the file is truncated or
 	// corrupt (an empty file unmarshals cleanly); fail instead of dereferencing.

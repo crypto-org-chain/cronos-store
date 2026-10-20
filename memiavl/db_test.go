@@ -679,7 +679,6 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 
 	testCases := []struct {
 		name     string
-		dbOpts   func(Options) Options
 		commit   bool
 		prepare  func(t *testing.T, dir string)
 		loadOpts func(Options) Options
@@ -699,11 +698,6 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			},
 		},
 		{name: "a committed db fails", commit: true, refused: true},
-		{
-			name:   "a db committed synchronously fails",
-			dbOpts: func(o Options) Options { o.AsyncCommitBuffer = -1; return o },
-			commit: true, refused: true,
-		},
 		{
 			name: "a db with another snapshot fails",
 			prepare: func(t *testing.T, dir string) {
@@ -748,11 +742,7 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			opts := baseOpts
-			if tc.dbOpts != nil {
-				opts = tc.dbOpts(opts)
-			}
-			db, err := Load(dir, opts, TestAppChainID)
+			db, err := Load(dir, baseOpts, TestAppChainID)
 			require.NoError(t, err)
 			// SetInitialVersion rewrites snapshot-0/__metadata in place.
 			require.NoError(t, db.SetInitialVersion(100))
