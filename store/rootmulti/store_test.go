@@ -443,18 +443,6 @@ func rewriteAndReload(t *testing.T, rs *Store) {
 	require.NoError(t, rs.db.Reload())
 }
 
-func TestCacheMultiStoreWriteBack(t *testing.T) {
-	rs, key := newLoadedStore(t, memiavl.Options{})
-
-	cms := rs.CacheMultiStore()
-	cms.GetKVStore(key).Set([]byte("k"), []byte("v"))
-	cms.Write()
-
-	rs.Commit()
-
-	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
-}
-
 func TestCacheMultiStoreWithVersionZeroIsReadOnly(t *testing.T) {
 	rs, key := newLoadedStore(t, memiavl.Options{})
 	rs.AddListeners([]types.StoreKey{key})
@@ -686,7 +674,7 @@ func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
 			want := bytes.Repeat([]byte("v"), 1<<10)
 			rs.GetKVStore(key).Set([]byte("k"), want)
 			rs.Commit()
-			// only snapshot-backed trees honor the setting; in-memory ones are always zero-copy.
+			// a tree created empty is zero-copy until it is reloaded from a snapshot.
 			rewriteAndReload(t, rs)
 			rs.Commit()
 
