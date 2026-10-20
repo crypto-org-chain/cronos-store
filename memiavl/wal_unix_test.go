@@ -36,14 +36,17 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 		_, err := l.Read(1)
 		other <- err
 	}()
-	var blocked bool
+	var (
+		blocked  bool
+		otherErr error
+	)
 	select {
-	case err := <-other:
-		s.Require().NoError(err)
+	case otherErr = <-other:
 	case <-time.After(time.Second):
 		blocked = true
 	}
 
+	// unblock the stuck load before any assertion can end the test.
 	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
 	s.Require().NoError(err)
 	_, err = pipe.Write(content)
@@ -51,7 +54,8 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 	s.Require().NoError(pipe.Close())
 	s.Require().NoError(<-stuck)
 	if blocked {
-		s.Require().NoError(<-other)
+		otherErr = <-other
 	}
+	s.Require().NoError(otherErr)
 	s.Require().False(blocked, "a read of another segment waited on a segment load")
 }

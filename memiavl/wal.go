@@ -108,10 +108,14 @@ const (
 	readOnlyWALOpenAttempts = 3
 )
 
+type walIndexReader interface {
+	Read(index uint64) ([]byte, error)
+}
+
 type walReader interface {
+	walIndexReader
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
-	Read(index uint64) ([]byte, error)
 	Close() error
 }
 
@@ -279,18 +283,12 @@ func (l *readOnlyWAL) LastIndex() (uint64, error) {
 	return l.lastIndex, nil
 }
 
-// Read returns a slice of the segment buffer, which must not be modified.
 func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	return (&readOnlyWALScan{log: l}).Read(index)
 }
 
-type walIndexReader interface {
-	Read(index uint64) ([]byte, error)
-}
-
-// newWALScan returns a reader for one goroutine's reads of log. On a read-only WAL it
-// keeps the segment it last read, so concurrent scans of different segments don't
-// make each other reload, and no read waits on another's file read.
+// newWALScan returns a reader for one goroutine; on a read-only WAL it keeps the segment it
+// last read and returns slices of that segment's buffer, which must not be modified.
 func newWALScan(log walReader) walIndexReader {
 	if l, ok := log.(*readOnlyWAL); ok {
 		return &readOnlyWALScan{log: l}
@@ -299,9 +297,8 @@ func newWALScan(log walReader) walIndexReader {
 }
 
 type readOnlyWALScan struct {
-	log     *readOnlyWAL
-	seg     *walSegment
-	entries [][]byte
+	log *readOnlyWAL
+	cur loadedWALSegment
 }
 
 func (s *readOnlyWALScan) Read(index uint64) ([]byte, error) {
@@ -313,18 +310,18 @@ func (s *readOnlyWALScan) Read(index uint64) ([]byte, error) {
 		return nil, wal.ErrNotFound
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
-	if seg != s.seg {
+	if seg != s.cur.seg {
 		entries, err := l.segmentEntries(seg)
 		if err != nil {
 			return nil, err
 		}
-		s.seg, s.entries = seg, entries
+		s.cur = loadedWALSegment{seg: seg, entries: entries}
 	}
 	offset := index - seg.index
-	if offset >= uint64(len(s.entries)) {
+	if offset >= uint64(len(s.cur.entries)) {
 		return nil, wal.ErrCorrupt
 	}
-	return s.entries[offset], nil
+	return s.cur.entries[offset], nil
 }
 
 func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {

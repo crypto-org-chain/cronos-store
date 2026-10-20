@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#148](https://github.com/crypto-org-chain/cronos-store/pull/148) fix(memiavl): stop read-only WAL readers waiting on each other's segment loads
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL

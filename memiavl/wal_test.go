@@ -353,7 +353,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
-func (s *ReadOnlyWALTestSuite) TestScanHoldsOnlyItsSegment() {
+func (s *ReadOnlyWALTestSuite) TestScanKeepsItsSegment() {
 	l, err := openReadOnlyWAL(s.dir)
 	s.Require().NoError(err)
 	defer func() { s.Require().NoError(l.Close()) }()
