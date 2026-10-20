@@ -47,6 +47,9 @@ func NewMounted(mount *Mount, name string, logger log.Logger) *Store {
 }
 
 func (st *Store) SetTree(tree *memiavl.Tree) {
+	if st.mount != nil {
+		panic("memiavlstore: SetTree on a mounted store, which reads its mount's view")
+	}
 	st.tree = tree
 }
 

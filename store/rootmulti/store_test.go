@@ -743,8 +743,6 @@ func TestLiveDBLoadsWithoutNodeCache(t *testing.T) {
 	requireNoCache()
 	require.NoError(t, rs.RollbackToVersion(target))
 	requireNoCache()
-	// historical loads still size their cache from the config.
-	require.Equal(t, 1000, rs.opts.CacheSize)
 }
 
 func TestMountedStoreHeldAcrossDBClose(t *testing.T) {

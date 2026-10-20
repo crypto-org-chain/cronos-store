@@ -73,3 +73,8 @@ func TestMountedViewRelease(t *testing.T) {
 		})
 	}
 }
+
+func TestSetTreeOnMountedStorePanics(t *testing.T) {
+	st := NewMounted(&Mount{}, "s", log.NewNopLogger())
+	require.Panics(t, func() { st.SetTree(memiavl.New(0)) })
+}

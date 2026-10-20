@@ -301,8 +301,8 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 }
 
 // mountCopy moves every mounted store to a copy of rs.db at once. The copy stays
-// mapped until no reader holds it, so a simulate or iterator held across Commit
-// survives later reloads.
+// mapped until no reader holds it, so an iterator held across Commit survives
+// later reloads.
 func (rs *Store) mountCopy() {
 	rs.mount.Store(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 }
@@ -846,7 +846,8 @@ func (rs *Store) LoadVersion(ver int64) error {
 	return rs.LoadVersionAndUpgrade(ver, nil)
 }
 
-// SetInterBlockCache is a noop here because memiavl do caching on it's own, which works well with zero-copy.
+// SetInterBlockCache is a noop: latest-height reads run uncached, which a mainnet replay
+// measured within 1% of a shared cache (docs/memiavl_cache_performance.md).
 func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 
 // SetInitialVersion Implements interface CommitMultiStore
