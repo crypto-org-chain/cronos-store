@@ -31,17 +31,14 @@ type Store struct {
 	mount *Mount
 	name  string
 
-	// swapped by SetTree while readers on other ABCI connections use it.
-	tree   atomic.Pointer[memiavl.Tree]
+	tree   *memiavl.Tree
 	logger log.Logger
 
 	changeSet memiavl.ChangeSet
 }
 
 func New(tree *memiavl.Tree, logger log.Logger) *Store {
-	st := &Store{logger: logger}
-	st.tree.Store(tree)
-	return st
+	return &Store{tree: tree, logger: logger}
 }
 
 // NewMounted returns a store that reads the tree named name from mount's view.
@@ -50,7 +47,7 @@ func NewMounted(mount *Mount, name string, logger log.Logger) *Store {
 }
 
 func (st *Store) SetTree(tree *memiavl.Tree) {
-	st.tree.Store(tree)
+	st.tree = tree
 }
 
 // View is one set of trees that the mounted stores read together.
@@ -78,13 +75,13 @@ func newView(db *memiavl.DB, release func()) *View {
 	return v
 }
 
-// Mount holds the view every mounted store reads, so one Swap moves them all.
+// Mount holds the view every mounted store reads, so one Store moves them all.
 type Mount struct {
 	view atomic.Pointer[View]
 }
 
-// Swap publishes v, nil for none; readers still using the previous view keep it.
-func (m *Mount) Swap(v *View) {
+// Store publishes v, nil for none; readers still using the previous view keep it.
+func (m *Mount) Store(v *View) {
 	m.view.Store(v)
 }
 
@@ -94,7 +91,7 @@ var emptyTree = memiavl.New(0)
 // load returns the tree to read and the view to keep reachable while reading it.
 func (st *Store) load() (*memiavl.Tree, *View) {
 	if st.mount == nil {
-		return st.tree.Load(), nil
+		return st.tree, nil
 	}
 	v := st.mount.view.Load()
 	if v == nil {

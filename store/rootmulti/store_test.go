@@ -1709,7 +1709,7 @@ func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	// baseapp's finalize state reads through the mounted stores until Commit.
 	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
 
-	// a write after WorkingHash must show once Commit repoints the stores.
+	// a write after WorkingHash must show once Commit swaps the view.
 	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
 	cid := store.Commit()
 	res, err = store.Query(newQuery(0))

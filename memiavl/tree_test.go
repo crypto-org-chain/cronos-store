@@ -272,6 +272,8 @@ func TestTreeCopy(t *testing.T) {
 		{Key: []byte("hello"), Value: []byte("working")},
 	}})
 	working := tree.Copy(0)
+	// hashed by Copy, so the two trees never both fill in a lazy hash of a shared node.
+	require.NotNil(t, working.root.(*MemNode).hash)
 	tree.ApplyChangeSet(ChangeSet{Pairs: []*KVPair{
 		{Key: []byte("hello"), Value: []byte("world3")},
 	}})

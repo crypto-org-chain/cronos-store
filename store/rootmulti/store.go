@@ -301,9 +301,10 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 }
 
 // mountCopy moves every mounted store to a copy of rs.db at once. The copy stays
-// mapped until no reader holds it, so a long CheckTx read survives later reloads.
+// mapped until no reader holds it, so a simulate or iterator held across Commit
+// survives later reloads.
 func (rs *Store) mountCopy() {
-	rs.mount.Swap(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
+	rs.mount.Store(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 }
 
 func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
@@ -391,8 +392,7 @@ func (rs *Store) WorkingHash() []byte {
 		panic(err)
 	}
 	commitInfo := rs.sdkCommitInfo(rs.db.WorkingCommitInfo())
-	// reads before Commit must see this block's writes; copied after hashing so
-	// SaveVersion only reads the shared nodes.
+	// reads before Commit must see this block's writes.
 	rs.mountCopy()
 	return commitInfo.Hash()
 }
@@ -430,7 +430,7 @@ func (rs *Store) closeDB() error {
 	}
 
 	// mounted stores read empty from here; a reader still holding a view keeps it.
-	rs.mount.Swap(nil)
+	rs.mount.Store(nil)
 	err := rs.db.Close()
 	rs.db = nil
 	return err

@@ -234,6 +234,8 @@ func (t *Tree) setInitialVersion(initialVersion uint32) {
 // until every tree sharing it is closed, so Close the copy when done.
 func (t *Tree) Copy(cacheSize int) *Tree {
 	if root, ok := t.root.(*MemNode); ok {
+		// hashed now, so the copy and the main tree never both fill in a lazy hash.
+		root.Hash()
 		// the root carries the highest node version, so uncommitted nodes are protected too.
 		t.cowVersion = max(t.cowVersion, t.version, root.version)
 	}
