@@ -42,7 +42,7 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
 	}
 	for _, f := range db.GetLiveFilesMetaData() {
-		if _, ok := oldFiles[f.Name]; ok && f.ColumnFamilyName == VersionDBCFName {
+		if _, ok := oldFiles[f.Name]; ok {
 			return 0, 0, fmt.Errorf("sst file %s was not rewritten", f.Name)
 		}
 	}
@@ -53,7 +53,7 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	return before, after, nil
 }
 
-// liveSSTFiles returns the names of the live sst files of the versiondb column family.
+// liveSSTFiles returns the versiondb column family's live sst file names.
 func liveSSTFiles(db *grocksdb.DB) map[string]struct{} {
 	files := make(map[string]struct{})
 	for _, f := range db.GetLiveFilesMetaData() {

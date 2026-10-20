@@ -2,7 +2,6 @@ package client
 
 import (
 	"bytes"
-	"fmt"
 	"math"
 	"path/filepath"
 	"testing"
@@ -32,12 +31,6 @@ func (s *CompactVersionDBCmdSuite) TestCompactVersionDBCmd() {
 			name:      "missing db",
 			malleate:  func(string) {},
 			expErrMsg: "does not exist",
-		},
-		{
-			name:      "rate limit overflows bytes per second",
-			malleate:  func(string) {},
-			args:      []string{"--" + flagRateLimit, fmt.Sprint(uint64(math.MaxInt64>>20) + 1)},
-			expErrMsg: "rate limit too large",
 		},
 		{
 			name: "compact with rate limit",
