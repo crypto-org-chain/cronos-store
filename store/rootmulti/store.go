@@ -267,6 +267,8 @@ type Store struct {
 
 	historicalDBCache *historicalDBCache
 	querySnapshot     atomic.Pointer[querySnapshot]
+	// the view the mounted iavl stores read; never the live trees flush mutates.
+	mount memiavlstore.Mount
 }
 
 func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) *Store {
@@ -286,17 +288,21 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
-// publishQuerySnapshot also repoints the mounted stores at a copy, since flush mutates the
-// live trees in place. The repoint isn't atomic across stores, so readers on other ABCI
-// connections can briefly see a mix of two versions.
+// publishQuerySnapshot also moves the mounted stores to a copy of the committed state.
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
 	// zero-copy follows rs.db: results stay mapped while the DB or a reader holds their generation; the DB drops it one reload after retiring it, or on close.
 	db := rs.db.CopyWithCacheSize(0)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
-	rs.setMountedTrees(rs.db.UnpinnedCopy(0))
+	rs.mountCopy()
 	return info
+}
+
+// mountCopy moves every mounted store to a copy of rs.db at once. The copy stays
+// mapped until no reader holds it, so a long CheckTx read survives later reloads.
+func (rs *Store) mountCopy() {
+	rs.mount.Swap(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 }
 
 func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
@@ -313,20 +319,6 @@ func (rs *Store) sdkCommitInfo(info *memiavl.CommitInfo) *types.CommitInfo {
 		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
 	}
 	return commitInfo
-}
-
-func (rs *Store) setMountedTrees(db *memiavl.DB) {
-	for key, store := range rs.stores {
-		memiavlStore, ok := store.(*memiavlstore.Store)
-		if !ok {
-			continue
-		}
-		tree := db.TreeByName(key.Name())
-		if tree == nil {
-			panic(fmt.Sprintf("no memiavl tree for mounted store: %s", key.Name()))
-		}
-		memiavlStore.SetTree(tree)
-	}
 }
 
 // replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
@@ -400,7 +392,7 @@ func (rs *Store) WorkingHash() []byte {
 	commitInfo := rs.sdkCommitInfo(rs.db.WorkingCommitInfo())
 	// reads before Commit must see this block's writes; copied after hashing so
 	// SaveVersion only reads the shared nodes.
-	rs.setMountedTrees(rs.db.UnpinnedCopy(0))
+	rs.mountCopy()
 	return commitInfo.Hash()
 }
 
@@ -436,12 +428,8 @@ func (rs *Store) closeDB() error {
 		return nil
 	}
 
-	// mounted stores read unpinned copies of rs.db, so a store read after this close would hit unmapped memory.
-	for _, store := range rs.stores {
-		if ms, ok := store.(*memiavlstore.Store); ok {
-			ms.SetTree(memiavl.New(0))
-		}
-	}
+	// mounted stores read empty from here; a reader still holding a view keeps it.
+	rs.mount.Swap(nil)
 	err := rs.db.Close()
 	rs.db = nil
 	return err
@@ -819,11 +807,10 @@ func (rs *Store) loadCommitStoreFromParams(db *memiavl.DB, key types.StoreKey, p
 	case types.StoreTypeMulti:
 		panic("recursive MultiStores not yet supported")
 	case types.StoreTypeIAVL:
-		tree := db.TreeByName(key.Name())
-		if tree == nil {
+		if db.TreeByName(key.Name()) == nil {
 			return nil, fmt.Errorf("new store is not added in upgrades: %s", key.Name())
 		}
-		return types.CommitStore(memiavlstore.New(tree, rs.logger)), nil
+		return types.CommitStore(memiavlstore.NewMounted(&rs.mount, key.Name(), rs.logger)), nil
 	case types.StoreTypeDB:
 		panic("recursive MultiStores not yet supported")
 	case types.StoreTypeTransient:

@@ -362,33 +362,6 @@ func TestCopyDuringReload(t *testing.T) {
 	require.NoError(t, <-errs)
 }
 
-func TestUnpinnedCopyTakesNoReference(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-
-	rewriteAndReload(t, db, "k1", "v")
-	snapshot := db.TreeByName(testStoreName).snapshot
-
-	cp := db.UnpinnedCopy(0)
-	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
-
-	// closing one must not release the reference it never took.
-	require.NoError(t, db.UnpinnedCopy(0).Close())
-	require.NotNil(t, snapshot.nodesMap)
-
-	// an unpinned copy stays readable through the first reload after it is taken,
-	rewriteAndReload(t, db, "k2", "v")
-	require.NotNil(t, snapshot.nodesMap)
-	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k1")))
-	// but must not keep the generation mapped past the second.
-	rewriteAndReload(t, db, "k3", "v")
-	require.Nil(t, snapshot.nodesMap)
-}
-
 func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -422,7 +395,6 @@ func TestCopyRejectsWrites(t *testing.T) {
 	}{
 		{"Copy", (*DB).Copy},
 		{"CopyWithCacheSize", func(db *DB) *DB { return db.CopyWithCacheSize(0) }},
-		{"UnpinnedCopy", func(db *DB) *DB { return db.UnpinnedCopy(0) }},
 	}
 	writes := []struct {
 		name  string

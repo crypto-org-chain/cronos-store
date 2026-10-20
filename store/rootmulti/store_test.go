@@ -747,10 +747,11 @@ func TestLiveDBLoadsWithoutNodeCache(t *testing.T) {
 	require.Equal(t, 1000, rs.opts.CacheSize)
 }
 
-func TestMountedStoreReadsEmptyAfterDBCloses(t *testing.T) {
+func TestMountedStoreHeldAcrossDBClose(t *testing.T) {
 	testCases := []struct {
-		name  string
-		close func(t *testing.T, rs *Store)
+		name     string
+		close    func(t *testing.T, rs *Store)
+		expValue []byte
 	}{
 		{name: "Close", close: func(t *testing.T, rs *Store) {
 			t.Helper()
@@ -759,21 +760,16 @@ func TestMountedStoreReadsEmptyAfterDBCloses(t *testing.T) {
 		{name: "reload", close: func(t *testing.T, rs *Store) {
 			t.Helper()
 			require.NoError(t, rs.LoadLatestVersion())
-			t.Cleanup(func() { rs.Close() })
-		}},
+		}, expValue: []byte("v")},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-			key := types.NewKVStoreKey(testStoreName)
-			rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
-			require.NoError(t, rs.LoadLatestVersion())
+			rs, key := newLoadedStore(t, memiavl.Options{})
 			rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
 			rs.Commit()
 			// back the mounted store with the mmap'd snapshot.
-			require.NoError(t, rs.db.RewriteSnapshot())
-			require.NoError(t, rs.db.Reload())
+			rewriteAndReload(t, rs)
 			rs.Commit()
 			// like baseapp's check state, a store held across the close.
 			kv := rs.GetKVStore(key)
@@ -782,9 +778,43 @@ func TestMountedStoreReadsEmptyAfterDBCloses(t *testing.T) {
 			tc.close(t, rs)
 			// a read of an unmapped page panics here instead of crashing the test binary.
 			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
-			require.Nil(t, kv.Get([]byte("k")))
+			require.Equal(t, tc.expValue, kv.Get([]byte("k")))
 		})
 	}
+}
+
+func TestMountedIteratorOutlivesTwoReloads(t *testing.T) {
+	rs, key := newLoadedStore(t, memiavl.Options{ZeroCopy: true})
+	for i := 0; i < 20; i++ {
+		rs.GetKVStore(key).Set([]byte(fmt.Sprintf("k%02d", i)), []byte(fmt.Sprintf("v%02d", i)))
+	}
+	rs.Commit()
+	// back the mounted stores with the mmap'd snapshot.
+	rewriteAndReload(t, rs)
+	rs.Commit()
+
+	// like a simulate call spanning blocks, an iterator held while the DB drops its generation.
+	it := rs.GetKVStore(key).Iterator(nil, nil)
+	defer it.Close()
+	for i := 0; i < 2; i++ {
+		rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
+		rs.Commit()
+		rewriteAndReload(t, rs)
+		rs.Commit()
+	}
+	// the mounted view the iterator holds must not be released while it is in use.
+	runtime.GC()
+	runtime.GC()
+
+	// a read of an unmapped page panics here instead of crashing the test binary.
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	n := 0
+	for ; it.Valid(); it.Next() {
+		require.Equal(t, []byte(fmt.Sprintf("k%02d", n)), it.Key())
+		require.Equal(t, []byte(fmt.Sprintf("v%02d", n)), it.Value())
+		n++
+	}
+	require.Equal(t, 20, n)
 }
 
 func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
@@ -1418,8 +1448,6 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 				maxCommits = 10000
 			)
 			done := make(chan struct{})
-			// like CheckTx under the mempool lock, readers never span a Commit.
-			var mempool sync.RWMutex
 
 			var wg sync.WaitGroup
 			wg.Add(1)
@@ -1443,10 +1471,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 							t.Error(err)
 							return
 						}
-						mempool.Lock()
-						err := store.db.Reload()
-						mempool.Unlock()
-						if err != nil {
+						if err := store.db.Reload(); err != nil {
 							t.Error(err)
 							return
 						}
@@ -1456,14 +1481,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 					store.WorkingHash()
 					// a write after WorkingHash lands in the same version as the working copy.
 					kv.Set([]byte("late"), []byte{byte(i)})
-					if tc.reloadEvery > 0 {
-						// this Commit can't reload, so readers also run through its flush of the late write.
-						store.Commit()
-					} else {
-						mempool.Lock()
-						store.Commit()
-						mempool.Unlock()
-					}
+					store.Commit()
 					if store.db.SnapshotVersion() != snapshotVersion {
 						reloads++
 					}
@@ -1472,26 +1490,20 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 
 			// baseapp's CheckTx state: branched once, read while commits flush.
 			checkState := store.CacheMultiStore()
-			checkTx := func(read func()) func() {
-				return func() {
-					mempool.RLock()
-					defer mempool.RUnlock()
-					read()
-				}
-			}
 
+			// unlike CometBFT's CheckTx, readers here may span a Commit and a reload: mounted views are pinned.
 			readers := []func(){
-				checkTx(func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) }),
-				checkTx(func() {
+				func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
+				func() {
 					// iterate, since a Get would be served from the branch's cache after the first read.
 					it := checkState.GetKVStore(key).Iterator(nil, nil)
 					for ; it.Valid(); it.Next() {
 					}
 					_ = it.Close()
-				}),
-				checkTx(func() { store.GetKVStore(key).Get([]byte("k")) }),
+				},
+				func() { store.GetKVStore(key).Get([]byte("k")) },
 				// hashes the mounted tree, which races WorkingHash if its copy is taken before hashing.
-				checkTx(func() { store.GetCommitStore(key).LastCommitID() }),
+				func() { store.GetCommitStore(key).LastCommitID() },
 				func() {
 					cms, err := store.CacheMultiStoreWithVersion(0)
 					if err != nil {

@@ -2,6 +2,7 @@ package memiavlstore
 
 import (
 	"io"
+	"runtime"
 	"sync/atomic"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
@@ -26,6 +27,10 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
+	// set for a mounted store, which reads its tree from mount's current view.
+	mount *Mount
+	name  string
+
 	// swapped by SetTree while readers on other ABCI connections use it.
 	tree   atomic.Pointer[memiavl.Tree]
 	logger log.Logger
@@ -39,8 +44,72 @@ func New(tree *memiavl.Tree, logger log.Logger) *Store {
 	return st
 }
 
+// NewMounted returns a store that reads the tree named name from mount's view.
+func NewMounted(mount *Mount, name string, logger log.Logger) *Store {
+	return &Store{mount: mount, name: name, logger: logger}
+}
+
 func (st *Store) SetTree(tree *memiavl.Tree) {
 	st.tree.Store(tree)
+}
+
+// View is one set of trees that the mounted stores read together.
+type View struct {
+	// resolved once: DB.TreeByName takes the db lock.
+	trees map[string]*memiavl.Tree
+}
+
+// NewView takes db, a copy holding its snapshots' references, and closes it once
+// the view is unreachable; readers keep the view reachable while they use its trees.
+func NewView(db *memiavl.DB, logger log.Logger) *View {
+	return newView(db, func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to release mounted view", "err", err)
+		}
+	})
+}
+
+func newView(db *memiavl.DB, release func()) *View {
+	v := &View{trees: make(map[string]*memiavl.Tree)}
+	for _, entry := range db.Trees() {
+		v.trees[entry.Name] = entry.Tree
+	}
+	runtime.AddCleanup(v, func(release func()) { release() }, release)
+	return v
+}
+
+// Mount holds the view every mounted store reads, so one Swap moves them all.
+type Mount struct {
+	view atomic.Pointer[View]
+}
+
+// Swap publishes v, nil for none; readers still using the previous view keep it.
+func (m *Mount) Swap(v *View) {
+	m.view.Store(v)
+}
+
+// emptyTree serves a mounted store with no view, or no tree in it.
+var emptyTree = memiavl.New(0)
+
+// load returns the tree to read and the view to keep reachable while reading it.
+func (st *Store) load() (*memiavl.Tree, *View) {
+	if st.mount == nil {
+		return st.tree.Load(), nil
+	}
+	v := st.mount.view.Load()
+	if v == nil {
+		return emptyTree, nil
+	}
+	if tree := v.trees[st.name]; tree != nil {
+		return tree, v
+	}
+	return emptyTree, v
+}
+
+// viewIterator keeps its view, and so the snapshot it reads, mapped while it is in use.
+type viewIterator struct {
+	types.Iterator
+	view *View
 }
 
 func (st *Store) Commit() types.CommitID {
@@ -48,7 +117,8 @@ func (st *Store) Commit() types.CommitID {
 }
 
 func (st *Store) LastCommitID() types.CommitID {
-	tree := st.tree.Load()
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
 	hash := tree.RootHash()
 	return types.CommitID{
 		Version: tree.Version(),
@@ -93,12 +163,16 @@ func (st *Store) Set(key, value []byte) {
 
 // Get Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
-	return st.tree.Load().Get(key)
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.Get(key)
 }
 
 // Has Implements types.KVStore.
 func (st *Store) Has(key []byte) bool {
-	return st.tree.Load().Has(key)
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.Has(key)
 }
 
 // Delete Implements types.KVStore.
@@ -110,11 +184,20 @@ func (st *Store) Delete(key []byte) {
 }
 
 func (st *Store) Iterator(start, end []byte) types.Iterator {
-	return st.tree.Load().Iterator(start, end, true)
+	return st.iterator(start, end, true)
 }
 
 func (st *Store) ReverseIterator(start, end []byte) types.Iterator {
-	return st.tree.Load().Iterator(start, end, false)
+	return st.iterator(start, end, false)
+}
+
+func (st *Store) iterator(start, end []byte, ascending bool) types.Iterator {
+	tree, v := st.load()
+	it := tree.Iterator(start, end, ascending)
+	if v == nil {
+		return it
+	}
+	return viewIterator{Iterator: it, view: v}
 }
 
 // SetInitialVersion sets the initial version of the IAVL tree. It is used when
@@ -136,7 +219,8 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		return nil, errors.Wrap(types.ErrTxDecode, "query cannot be zero length")
 	}
 
-	tree := st.tree.Load()
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
 	if req.Height > 0 && req.Height != tree.Version() {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidHeight, "invalid height")
 	}
@@ -167,7 +251,7 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		subspace := req.Data
 		res.Key = subspace
 
-		// the tree loaded above, so a concurrent SetTree can't change the version mid-query.
+		// the tree loaded above, so a concurrent swap can't change the version mid-query.
 		iterator := tree.Iterator(subspace, types.PrefixEndBytes(subspace), true)
 		for ; iterator.Valid(); iterator.Next() {
 			pairs.Pairs = append(pairs.Pairs, memiavl.Pair{Key: iterator.Key(), Value: iterator.Value()})
@@ -191,7 +275,9 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 }
 
 func (st *Store) WorkingHash() []byte {
-	return st.tree.Load().RootHash()
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.RootHash()
 }
 
 func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
