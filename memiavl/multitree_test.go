@@ -193,6 +193,11 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 
 	pool := pond.New(2, 10)
 	defer pool.StopAndWait()
+	// occupy both workers so no tree write can finish before the cancel, instead of racing a sleep
+	release := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		pool.Submit(func() { <-release })
+	}
 
 	snapshotDir := t.TempDir()
 
@@ -201,8 +206,8 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
 	}()
 
-	time.Sleep(5 * time.Millisecond)
 	cancel()
+	close(release)
 
 	err = <-errChan
 
