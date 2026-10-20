@@ -23,7 +23,10 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 		db.Close()
 	}()
 
-	before, _ = db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
+	before, err = liveSSTFilesSize(db, cfHandle)
+	if err != nil {
+		return 0, 0, err
+	}
 	compactOpts := grocksdb.NewCompactRangeOptions()
 	defer compactOpts.Destroy()
 	// skips the bottommost files this same compaction just wrote
@@ -38,8 +41,19 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	if bgErrors > 0 {
 		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
 	}
-	after, _ = db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
+	after, err = liveSSTFilesSize(db, cfHandle)
+	if err != nil {
+		return 0, 0, err
+	}
 	return before, after, nil
+}
+
+func liveSSTFilesSize(db *grocksdb.DB, cfHandle *grocksdb.ColumnFamilyHandle) (uint64, error) {
+	size, ok := db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
+	if !ok {
+		return 0, errors.New("failed to read rocksdb.live-sst-files-size")
+	}
+	return size, nil
 }
 
 func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {

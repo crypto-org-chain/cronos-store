@@ -18,12 +18,12 @@ func CompactVersionDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// MiB/s is converted to bytes/s, which must fit in an int64
-			if rateLimit > math.MaxInt64>>20 {
-				return fmt.Errorf("rate limit too large: %d MiB/s", rateLimit)
+			rateBytesPerSec, err := mibToBytesPerSec(rateLimit)
+			if err != nil {
+				return err
 			}
 
-			before, after, err := tsrocksdb.CompactVersionDB(args[0], int64(rateLimit)<<20)
+			before, after, err := tsrocksdb.CompactVersionDB(args[0], rateBytesPerSec)
 			if err != nil {
 				return err
 			}
@@ -33,4 +33,11 @@ func CompactVersionDBCmd() *cobra.Command {
 	}
 	cmd.Flags().Uint64(flagRateLimit, 0, "max write rate in MiB/s, 0 means unlimited")
 	return cmd
+}
+
+func mibToBytesPerSec(mib uint64) (int64, error) {
+	if mib > math.MaxInt64>>20 {
+		return 0, fmt.Errorf("rate limit too large: %d MiB/s", mib)
+	}
+	return int64(mib) << 20, nil
 }

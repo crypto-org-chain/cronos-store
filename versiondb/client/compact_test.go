@@ -81,3 +81,29 @@ func (s *CompactVersionDBCmdSuite) TestCompactVersionDBCmd() {
 		})
 	}
 }
+
+func (s *CompactVersionDBCmdSuite) TestMiBToBytesPerSec() {
+	testCases := []struct {
+		name      string
+		mib       uint64
+		expBytes  int64
+		expErrMsg string
+	}{
+		{name: "unlimited", mib: 0, expBytes: 0},
+		{name: "one MiB", mib: 1, expBytes: 1 << 20},
+		{name: "largest", mib: math.MaxInt64 >> 20, expBytes: math.MaxInt64 &^ (1<<20 - 1)},
+		{name: "overflows int64", mib: math.MaxInt64>>20 + 1, expErrMsg: "rate limit too large"},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.name, func() {
+			bytesPerSec, err := mibToBytesPerSec(tc.mib)
+			if tc.expErrMsg != "" {
+				s.Require().ErrorContains(err, tc.expErrMsg)
+				return
+			}
+			s.Require().NoError(err)
+			s.Require().Equal(tc.expBytes, bytesPerSec)
+		})
+	}
+}
