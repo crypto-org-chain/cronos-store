@@ -26,10 +26,11 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	if err != nil {
 		return 0, 0, err
 	}
+	oldFiles := liveSSTFiles(db)
 	compactOpts := grocksdb.NewCompactRangeOptions()
 	defer compactOpts.Destroy()
-	// skips the bottommost files this same compaction just wrote
-	compactOpts.SetBottommostLevelCompaction(grocksdb.KForceOptimized)
+	// not KForceOptimized: rocksdb 10.x can leave a bottommost file that sits after one the same compaction wrote
+	compactOpts.SetBottommostLevelCompaction(grocksdb.KForce)
 	db.CompactRangeCFOpt(cfHandle, grocksdb.Range{}, compactOpts)
 
 	// CompactRangeCFOpt returns no status, a failed compaction only shows up as a background error
@@ -40,11 +41,27 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	if bgErrors > 0 {
 		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
 	}
+	for name := range liveSSTFiles(db) {
+		if _, ok := oldFiles[name]; ok {
+			return 0, 0, fmt.Errorf("sst file %s was not rewritten", name)
+		}
+	}
 	after, err = liveSSTFilesSize(db, cfHandle)
 	if err != nil {
 		return 0, 0, err
 	}
 	return before, after, nil
+}
+
+// liveSSTFiles returns the names of the live sst files of the versiondb column family.
+func liveSSTFiles(db *grocksdb.DB) map[string]struct{} {
+	files := make(map[string]struct{})
+	for _, f := range db.GetLiveFilesMetaData() {
+		if f.ColumnFamilyName == VersionDBCFName {
+			files[f.Name] = struct{}{}
+		}
+	}
+	return files
 }
 
 func liveSSTFilesSize(db *grocksdb.DB, cfHandle *grocksdb.ColumnFamilyHandle) (uint64, error) {

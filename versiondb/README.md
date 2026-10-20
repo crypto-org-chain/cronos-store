@@ -95,7 +95,7 @@ Ingested sst files are LZ4 compressed. Files from `restore-versiondb` are ZSTD w
 $ cronosd changeset compact-versiondb /home/.cronosd/data/versiondb --rate-limit 100
 ```
 
-`--rate-limit` caps writes in MiB/s, `0` (default) means unlimited. It rewrites every versiondb sst file, so it can take hours on an archive node; a rerun after an interrupt starts over.
+`--rate-limit` caps writes in MiB/s, `0` (default) means unlimited. It rewrites every versiondb sst file, so it can take hours on an archive node and needs free disk space for the rewritten files while it runs; a rerun after an interrupt starts over.
 
 ### Restore IAVL Tree
 
