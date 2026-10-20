@@ -41,9 +41,9 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	if bgErrors > 0 {
 		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
 	}
-	for name := range liveSSTFiles(db) {
-		if _, ok := oldFiles[name]; ok {
-			return 0, 0, fmt.Errorf("sst file %s was not rewritten", name)
+	for _, f := range db.GetLiveFilesMetaData() {
+		if _, ok := oldFiles[f.Name]; ok && f.ColumnFamilyName == VersionDBCFName {
+			return 0, 0, fmt.Errorf("sst file %s was not rewritten", f.Name)
 		}
 	}
 	after, err = liveSSTFilesSize(db, cfHandle)
