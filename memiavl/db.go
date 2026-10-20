@@ -1129,9 +1129,9 @@ func (db *DB) FirstVersion() (int64, error) {
 // the earliest snapshot are pruned, so the snapshot version is the true
 // lower bound for queries.
 //
-// SDK callers may hit this on every height-bound query, so the earliest
-// snapshot version is cached and refreshed by pruneSnapshots instead of
-// scanning the snapshot directory. While snapshot-0 is the earliest one kept,
+// The node Status endpoint calls this per request, so the earliest snapshot
+// version is cached and refreshed by pruneSnapshots instead of scanning the
+// snapshot directory. While snapshot-0 is the earliest one kept,
 // the result is initialVersion, read under db.mtx since SetInitialVersion and
 // Reload can still change it.
 func (db *DB) EarliestVersion() (int64, error) {
@@ -1489,7 +1489,7 @@ func recoverTornGenesis(dir string, opts Options, chainId string, loadErr error)
 
 // isUncommittedGenesis reports whether snapshot-0 is the only snapshot and the WAL is empty.
 func isUncommittedGenesis(dir string) (bool, error) {
-	onlyGenesis := true
+	onlyGenesis := false
 	if err := traverseSnapshots(dir, true, func(version int64) (bool, error) {
 		onlyGenesis = version == 0
 		return !onlyGenesis, nil

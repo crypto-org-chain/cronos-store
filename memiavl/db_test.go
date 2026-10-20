@@ -713,6 +713,17 @@ func TestLoadTornSnapshotZeroMetadata(t *testing.T) {
 			refused: true,
 		},
 		{
+			name: "a db with no snapshot dir fails",
+			prepare: func(t *testing.T, dir string) {
+				t.Helper()
+				// a symlinked snapshot-0 isn't a snapshot dir to traverseSnapshots.
+				genesis := filepath.Join(dir, "genesis")
+				require.NoError(t, os.Rename(filepath.Join(dir, snapshotName(0)), genesis))
+				require.NoError(t, os.Symlink(genesis, filepath.Join(dir, snapshotName(0))))
+			},
+			refused: true,
+		},
+		{
 			name:    "a garbage metadata file fails",
 			garbage: []byte{0xff, 0xff, 0xff},
 			refused: true,
@@ -1604,8 +1615,7 @@ func TestEarliestVersionCachesGenesisMarker(t *testing.T) {
 			fallback, err := db.EarliestVersion()
 			require.NoError(t, err)
 			require.EqualValues(t, 1, fallback)
-			// The genesis-only state must still be cached: this runs on the query hot
-			// path and a miss costs a directory scan.
+			// The genesis-only state must still be cached: a miss costs a directory scan.
 			require.EqualValues(t, earliestIsGenesis, db.earliestSnapshotCache.Load())
 
 			// InitChain sets the initial version after the store is loaded; a cached
