@@ -3,13 +3,13 @@ package tsrocksdb
 import (
 	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/linxGnu/grocksdb"
 )
 
 // CompactVersionDB rewrites every sst file of the versiondb column family, bottommost level included,
-// so all of them use the current compression, e.g. LZ4 or uncompressed files become ZSTD.
-// The db must not be open in another process. rateBytesPerSec caps flush and compaction writes, 0 means unlimited.
+// with the current compression options. rateBytesPerSec caps flush and compaction writes, 0 means unlimited.
 func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, err error) {
 	if rateBytesPerSec < 0 {
 		return 0, 0, fmt.Errorf("negative rate limit: %d", rateBytesPerSec)
@@ -26,7 +26,7 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	before, _ = db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
 	compactOpts := grocksdb.NewCompactRangeOptions()
 	defer compactOpts.Destroy()
-	// skips the bottommost files this same compaction just wrote, instead of rewriting them twice
+	// skips the bottommost files this same compaction just wrote
 	compactOpts.SetBottommostLevelCompaction(grocksdb.KForceOptimized)
 	db.CompactRangeCFOpt(cfHandle, grocksdb.Range{}, compactOpts)
 
@@ -40,4 +40,15 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	}
 	after, _ = db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
 	return before, after, nil
+}
+
+func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {
+	opts := grocksdb.NewDefaultOptions()
+	// a manual compaction otherwise runs on a single thread
+	opts.SetMaxSubcompactions(uint32(runtime.NumCPU()))
+	if rateBytesPerSec > 0 {
+		// refill period and fairness are rocksdb's defaults; SetRateLimiter takes ownership of the limiter
+		opts.SetRateLimiter(grocksdb.NewGenericRateLimiter(rateBytesPerSec, 100_000, 10, grocksdb.RateLimiterModeWritesOnly, false))
+	}
+	return opts
 }

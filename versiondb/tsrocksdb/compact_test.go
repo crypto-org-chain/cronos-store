@@ -3,6 +3,7 @@ package tsrocksdb
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func (s *CompactSuite) TestCompactVersionDB() {
 		},
 		{
 			name:      "negative rate limit",
-			malleate:  s.writeHistory,
+			malleate:  func(string) {},
 			rateLimit: -1,
 			expErrMsg: "negative rate limit",
 		},
@@ -119,6 +120,23 @@ func (s *CompactSuite) TestCompactVersionDB() {
 				s.T().Cleanup(func() { store.Close() })
 			},
 			expErrMsg: "lock",
+		},
+		{
+			name: "corrupt sst",
+			malleate: func(dir string) {
+				s.writeHistory(dir)
+				files, err := filepath.Glob(filepath.Join(dir, "*.sst"))
+				s.Require().NoError(err)
+				s.Require().Len(files, 1)
+				bz, err := os.ReadFile(files[0])
+				s.Require().NoError(err)
+				// corrupts the first data block only, the footer and index stay valid so the db still opens
+				for i := 20; i < 60; i++ {
+					bz[i] ^= 0xff
+				}
+				s.Require().NoError(os.WriteFile(files[0], bz, 0o600)) //nolint:gosec // path from a test temp dir
+			},
+			expErrMsg: "background errors",
 		},
 		{
 			name: "empty db",

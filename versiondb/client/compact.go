@@ -11,7 +11,7 @@ import (
 func CompactVersionDBCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compact-versiondb versiondb-path",
-		Short: "Recompress all versiondb sst files with the current compression options, the node must be stopped",
+		Short: "Recompress all versiondb sst files with the current compression options (the node must be stopped)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rateLimit, err := cmd.Flags().GetUint64(flagRateLimit)
