@@ -78,13 +78,13 @@ func newView(db *memiavl.DB, release func()) *View {
 	return v
 }
 
-// Mount holds the view every mounted store reads, so one Store moves them all.
+// Mount holds the view every mounted store reads, so one Publish moves them all.
 type Mount struct {
 	view atomic.Pointer[View]
 }
 
-// Store publishes v, nil for none; readers still using the previous view keep it.
-func (m *Mount) Store(v *View) {
+// Publish swaps in v, nil for none; readers still using the previous view keep it.
+func (m *Mount) Publish(v *View) {
 	m.view.Store(v)
 }
 

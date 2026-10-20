@@ -1431,7 +1431,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 		reloadEvery int
 	}{
 		{name: "explicit reloads", reloadEvery: 5},
-		{name: "background reloads inside Commit", opts: memiavl.Options{SnapshotInterval: 1, CacheSize: 100}},
+		{name: "background reloads inside Commit", opts: memiavl.Options{SnapshotInterval: 1}},
 	}
 
 	for _, tc := range testCases {
@@ -1491,7 +1491,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 			// baseapp's CheckTx state: branched once, read while commits flush.
 			checkState := store.CacheMultiStore()
 
-			// unlike CometBFT's CheckTx, readers here may span a Commit and a reload: mounted views are pinned.
+			// like CheckTx with CometBFT's app mempool, which runs lock-free, readers here may span a Commit and a reload: mounted views are pinned.
 			readers := []func(){
 				func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
 				func() {

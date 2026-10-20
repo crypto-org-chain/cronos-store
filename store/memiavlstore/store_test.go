@@ -55,7 +55,7 @@ func TestMountedViewRelease(t *testing.T) {
 			cp := db.CopyWithCacheSize(0)
 			done := make(chan struct{})
 			var mount Mount
-			mount.Store(newView(cp, func() {
+			mount.Publish(newView(cp, func() {
 				close(done)
 				_ = cp.Close()
 			}))
@@ -63,7 +63,7 @@ func TestMountedViewRelease(t *testing.T) {
 			require.Equal(t, []byte("v"), st.Get([]byte("k")))
 
 			held := tc.hold(st)
-			mount.Store(nil)
+			mount.Publish(nil)
 			require.Nil(t, st.Get([]byte("k")), "a store with no view reads empty")
 			if held != nil {
 				require.False(t, released(done, 100*time.Millisecond), "a view in use must not be released")

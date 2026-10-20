@@ -304,7 +304,7 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 // mapped until no reader holds it, so an iterator held across Commit survives
 // later reloads.
 func (rs *Store) mountCopy() {
-	rs.mount.Store(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
+	rs.mount.Publish(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 }
 
 func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
@@ -430,7 +430,7 @@ func (rs *Store) closeDB() error {
 	}
 
 	// mounted stores read empty from here; a reader still holding a view keeps it.
-	rs.mount.Store(nil)
+	rs.mount.Publish(nil)
 	err := rs.db.Close()
 	rs.db = nil
 	return err
@@ -847,7 +847,7 @@ func (rs *Store) LoadVersion(ver int64) error {
 }
 
 // SetInterBlockCache is a noop: latest-height reads run uncached, which a mainnet replay
-// measured within 1% of a shared cache (docs/memiavl_cache_performance.md).
+// measured within 1% of memiavl's shared node cache (docs/memiavl_cache_performance.md).
 func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 
 // SetInitialVersion Implements interface CommitMultiStore
