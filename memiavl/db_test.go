@@ -677,7 +677,9 @@ func TestLoadRejectsTruncatedMetadata(t *testing.T) {
 	require.NoError(t, db.SetInitialVersion(100))
 	require.NoError(t, db.Close())
 
-	// A crash mid-rewrite leaves the file empty, which unmarshals cleanly with no commit info.
+	// A crash mid-rewrite can leave the file empty, which unmarshals cleanly with no commit info.
+	// Load then fails with a clear error instead of panicking; the node still can't start until
+	// snapshot-0 is written atomically.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotName(0), MetadataFileName), nil, 0o600))
 
 	_, err = Load(dir, opts, TestAppChainID)
