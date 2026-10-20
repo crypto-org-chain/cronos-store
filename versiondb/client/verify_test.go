@@ -263,18 +263,64 @@ func TestVerifyFailsOnWorkerPanic(t *testing.T) {
 	require.ErrorContains(t, cmd.Execute(), "panic in worker task")
 }
 
-func TestVerifyRejectsLoadedSnapshotPastTargetVersion(t *testing.T) {
+func TestVerifyLoadedSnapshotAgainstTargetVersion(t *testing.T) {
+	testCases := []struct {
+		name          string
+		targetVersion int64
+		expErr        string
+	}{
+		{name: "at the target", targetVersion: 100},
+		{name: "past the target", targetVersion: 50, expErr: "loaded snapshot version 100 is newer than target version 50"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			changeSetDir := t.TempDir()
+			writeStoreChangeSet(t, changeSetDir, fooStore, []int64{101})
+
+			cmd := VerifyChangeSetCmd(nil)
+			cmd.SetArgs([]string{
+				changeSetDir,
+				"--" + flagStores, bothStores,
+				"--" + flagLoadSnapshot, writeBaseSnapshot(t, 100),
+				"--" + flagTargetVersion, fmt.Sprint(tc.targetVersion),
+			})
+			err := cmd.Execute()
+			if tc.expErr != "" {
+				require.ErrorContains(t, err, tc.expErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestVerifySkipsStoreAbsentAtTargetVersion(t *testing.T) {
 	changeSetDir := t.TempDir()
-	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{101})
+	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	writeStoreChangeSet(t, changeSetDir, fooStore, []int64{1, 2, 3})
+	// bar first appears after the target, so it is not part of the state at 3.
+	writeStoreChangeSet(t, changeSetDir, barStore, []int64{10})
 
 	cmd := VerifyChangeSetCmd(nil)
 	cmd.SetArgs([]string{
 		changeSetDir,
 		"--" + flagStores, bothStores,
-		"--" + flagLoadSnapshot, writeBaseSnapshot(t, 100),
-		"--" + flagTargetVersion, "50",
+		"--" + flagTargetVersion, "3",
+		"--" + flagSaveSnapshot, snapshotDir,
+		"--" + flagSave,
 	})
-	require.ErrorContains(t, cmd.Execute(), "loaded snapshot version 100 is newer than target version 50")
+	require.NoError(t, cmd.Execute())
+
+	bz, err := os.ReadFile(filepath.Join(changeSetDir, "verified-3"))
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{fooStore: "3"}, printedVersions(t, bz))
+	require.NoDirExists(t, filepath.Join(snapshotDir, barStore))
+	mtree, err := memiavl.LoadMultiTree(snapshotDir, false, 0, "")
+	require.NoError(t, err)
+	defer mtree.Close()
+	require.Nil(t, mtree.TreeByName(barStore))
+	require.Equal(t, int64(3), mtree.Version())
 }
 
 func TestNormalizeStores(t *testing.T) {

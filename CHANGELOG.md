@@ -2,7 +2,7 @@
 
 ## UNRELEASED
 
-- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores (behavior change: loaded stores now count in the app hash; --stores rejects path names; --save-snapshot without --target-version holds every tree in memory)
+- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores (behavior change: loaded stores now count in the app hash; --stores rejects path names; a loaded snapshot newer than --target-version is rejected; --save-snapshot without --target-version writes every tree at the latest version and holds them all in memory)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load

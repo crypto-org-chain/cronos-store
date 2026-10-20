@@ -81,12 +81,12 @@ func VerifyChangeSetCmd(defaultStores []string) *cobra.Command {
 				if mtree, err = memiavl.LoadMultiTree(loadSnapshot, true, 0, chainId); err != nil {
 					return err
 				}
-				// no change set can bring a tree back down to the target.
-				if targetVersion > 0 && mtree.Version() > targetVersion {
-					return errors.Join(fmt.Errorf("loaded snapshot version %d is newer than target version %d", mtree.Version(), targetVersion), mtree.Close())
-				}
 			}
 			defer mtree.Close()
+			// no change set can bring a tree back down to the target.
+			if targetVersion > 0 && mtree.Version() > targetVersion {
+				return fmt.Errorf("loaded snapshot version %d is newer than target version %d", mtree.Version(), targetVersion)
+			}
 
 			// create fixed size task pool with big enough buffer.
 			pool := pond.New(concurrency, 0)
