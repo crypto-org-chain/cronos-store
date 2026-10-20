@@ -99,10 +99,10 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		return nil, err
 	}
 
-	// close db if we return without caching it (closed, or another goroutine won the race).
-	dbInserted := false
+	// close db unless a caller gets it (the cache closed, or another goroutine loaded it first).
+	dbHandedOff := false
 	defer func() {
-		if !dbInserted {
+		if !dbHandedOff {
 			_ = db.Close()
 		}
 	}()
@@ -116,7 +116,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 	// directory replaced mid-load: this DB may map unlinked files, so it serves only this caller.
 	if c.generation != generation {
-		dbInserted = true
+		dbHandedOff = true
 		return &historicalDBEntry{version: version, db: db, refs: 1, evicted: true}, nil
 	}
 
@@ -137,7 +137,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 	entry := &historicalDBEntry{version: version, db: db, refs: 1}
 	c.entries = append([]*historicalDBEntry{entry}, c.entries...) // prepend as MRU
-	dbInserted = true
+	dbHandedOff = true
 	return entry, nil
 }
 
@@ -167,7 +167,7 @@ func (c *historicalDBCache) close() error {
 	return c.evictAllLocked()
 }
 
-// invalidate drains the cache and makes in-flight loads discard their result,
+// invalidate drains the cache and makes in-flight loads serve their result uncached,
 // for when the directory the DBs are mapped over is being replaced.
 func (c *historicalDBCache) invalidate() error {
 	c.mu.Lock()
@@ -394,24 +394,14 @@ func (rs *Store) Commit() types.CommitID {
 	}
 
 	// the underlying memiavl tree might be reloaded, update the tree.
-	rs.repointStores()
+	for key := range rs.stores {
+		store := rs.stores[key]
+		if store.GetStoreType() == types.StoreTypeIAVL {
+			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
+		}
+	}
 
 	return rs.publishQuerySnapshot().CommitID()
-}
-
-// repointStores points the mounted stores at rs.db's trees. A store an upgrade
-// added after a rollback target has no tree there, so it gets an empty one.
-func (rs *Store) repointStores() {
-	for key, store := range rs.stores {
-		if store.GetStoreType() != types.StoreTypeIAVL {
-			continue
-		}
-		tree := rs.db.TreeByName(key.Name())
-		if tree == nil {
-			tree = memiavl.New(0)
-		}
-		store.(*memiavlstore.Store).SetTree(tree)
-	}
 }
 
 func (rs *Store) Close() error {
@@ -435,10 +425,14 @@ func (rs *Store) closeDB() error {
 // historical db so a replacement can be loaded over the same directory. They are
 // dropped even when closing fails, so a retry can proceed.
 func (rs *Store) closeDBForReload() error {
-	err := rs.closeDB()
+	err := rs.closeDBAndHistory()
 	rs.stores = nil
-	// cached historical DBs would keep serving a history the reload unlinks.
-	return stderrors.Join(err, rs.historicalDBCache.invalidate())
+	return err
+}
+
+func (rs *Store) closeDBAndHistory() error {
+	// cached historical DBs would keep serving a history a restore or rollback unlinks.
+	return stderrors.Join(rs.closeDB(), rs.historicalDBCache.invalidate())
 }
 
 // LastCommitID Implements interface Committer
@@ -686,8 +680,8 @@ func (rs *Store) LoadLatestVersionAndUpgrade(upgrades *types.StoreUpgrades) erro
 // LoadVersionAndUpgrade Implements interface CommitMultiStore
 // used by node startup with UpgradeStoreLoader
 //
-// A loaded store is closed first, since memiavl.Load needs the directory lock it
-// holds; after an error the Store is left unloaded and must be loaded again.
+// A loaded store is closed before loading, since memiavl.Load needs the directory
+// lock it holds; if loading then fails, the Store is left unloaded.
 func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgrades) error {
 	if version > math.MaxUint32 {
 		return fmt.Errorf("version overflows uint32: %d", version)
@@ -885,7 +879,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	}
 
 	// the mounted stores stay; only the db and the history it held are replaced.
-	if err := stderrors.Join(rs.closeDB(), rs.historicalDBCache.invalidate()); err != nil {
+	if err := rs.closeDBAndHistory(); err != nil {
 		return fmt.Errorf("failed to close db: %w", err)
 	}
 
@@ -896,9 +890,24 @@ func (rs *Store) RollbackToVersion(target int64) error {
 	var err error
 	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
+		// like a failed reload, don't leave stores over the closed trees.
+		rs.stores = nil
 		return err
 	}
-	rs.repointStores()
+	for key, store := range rs.stores {
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			continue
+		}
+		ms := store.(*memiavlstore.Store)
+		// writes made before the rollback belong to a discarded height.
+		ms.PopChangeSet()
+		tree := rs.db.TreeByName(key.Name())
+		if tree == nil {
+			// an upgrade after the target added this store; it has no tree there.
+			tree = memiavl.New(0)
+		}
+		ms.SetTree(tree)
+	}
 	rs.publishQuerySnapshot()
 
 	return nil

@@ -822,12 +822,14 @@ func TestTornDownStoreServesNoReads(t *testing.T) {
 		failedReload bool
 	}{
 		{"Close", (*Store).Close, false},
-		// Restore's teardown.
 		{"closeDB", (*Store).closeDB, false},
 		{"failed LoadLatestVersion", func(rs *Store) error {
 			// a mounted store with no tree and no upgrade adding it fails the reload after the old db closed.
 			rs.MountStoreWithDB(types.NewKVStoreKey("unknown"), types.StoreTypeIAVL, nil)
 			return rs.LoadLatestVersion()
+		}, true},
+		{"failed RollbackToVersion", func(rs *Store) error {
+			return rs.RollbackToVersion(5)
 		}, true},
 		{"failed Restore", func(rs *Store) error {
 			r := protoio.NewDelimitedReader(bytes.NewReader(rejected.Bytes()), 1<<20)
@@ -1414,6 +1416,8 @@ func TestRollbackToVersionKeepsMountedStores(t *testing.T) {
 		rs.GetKVStore(key).Set([]byte("k"), []byte(v))
 		rs.Commit()
 	}
+	// never committed: it belongs to the height the rollback discards.
+	rs.GetKVStore(key).Set([]byte("pending"), []byte("v"))
 
 	require.NoError(t, rs.RollbackToVersion(1))
 	require.Equal(t, []byte("v1"), rs.GetKVStore(key).Get([]byte("k")))
@@ -1423,6 +1427,11 @@ func TestRollbackToVersionKeepsMountedStores(t *testing.T) {
 	require.Equal(t, []byte("v1"), cms.GetKVStore(key).Get([]byte("k")))
 	require.NotPanics(t, func() { cms.GetKVStore(tkey) })
 	require.NoError(t, cms.(io.Closer).Close())
+
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v3"))
+	require.EqualValues(t, 2, rs.Commit().Version)
+	require.Equal(t, []byte("v3"), rs.GetKVStore(key).Get([]byte("k")))
+	require.Nil(t, rs.GetKVStore(key).Get([]byte("pending")))
 }
 
 func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
