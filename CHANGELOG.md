@@ -4,6 +4,7 @@
 
 - [#106](https://github.com/crypto-org-chain/cronos-store/pull/106) fix(memiavl): reject metadata with no commit info and cache a snapshot-0 marker instead of the initial-version fallback (a writable Load recreates snapshot-0 if its metadata was torn before any commit)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
+- [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
 - [#141](https://github.com/crypto-org-chain/cronos-store/pull/141) fix(memiavl): stop leaking a pond worker-pool goroutine on every Load
 - [#132](https://github.com/crypto-org-chain/cronos-store/pull/132) fix(memiavl): keep read-only Load from modifying the live WAL
