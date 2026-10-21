@@ -33,7 +33,7 @@ func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, 
 	compactOpts.SetBottommostLevelCompaction(grocksdb.KForce)
 	db.CompactRangeCFOpt(cfHandle, grocksdb.Range{}, compactOpts)
 
-	// CompactRangeCFOpt returns no status, a failed compaction only shows up as a background error
+	// CompactRangeCFOpt drops its status, so check background errors and surviving files instead
 	bgErrors, ok := db.GetIntProperty("rocksdb.background-errors")
 	if !ok {
 		return 0, 0, errors.New("failed to read rocksdb.background-errors")

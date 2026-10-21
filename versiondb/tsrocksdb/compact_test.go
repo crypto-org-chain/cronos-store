@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	historyKeys     = 200
+	historyKeys     = 198
 	historyVersions = 4
 )
 
@@ -71,7 +71,10 @@ func (s *CompactSuite) writeHistory(dir string) {
 	defer store.Close()
 	s.Require().NoError(store.db.IngestExternalFileCF(store.cfHandle, sstPaths, grocksdb.NewDefaultIngestExternalFileOptions()))
 	var changeSet []*types.StoreKVPair
-	for i := historyKeys / 3; i < 2*historyKeys/3; i++ {
+	for i := 0; i < historyKeys; i++ {
+		if !rewrittenLater(i) {
+			continue
+		}
 		changeSet = append(changeSet, &types.StoreKVPair{StoreKey: testStoreKey, Key: historyKey(i), Value: historyValue(i, historyVersions+1)})
 	}
 	s.Require().NoError(store.PutAtVersion(historyVersions+1, changeSet))
@@ -85,17 +88,29 @@ func (s *CompactSuite) liveSSTFiles(dir string) map[string]struct{} {
 	return liveSSTFiles(db)
 }
 
+// rewrittenLater reports whether key i is in the middle range that writeHistory writes again after ingesting.
+func rewrittenLater(i int) bool {
+	return i >= historyKeys/3 && i < 2*historyKeys/3
+}
+
 func (s *CompactSuite) requireHistory(dir string) {
 	store, err := NewStore(dir)
 	s.Require().NoError(err)
 	defer store.Close()
 
+	latest, err := store.GetLatestVersion()
+	s.Require().NoError(err)
+	s.Require().Equal(int64(historyVersions+1), latest)
 	for i := 0; i < historyKeys; i++ {
-		for version := 1; version <= historyVersions; version++ {
+		for version := 1; version <= historyVersions+1; version++ {
+			expected := historyValue(i, version)
+			if version > historyVersions && !rewrittenLater(i) {
+				expected = historyValue(i, historyVersions)
+			}
 			v := int64(version)
 			value, err := store.GetAtVersion(testStoreKey, historyKey(i), &v)
 			s.Require().NoError(err)
-			s.Require().Equal(historyValue(i, version), value, "key %d version %d", i, version)
+			s.Require().Equal(expected, value, "key %d version %d", i, version)
 		}
 	}
 }

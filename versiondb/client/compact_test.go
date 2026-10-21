@@ -33,7 +33,7 @@ func (s *CompactVersionDBCmdSuite) TestCompactVersionDBCmd() {
 			expErrMsg: "does not exist",
 		},
 		{
-			name: "compact with rate limit",
+			name: "compact with rate-limit flag",
 			malleate: func(dir string) {
 				store, err := tsrocksdb.NewStore(dir)
 				s.Require().NoError(err)
