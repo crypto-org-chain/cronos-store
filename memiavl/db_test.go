@@ -1235,11 +1235,12 @@ func TestEarliestVersion(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err)
-		// the default async writer may not have written the entry yet.
-		require.NoError(t, db.WaitAsyncCommit())
 		require.NoError(t, db.RewriteSnapshot())
 		require.NoError(t, db.Reload())
 	}
+
+	// prune truncates the WAL up to the last entry, which the async writer must have written.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
