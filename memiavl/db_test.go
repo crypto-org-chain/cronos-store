@@ -1239,10 +1239,9 @@ func TestEarliestVersion(t *testing.T) {
 		require.NoError(t, db.Reload())
 	}
 
+	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	// prune truncates the WAL up to the last entry, which the async writer must have written.
 	require.NoError(t, db.WaitAsyncCommit())
-
-	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
 	// Lock acquisition blocks until the prune goroutine releases; nothing
 	// executes inside — the synchronization IS the point.
