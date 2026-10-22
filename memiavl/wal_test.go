@@ -459,9 +459,9 @@ func TestReadOnlyLoadDropsCatchUpSegments(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
 	require.NoError(t, err)
-	// more than one 20MB WAL segment, so the catch-up loads a non-tail segment.
+	// over two 20MB WAL segments, so the catch-up loads more than one non-tail segment.
 	value := bytes.Repeat([]byte{'v'}, 1<<20)
-	const versions = 25
+	const versions = 45
 	for i := 0; i < versions; i++ {
 		require.NoError(t, db.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}))
 		_, err := db.Commit()
@@ -474,7 +474,8 @@ func TestReadOnlyLoadDropsCatchUpSegments(t *testing.T) {
 	defer func() { require.NoError(t, ro.Close()) }()
 	require.EqualValues(t, versions, ro.Version())
 	l := ro.walReader.(*readOnlyWAL)
-	require.Greater(t, len(l.segments), 1)
+	require.Greater(t, len(l.segments), 2)
+	require.Equal(t, 1, l.peak, "the forward-only catch-up keeps one segment cached")
 	require.Empty(t, l.cached)
 	require.Equal(t, readOnlyWALCachedSegments, l.size, "the DB's readers get the full cache after the catch-up")
 }

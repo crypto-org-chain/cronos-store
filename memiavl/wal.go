@@ -145,9 +145,10 @@ type readOnlyWAL struct {
 	lastIndex  uint64
 	closed     atomic.Bool
 
-	mu     sync.Mutex          // guards cached and size; never held during a file read
+	mu     sync.Mutex          // guards cached, size and peak; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
 	size   int                 // how many segments cached may hold
+	peak   int                 // most segments cached at once, kept across resets for tests
 	loads  chan struct{}       // held from a load's file read until its segment is cached
 }
 
@@ -342,6 +343,7 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 		l.cached = l.cached[:len(l.cached)-1]
 	}
 	l.cached = append(l.cached, &loadedWALSegment{seg: seg, entries: entries})
+	l.peak = max(l.peak, len(l.cached))
 	return entries, nil
 }
 
