@@ -30,8 +30,12 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 		}
 		stuck <- err
 	}()
-	// give the stuck load time to block on the pipe.
-	time.Sleep(100 * time.Millisecond)
+	// a nonblocking write open succeeds only once the load has the pipe open for reading.
+	var pipe *os.File
+	s.Require().Eventually(func() bool {
+		pipe, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		return err == nil
+	}, 10*time.Second, time.Millisecond)
 
 	other := make(chan error, 1)
 	go func() {
@@ -49,12 +53,15 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 	}
 
 	// unblock the stuck load before any assertion can end the test.
-	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
-	s.Require().NoError(err)
 	_, err = pipe.Write(content)
 	s.Require().NoError(err)
 	s.Require().NoError(pipe.Close())
-	s.Require().NoError(<-stuck)
+	select {
+	case err := <-stuck:
+		s.Require().NoError(err)
+	case <-time.After(10 * time.Second):
+		s.FailNow("the stuck load never finished")
+	}
 	if blocked {
 		otherErr = <-other
 	}

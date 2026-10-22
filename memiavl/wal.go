@@ -107,7 +107,8 @@ const (
 	walEndSuffix   = ".END"
 	// covers the writer's TruncateFront removing the tail segment between listing and reading it.
 	readOnlyWALOpenAttempts = 3
-	// caps the non-tail segments a read-only WAL keeps cached, and its loads in flight; each is about the writer's segment size (20MB by default).
+	// caps the non-tail segments a read-only WAL keeps cached, and its loads in flight;
+	// each is about the writer's segment size (20MB by default).
 	readOnlyWALCachedSegments = 4
 )
 
@@ -146,6 +147,7 @@ type readOnlyWAL struct {
 
 	mu     sync.Mutex          // guards cached; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
+	size   int                 // how many segments cached may hold
 	loads  chan struct{}       // held from a load's file read until its segment is cached
 }
 
@@ -178,6 +180,7 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 	l := &readOnlyWAL{
 		segments: segments,
 		cached:   make([]*loadedWALSegment, 0, readOnlyWALCachedSegments),
+		size:     readOnlyWALCachedSegments,
 		loads:    make(chan struct{}, readOnlyWALCachedSegments),
 	}
 	if len(segments) == 0 {
@@ -333,7 +336,7 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.cached) == readOnlyWALCachedSegments {
+	if len(l.cached) == l.size {
 		// shift in place: reslicing would keep the evicted segment reachable through the backing array.
 		copy(l.cached, l.cached[1:])
 		l.cached = l.cached[:len(l.cached)-1]
@@ -356,13 +359,13 @@ func (l *readOnlyWAL) cachedEntries(seg *walSegment) ([][]byte, bool) {
 	return nil, false
 }
 
-// dropCache releases the cached segments, which a read-only Load's catch-up would otherwise
-// keep for the DB's lifetime.
-func (l *readOnlyWAL) dropCache() {
+// resetCache empties the cache and lets it hold size segments, at most readOnlyWALCachedSegments.
+func (l *readOnlyWAL) resetCache(size int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	clear(l.cached)
 	l.cached = l.cached[:0]
+	l.size = min(size, readOnlyWALCachedSegments)
 }
 
 func (l *readOnlyWAL) Close() error {

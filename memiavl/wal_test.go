@@ -354,7 +354,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
-// writeWideWAL writes entries 1..n five to a segment, more segments than the suite's WAL has.
+// writeWideWAL writes entries 1..n, five per segment.
 func (s *ReadOnlyWALTestSuite) writeWideWAL(n uint64) string {
 	dir := s.T().TempDir()
 	writer, err := wal.Open(dir, &wal.Options{SegmentSize: 50, NoSync: true})
@@ -456,4 +456,5 @@ func TestReadOnlyLoadDropsCatchUpSegments(t *testing.T) {
 	l := ro.walReader.(*readOnlyWAL)
 	require.Greater(t, len(l.segments), 1)
 	require.Empty(t, l.cached)
+	require.Equal(t, readOnlyWALCachedSegments, l.size, "the DB's readers get the full cache after the catch-up")
 }
