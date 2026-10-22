@@ -165,7 +165,7 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
-func TestMultiTreeWriteSnapshotSkipsQueuedWritesAfterCancel(t *testing.T) {
+func TestMultiTreeWriteSnapshotCancelWithQueuedWritesLeavesNoMetadata(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
 	stores := []string{store1Name, store2Name}
