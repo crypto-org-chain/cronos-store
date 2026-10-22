@@ -93,6 +93,11 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentReadsLoadASegmentOnce() {
 	s.Require().NoError(err)
 	s.Require().NoError(pipe.Close())
 	for range readers {
-		s.Require().NoError(<-errs)
+		select {
+		case err := <-errs:
+			s.Require().NoError(err)
+		case <-time.After(10 * time.Second):
+			s.FailNow("a reader is stuck on a second load of the pipe")
+		}
 	}
 }

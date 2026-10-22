@@ -390,6 +390,7 @@ func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
 	s.Require().NoError(err)
 	_, err = l.Read(start(readOnlyWALCachedSegments))
 	s.Require().NoError(err)
+	s.Require().LessOrEqual(cap(l.cached), readOnlyWALCachedSegments, "evicted segments must not stay in the backing array")
 	_, err = l.Read(start(0))
 	s.Require().NoError(err)
 	_, err = l.Read(start(1))

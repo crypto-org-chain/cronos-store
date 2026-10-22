@@ -326,10 +326,12 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.cached = append(l.cached, &loadedWALSegment{seg: seg, entries: entries})
-	if len(l.cached) > readOnlyWALCachedSegments {
-		l.cached = l.cached[1:]
+	if len(l.cached) == readOnlyWALCachedSegments {
+		// shift in place: reslicing would keep the evicted segment reachable through the backing array.
+		copy(l.cached, l.cached[1:])
+		l.cached = l.cached[:len(l.cached)-1]
 	}
+	l.cached = append(l.cached, &loadedWALSegment{seg: seg, entries: entries})
 	return entries, nil
 }
 
@@ -339,7 +341,8 @@ func (l *readOnlyWAL) cachedEntries(seg *walSegment) [][]byte {
 	defer l.mu.Unlock()
 	for i, c := range l.cached {
 		if c.seg == seg {
-			l.cached = append(append(l.cached[:i:i], l.cached[i+1:]...), c)
+			copy(l.cached[i:], l.cached[i+1:])
+			l.cached[len(l.cached)-1] = c
 			return c.entries
 		}
 	}
