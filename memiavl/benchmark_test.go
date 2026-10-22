@@ -393,14 +393,13 @@ func BenchmarkReadOnlyWALConcurrentRead(b *testing.B) {
 	const (
 		segmentSize = 4 << 20
 		entrySize   = 8 << 10
-		perSegment  = segmentSize/entrySize + 1
 		segments    = 9
 	)
 	dir := b.TempDir()
 	writer, err := wal.Open(dir, &wal.Options{SegmentSize: segmentSize, NoSync: true})
 	require.NoError(b, err)
 	entry := make([]byte, entrySize)
-	for i := uint64(1); i <= perSegment*segments; i++ {
+	for i := uint64(1); i <= segments*(segmentSize/entrySize+1); i++ {
 		require.NoError(b, writer.Write(i, entry))
 	}
 	require.NoError(b, writer.Close())
@@ -417,8 +416,7 @@ func BenchmarkReadOnlyWALConcurrentRead(b *testing.B) {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						start := uint64(r*perSegment + 1)
-						for index := start; index < start+perSegment-1; index += 8 {
+						for index := l.segments[r].index; index < l.segments[r+1].index; index += 8 {
 							if _, err := l.Read(index); err != nil {
 								b.Error(err)
 								return
