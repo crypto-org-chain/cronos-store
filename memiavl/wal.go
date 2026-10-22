@@ -112,10 +112,10 @@ const (
 )
 
 type walReader interface {
-	// Read may return a slice of a shared buffer, which must not be modified.
-	Read(index uint64) ([]byte, error)
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
+	// Read may return a slice of a shared buffer, which must not be modified.
+	Read(index uint64) ([]byte, error)
 	Close() error
 }
 
@@ -146,6 +146,7 @@ type readOnlyWAL struct {
 
 	mu     sync.Mutex          // guards cached; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
+	loads  chan struct{}       // caps segment loads in flight, so memory doesn't grow with readers
 }
 
 type loadedWALSegment struct {
@@ -174,7 +175,11 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &readOnlyWAL{segments: segments}
+	l := &readOnlyWAL{
+		segments: segments,
+		cached:   make([]*loadedWALSegment, 0, readOnlyWALCachedSegments),
+		loads:    make(chan struct{}, readOnlyWALCachedSegments),
+	}
 	if len(segments) == 0 {
 		return l, nil
 	}
@@ -307,15 +312,17 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 	if seg.entries != nil {
 		return seg.entries, nil
 	}
-	if entries := l.cachedEntries(seg); entries != nil {
+	if entries, ok := l.cachedEntries(seg); ok {
 		return entries, nil
 	}
 	seg.load.Lock()
 	defer seg.load.Unlock()
-	if entries := l.cachedEntries(seg); entries != nil {
+	if entries, ok := l.cachedEntries(seg); ok {
 		return entries, nil
 	}
+	l.loads <- struct{}{}
 	entries, torn, err := readWALEntries(seg.path)
+	<-l.loads
 	if err != nil {
 		return nil, err
 	}
@@ -335,18 +342,18 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 	return entries, nil
 }
 
-// cachedEntries returns nil when seg isn't cached, and marks it most recently used otherwise.
-func (l *readOnlyWAL) cachedEntries(seg *walSegment) [][]byte {
+// cachedEntries marks a cached seg most recently used.
+func (l *readOnlyWAL) cachedEntries(seg *walSegment) ([][]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for i, c := range l.cached {
 		if c.seg == seg {
 			copy(l.cached[i:], l.cached[i+1:])
 			l.cached[len(l.cached)-1] = c
-			return c.entries
+			return c.entries, true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // dropCache releases the cached segments, which a read-only Load's catch-up would otherwise
@@ -354,7 +361,8 @@ func (l *readOnlyWAL) cachedEntries(seg *walSegment) [][]byte {
 func (l *readOnlyWAL) dropCache() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.cached = nil
+	clear(l.cached)
+	l.cached = l.cached[:0]
 }
 
 func (l *readOnlyWAL) Close() error {

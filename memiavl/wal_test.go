@@ -354,8 +354,8 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
-// openWideWAL writes entries 1..n five to a segment, more segments than the suite's WAL has, and opens it read-only.
-func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
+// writeWideWAL writes entries 1..n five to a segment, more segments than the suite's WAL has.
+func (s *ReadOnlyWALTestSuite) writeWideWAL(n uint64) string {
 	dir := s.T().TempDir()
 	writer, err := wal.Open(dir, &wal.Options{SegmentSize: 50, NoSync: true})
 	s.Require().NoError(err)
@@ -363,6 +363,11 @@ func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
 		s.Require().NoError(writer.Write(i, roWALEntry(i)))
 	}
 	s.Require().NoError(writer.Close())
+	return dir
+}
+
+func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
+	dir := s.writeWideWAL(n)
 	l, err := openReadOnlyWAL(dir)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(l.Close()) })
