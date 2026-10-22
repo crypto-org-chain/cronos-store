@@ -91,13 +91,7 @@ func TestReadOnlyWALTestSuite(t *testing.T) {
 }
 
 func (s *ReadOnlyWALTestSuite) SetupTest() {
-	s.dir = s.T().TempDir()
-	writer, err := wal.Open(s.dir, &wal.Options{SegmentSize: 50, NoSync: true})
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { s.Require().NoError(writer.Close()) })
-	for i := uint64(1); i <= roWALEntries; i++ {
-		s.Require().NoError(writer.Write(i, roWALEntry(i)))
-	}
+	s.dir = s.writeWAL(roWALEntries)
 }
 
 func roWALEntry(index uint64) []byte {
@@ -354,8 +348,8 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
-// writeWideWAL writes entries 1..n, five per segment.
-func (s *ReadOnlyWALTestSuite) writeWideWAL(n uint64) string {
+// writeWAL writes entries 1..n, five per segment.
+func (s *ReadOnlyWALTestSuite) writeWAL(n uint64) string {
 	dir := s.T().TempDir()
 	writer, err := wal.Open(dir, &wal.Options{SegmentSize: 50, NoSync: true})
 	s.Require().NoError(err)
@@ -366,8 +360,8 @@ func (s *ReadOnlyWALTestSuite) writeWideWAL(n uint64) string {
 	return dir
 }
 
-func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
-	dir := s.writeWideWAL(n)
+func (s *ReadOnlyWALTestSuite) openWAL(n uint64) (*readOnlyWAL, string) {
+	dir := s.writeWAL(n)
 	l, err := openReadOnlyWAL(dir)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(l.Close()) })
@@ -376,7 +370,7 @@ func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
 
 func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
 	const perSegment = 5
-	l, dir := s.openWideWAL(perSegment*(readOnlyWALCachedSegments+2) + 1)
+	l, dir := s.openWAL(perSegment*(readOnlyWALCachedSegments+2) + 1)
 	start := func(n int) uint64 { return uint64(perSegment*n + 1) }
 
 	for n := 0; n < readOnlyWALCachedSegments; n++ {
@@ -395,7 +389,7 @@ func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
 	s.Require().NoError(err)
 	_, err = l.Read(start(readOnlyWALCachedSegments))
 	s.Require().NoError(err)
-	s.Require().LessOrEqual(cap(l.cached), readOnlyWALCachedSegments, "evicted segments must not stay in the backing array")
+	s.Require().LessOrEqual(cap(l.cached), readOnlyWALCachedSegments, "the cache keeps its fixed capacity")
 	_, err = l.Read(start(0))
 	s.Require().NoError(err)
 	_, err = l.Read(start(1))
@@ -404,7 +398,7 @@ func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
 
 func (s *ReadOnlyWALTestSuite) TestResetCacheSize() {
 	const perSegment = 5
-	l, dir := s.openWideWAL(perSegment*3 + 1)
+	l, dir := s.openWAL(perSegment*3 + 1)
 
 	// a read-only Load's catch-up runs with a one-segment cache.
 	l.resetCache(1)
@@ -425,7 +419,7 @@ func (s *ReadOnlyWALTestSuite) TestResetCacheSize() {
 func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 	// more segments than the cache holds, so readers evict each other's segments.
 	const entries = 63
-	l, _ := s.openWideWAL(entries)
+	l, _ := s.openWAL(entries)
 
 	const readers = 8
 	var wg sync.WaitGroup
@@ -455,7 +449,8 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 	}
 }
 
-func TestReadOnlyLoadDropsCatchUpSegments(t *testing.T) {
+func (s *ReadOnlyWALTestSuite) TestReadOnlyLoadDropsCatchUpSegments() {
+	t := s.T()
 	dir := t.TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
 	require.NoError(t, err)

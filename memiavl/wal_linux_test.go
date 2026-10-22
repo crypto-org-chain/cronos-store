@@ -126,7 +126,7 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentReadsLoadASegmentOnce() {
 func (s *ReadOnlyWALTestSuite) TestSegmentLoadsInFlightAreCapped() {
 	const perSegment = 5
 	const segments = readOnlyWALCachedSegments + 1
-	dir := s.writeWideWAL(perSegment*segments + 1)
+	dir := s.writeWAL(perSegment*segments + 1)
 	paths := make([]string, segments)
 	contents := make([][]byte, segments)
 	for n := range segments {
@@ -193,4 +193,40 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadsInFlightAreCapped() {
 			s.FailNow("a load is stuck")
 		}
 	}
+}
+
+func (s *ReadOnlyWALTestSuite) TestLoadHoldsItsSlotUntilCached() {
+	path := s.segmentPath(6, "")
+	content, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Require().NoError(os.Remove(path))
+	s.Require().NoError(syscall.Mkfifo(path, 0o600))
+
+	l, err := openReadOnlyWAL(s.dir)
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(l.Close()) }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.Read(6)
+		done <- err
+	}()
+	pipe := s.openPipeWriter(path)
+	// holding the cache lock stops the finished load just before it caches the segment.
+	l.mu.Lock()
+	_, err = pipe.Write(content)
+	s.Require().NoError(err)
+	s.Require().NoError(pipe.Close())
+	time.Sleep(100 * time.Millisecond)
+	held := len(l.loads)
+	l.mu.Unlock()
+
+	select {
+	case err := <-done:
+		s.Require().NoError(err)
+	case <-time.After(10 * time.Second):
+		s.FailNow("the load never finished")
+	}
+	s.Require().Equal(1, held, "a load keeps its slot until its segment is cached")
+	s.Require().Empty(l.loads)
 }
