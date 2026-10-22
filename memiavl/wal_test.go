@@ -167,7 +167,7 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 			malleate: func() { s.dir = filepath.Join(s.dir, "missing") },
 		},
 		{
-			name:     "live log",
+			name:     "complete log",
 			malleate: func() {},
 			expFirst: 1,
 			expLast:  roWALEntries,
@@ -450,27 +450,26 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 }
 
 func (s *ReadOnlyWALTestSuite) TestReadOnlyLoadDropsCatchUpSegments() {
-	t := s.T()
-	dir := t.TempDir()
+	dir := s.T().TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
-	require.NoError(t, err)
+	s.Require().NoError(err)
 	// over two 20MB WAL segments, so the catch-up loads more than one non-tail segment.
 	value := bytes.Repeat([]byte{'v'}, 1<<20)
 	const versions = 45
 	for i := 0; i < versions; i++ {
-		require.NoError(t, db.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}))
+		s.Require().NoError(db.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}))
 		_, err := db.Commit()
-		require.NoError(t, err)
+		s.Require().NoError(err)
 	}
-	require.NoError(t, db.Close())
+	s.Require().NoError(db.Close())
 
 	ro, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ro.Close()) }()
-	require.EqualValues(t, versions, ro.Version())
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(ro.Close()) }()
+	s.Require().EqualValues(versions, ro.Version())
 	l := ro.walReader.(*readOnlyWAL)
-	require.Greater(t, len(l.segments), 2)
-	require.Equal(t, 1, l.peak, "the forward-only catch-up keeps one segment cached")
-	require.Empty(t, l.cached)
-	require.Equal(t, readOnlyWALCachedSegments, l.size, "the DB's readers get the full cache after the catch-up")
+	s.Require().Greater(len(l.segments), 2)
+	s.Require().Equal(1, l.peak, "the forward-only catch-up keeps one segment cached")
+	s.Require().Empty(l.cached)
+	s.Require().Equal(readOnlyWALCachedSegments, l.size, "the DB's readers get the full cache after the catch-up")
 }

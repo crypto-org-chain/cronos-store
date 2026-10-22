@@ -77,7 +77,11 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 		s.FailNow("the stuck load never finished")
 	}
 	if blocked {
-		otherErr = <-other
+		select {
+		case otherErr = <-other:
+		case <-time.After(10 * time.Second):
+			s.FailNow("the read of another segment never finished")
+		}
 	}
 	s.Require().NoError(otherErr)
 	s.Require().False(blocked, "a read of another segment waited on a segment load")
