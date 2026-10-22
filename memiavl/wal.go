@@ -107,7 +107,7 @@ const (
 	walEndSuffix   = ".END"
 	// covers the writer's TruncateFront removing the tail segment between listing and reading it.
 	readOnlyWALOpenAttempts = 3
-	// caps the non-tail segments a read-only WAL keeps loaded, each about the writer's segment size (20MB by default).
+	// caps the non-tail segments a read-only WAL keeps cached, and its loads in flight; each is about the writer's segment size (20MB by default).
 	readOnlyWALCachedSegments = 4
 )
 
@@ -146,7 +146,7 @@ type readOnlyWAL struct {
 
 	mu     sync.Mutex          // guards cached; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
-	loads  chan struct{}       // caps segment loads in flight, so memory doesn't grow with readers
+	loads  chan struct{}       // held from a load's file read until its segment is cached
 }
 
 type loadedWALSegment struct {
@@ -321,8 +321,8 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 		return entries, nil
 	}
 	l.loads <- struct{}{}
+	defer func() { <-l.loads }()
 	entries, torn, err := readWALEntries(seg.path)
-	<-l.loads
 	if err != nil {
 		return nil, err
 	}

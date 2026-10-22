@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 package memiavl
 
@@ -63,7 +63,7 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 }
 
 func (s *ReadOnlyWALTestSuite) TestConcurrentReadsLoadASegmentOnce() {
-	// a second open of the pipe would split its one write between two loads.
+	// a second load of the pipe would get no data, failing or blocking that reader.
 	path := s.segmentPath(6, "")
 	content, err := os.ReadFile(path)
 	s.Require().NoError(err)
