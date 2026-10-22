@@ -10,13 +10,21 @@ import (
 	"time"
 )
 
+// tryOpenPipeWriter returns nil until a load has the pipe open for reading.
+func tryOpenPipeWriter(path string) *os.File {
+	pipe, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	return pipe
+}
+
 // openPipeWriter waits for a load to open the pipe for reading, failing instead of hanging if none does.
 func (s *ReadOnlyWALTestSuite) openPipeWriter(path string) *os.File {
 	var pipe *os.File
 	s.Require().Eventually(func() bool {
-		var err error
-		pipe, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-		return err == nil
+		pipe = tryOpenPipeWriter(path)
+		return pipe != nil
 	}, 10*time.Second, time.Millisecond, "no load opened %s", path)
 	return pipe
 }
@@ -141,13 +149,12 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadsInFlightAreCapped() {
 		}()
 	}
 
-	// a nonblocking write open succeeds only once a load has the pipe open for reading.
 	writers := make([]*os.File, segments)
 	opened := func() int {
 		count := 0
 		for n, path := range paths {
 			if writers[n] == nil {
-				writers[n], _ = os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+				writers[n] = tryOpenPipeWriter(path)
 			}
 			if writers[n] != nil {
 				count++
