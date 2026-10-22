@@ -402,6 +402,26 @@ func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
 	s.Require().ErrorIs(err, fs.ErrNotExist)
 }
 
+func (s *ReadOnlyWALTestSuite) TestResetCacheSize() {
+	const perSegment = 5
+	l, dir := s.openWideWAL(perSegment*3 + 1)
+
+	// a read-only Load's catch-up runs with a one-segment cache.
+	l.resetCache(1)
+	_, err := l.Read(1)
+	s.Require().NoError(err)
+	s.Require().NoError(os.Remove(filepath.Join(dir, fmt.Sprintf("%020d", 1))))
+	_, err = l.Read(perSegment + 1)
+	s.Require().NoError(err)
+	s.Require().Len(l.cached, 1)
+	_, err = l.Read(2)
+	s.Require().ErrorIs(err, fs.ErrNotExist, "the second segment evicts the first")
+
+	l.resetCache(readOnlyWALCachedSegments)
+	s.Require().Empty(l.cached)
+	s.Require().Equal(readOnlyWALCachedSegments, l.size)
+}
+
 func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 	// more segments than the cache holds, so readers evict each other's segments.
 	const entries = 63

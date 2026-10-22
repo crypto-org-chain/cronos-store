@@ -145,7 +145,7 @@ type readOnlyWAL struct {
 	lastIndex  uint64
 	closed     atomic.Bool
 
-	mu     sync.Mutex          // guards cached; never held during a file read
+	mu     sync.Mutex          // guards cached and size; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
 	size   int                 // how many segments cached may hold
 	loads  chan struct{}       // held from a load's file read until its segment is cached
@@ -349,8 +349,9 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 func (l *readOnlyWAL) cachedEntries(seg *walSegment) ([][]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for i, c := range l.cached {
-		if c.seg == seg {
+	// from the most recently used end, where repeated reads of one segment hit.
+	for i := len(l.cached) - 1; i >= 0; i-- {
+		if c := l.cached[i]; c.seg == seg {
 			copy(l.cached[i:], l.cached[i+1:])
 			l.cached[len(l.cached)-1] = c
 			return c.entries, true
@@ -359,13 +360,13 @@ func (l *readOnlyWAL) cachedEntries(seg *walSegment) ([][]byte, bool) {
 	return nil, false
 }
 
-// resetCache empties the cache and lets it hold size segments, at most readOnlyWALCachedSegments.
+// resetCache empties the cache and lets it hold size segments, between 1 and readOnlyWALCachedSegments.
 func (l *readOnlyWAL) resetCache(size int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	clear(l.cached)
 	l.cached = l.cached[:0]
-	l.size = min(size, readOnlyWALCachedSegments)
+	l.size = max(1, min(size, readOnlyWALCachedSegments))
 }
 
 func (l *readOnlyWAL) Close() error {
