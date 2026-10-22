@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+// openPipeWriter waits for a load to open the pipe for reading, failing instead of hanging if none does.
+func (s *ReadOnlyWALTestSuite) openPipeWriter(path string) *os.File {
+	var pipe *os.File
+	s.Require().Eventually(func() bool {
+		var err error
+		pipe, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		return err == nil
+	}, 10*time.Second, time.Millisecond, "no load opened %s", path)
+	return pipe
+}
+
 func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 	// a named pipe holds the segment's load in os.ReadFile until the test writes it.
 	path := s.segmentPath(6, "")
@@ -30,12 +41,7 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 		}
 		stuck <- err
 	}()
-	// a nonblocking write open succeeds only once the load has the pipe open for reading.
-	var pipe *os.File
-	s.Require().Eventually(func() bool {
-		pipe, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-		return err == nil
-	}, 10*time.Second, time.Millisecond)
+	pipe := s.openPipeWriter(path)
 
 	other := make(chan error, 1)
 	go func() {
@@ -95,8 +101,7 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentReadsLoadASegmentOnce() {
 	// give both readers time to reach the load.
 	time.Sleep(100 * time.Millisecond)
 
-	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
-	s.Require().NoError(err)
+	pipe := s.openPipeWriter(path)
 	_, err = pipe.Write(content)
 	s.Require().NoError(err)
 	s.Require().NoError(pipe.Close())
@@ -168,9 +173,8 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadsInFlightAreCapped() {
 		if path == "" {
 			continue
 		}
-		w, err := os.OpenFile(path, os.O_WRONLY, 0)
-		s.Require().NoError(err)
-		_, err = w.Write(contents[n])
+		w := s.openPipeWriter(path)
+		_, err := w.Write(contents[n])
 		s.Require().NoError(err)
 		s.Require().NoError(w.Close())
 	}

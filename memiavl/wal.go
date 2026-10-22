@@ -148,7 +148,7 @@ type readOnlyWAL struct {
 	mu     sync.Mutex          // guards cached, size and peak; never held during a file read
 	cached []*loadedWALSegment // non-tail segments, least recently used first
 	size   int                 // how many segments cached may hold
-	peak   int                 // most segments cached at once, kept across resets for tests
+	peak   int                 // most segments cached at once
 	loads  chan struct{}       // held from a load's file read until its segment is cached
 }
 
