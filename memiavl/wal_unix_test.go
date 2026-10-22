@@ -3,6 +3,7 @@
 package memiavl
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 	"time"
@@ -58,4 +59,40 @@ func (s *ReadOnlyWALTestSuite) TestSegmentLoadDoesNotBlockOtherReads() {
 	}
 	s.Require().NoError(otherErr)
 	s.Require().False(blocked, "a read of another segment waited on a segment load")
+}
+
+func (s *ReadOnlyWALTestSuite) TestConcurrentReadsLoadASegmentOnce() {
+	// a second open of the pipe would split its one write between two loads.
+	path := s.segmentPath(6, "")
+	content, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Require().NoError(os.Remove(path))
+	s.Require().NoError(syscall.Mkfifo(path, 0o600))
+
+	l, err := openReadOnlyWAL(s.dir)
+	s.Require().NoError(err)
+	defer func() { s.Require().NoError(l.Close()) }()
+
+	const readers = 2
+	errs := make(chan error, readers)
+	for range readers {
+		go func() {
+			data, err := l.Read(7)
+			if err == nil && string(data) != string(roWALEntry(7)) {
+				err = fmt.Errorf("got %q", data)
+			}
+			errs <- err
+		}()
+	}
+	// give both readers time to reach the load.
+	time.Sleep(100 * time.Millisecond)
+
+	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
+	s.Require().NoError(err)
+	_, err = pipe.Write(content)
+	s.Require().NoError(err)
+	s.Require().NoError(pipe.Close())
+	for range readers {
+		s.Require().NoError(<-errs)
+	}
 }

@@ -499,9 +499,8 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	}
 	startIndex := walIndex(startVersion, initialVersion)
 	endIndex := walIndex(endVersion, initialVersion)
-	scan := newWALScan(walLog)
 	for idx := startIndex; idx <= endIndex; idx++ {
-		data, err := scan.Read(idx)
+		data, err := walLog.Read(idx)
 		if err != nil {
 			return err
 		}

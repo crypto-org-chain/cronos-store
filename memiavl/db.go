@@ -230,9 +230,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
+	var readOnly *readOnlyWAL
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		var readOnly *readOnlyWAL
 		if readOnly, err = openReadOnlyWAL(walPath(dir)); err == nil {
 			reader = readOnly
 		}
@@ -268,6 +268,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
+	}
+	if readOnly != nil {
+		readOnly.dropCache()
 	}
 
 	if rollback {
@@ -1161,13 +1164,12 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		}
 	}
 
-	scan := newWALScan(walLog)
 	for idx := firstIndex; idx <= lastIndex; idx++ {
 		if len(result) == len(targets) {
 			break
 		}
 
-		data, err := scan.Read(idx)
+		data, err := walLog.Read(idx)
 		if err != nil {
 			return nil, err
 		}

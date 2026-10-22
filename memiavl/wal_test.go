@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -353,32 +354,52 @@ func (s *ReadOnlyWALTestSuite) TestOpenReadOnlyWAL() {
 	}
 }
 
-func (s *ReadOnlyWALTestSuite) TestScanKeepsItsSegment() {
-	l, err := openReadOnlyWAL(s.dir)
+// openWideWAL writes entries 1..n five to a segment, more segments than the suite's WAL has, and opens it read-only.
+func (s *ReadOnlyWALTestSuite) openWideWAL(n uint64) (*readOnlyWAL, string) {
+	dir := s.T().TempDir()
+	writer, err := wal.Open(dir, &wal.Options{SegmentSize: 50, NoSync: true})
 	s.Require().NoError(err)
-	defer func() { s.Require().NoError(l.Close()) }()
+	for i := uint64(1); i <= n; i++ {
+		s.Require().NoError(writer.Write(i, roWALEntry(i)))
+	}
+	s.Require().NoError(writer.Close())
+	l, err := openReadOnlyWAL(dir)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(l.Close()) })
+	return l, dir
+}
 
-	scan := newWALScan(l)
-	_, err = scan.Read(1)
-	s.Require().NoError(err)
-	s.removeSegments(1)
-	_, err = l.Read(2)
-	s.Require().NoError(err, "the segment loaded last serves the next read in it")
+func (s *ReadOnlyWALTestSuite) TestSegmentCache() {
+	const perSegment = 5
+	l, dir := s.openWideWAL(perSegment*(readOnlyWALCachedSegments+2) + 1)
+	start := func(n int) uint64 { return uint64(perSegment*n + 1) }
 
-	// another reader's load replaces that segment, but the scan keeps its own.
-	_, err = l.Read(6)
+	for n := 0; n < readOnlyWALCachedSegments; n++ {
+		_, err := l.Read(start(n))
+		s.Require().NoError(err)
+		s.Require().NoError(os.Remove(filepath.Join(dir, fmt.Sprintf("%020d", start(n)))))
+	}
+	for n := 0; n < readOnlyWALCachedSegments; n++ {
+		data, err := l.Read(start(n) + 1)
+		s.Require().NoError(err, "a cached segment is served without its file")
+		s.Require().Equal(roWALEntry(start(n)+1), data)
+	}
+
+	// segment 0 is now the most recently used, so loading one more evicts segment 1.
+	_, err := l.Read(start(0))
 	s.Require().NoError(err)
-	_, err = l.Read(2)
+	_, err = l.Read(start(readOnlyWALCachedSegments))
+	s.Require().NoError(err)
+	_, err = l.Read(start(0))
+	s.Require().NoError(err)
+	_, err = l.Read(start(1))
 	s.Require().ErrorIs(err, fs.ErrNotExist)
-	data, err := scan.Read(3)
-	s.Require().NoError(err, "a scan keeps the segment it is reading")
-	s.Require().Equal(roWALEntry(3), data)
 }
 
 func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
-	l, err := openReadOnlyWAL(s.dir)
-	s.Require().NoError(err)
-	defer func() { s.Require().NoError(l.Close()) }()
+	// more segments than the cache holds, so readers evict each other's segments.
+	const entries = 63
+	l, _ := s.openWideWAL(entries)
 
 	const readers = 8
 	var wg sync.WaitGroup
@@ -387,11 +408,9 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// different strides make each reader's scan switch segments at different times.
-			scan := newWALScan(l)
-			for n := uint64(0); n < roWALEntries*10; n++ {
-				i := n*g%roWALEntries + 1
-				data, err := scan.Read(i)
+			for n := uint64(0); n < entries*10; n++ {
+				i := n*g%entries + 1
+				data, err := l.Read(i)
 				if err != nil {
 					errs <- fmt.Errorf("index %d: %w", i, err)
 					return
@@ -408,4 +427,27 @@ func (s *ReadOnlyWALTestSuite) TestConcurrentRead() {
 	for err := range errs {
 		s.Require().NoError(err)
 	}
+}
+
+func TestReadOnlyLoadDropsCatchUpSegments(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	require.NoError(t, err)
+	// more than one 20MB WAL segment, so the catch-up loads a non-tail segment.
+	value := bytes.Repeat([]byte{'v'}, 1<<20)
+	const versions = 25
+	for i := 0; i < versions; i++ {
+		require.NoError(t, db.ApplyChangeSet(testStoreName, ChangeSet{Pairs: []*KVPair{{Key: []byte("k"), Value: value}}}))
+		_, err := db.Commit()
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+
+	ro, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, ro.Close()) }()
+	require.EqualValues(t, versions, ro.Version())
+	l := ro.walReader.(*readOnlyWAL)
+	require.Greater(t, len(l.segments), 1)
+	require.Empty(t, l.cached)
 }

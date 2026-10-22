@@ -395,9 +395,8 @@ func (t *MultiTree) catchupWAL(reader walReader, endVersion int64) error {
 		endIndex = lastIndex
 	}
 
-	scan := newWALScan(reader)
 	for i := firstIndex; i <= endIndex; i++ {
-		bz, err := scan.Read(i)
+		bz, err := reader.Read(i)
 		if err != nil {
 			return fmt.Errorf("read wal log failed, %w", err)
 		}

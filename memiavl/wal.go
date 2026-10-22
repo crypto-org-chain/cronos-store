@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -106,14 +107,13 @@ const (
 	walEndSuffix   = ".END"
 	// covers the writer's TruncateFront removing the tail segment between listing and reading it.
 	readOnlyWALOpenAttempts = 3
+	// caps the non-tail segments a read-only WAL keeps loaded, each about the writer's segment size (20MB by default).
+	readOnlyWALCachedSegments = 4
 )
 
-type walIndexReader interface {
-	Read(index uint64) ([]byte, error)
-}
-
 type walReader interface {
-	walIndexReader
+	// Read may return a slice of a shared buffer, which must not be modified.
+	Read(index uint64) ([]byte, error)
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
 	Close() error
@@ -144,8 +144,8 @@ type readOnlyWAL struct {
 	lastIndex  uint64
 	closed     atomic.Bool
 
-	// the non-tail segment loaded last, for the next read that starts in it.
-	recent atomic.Pointer[loadedWALSegment]
+	mu     sync.Mutex          // guards cached; never held during a file read
+	cached []*loadedWALSegment // non-tail segments, least recently used first
 }
 
 type loadedWALSegment struct {
@@ -156,7 +156,8 @@ type loadedWALSegment struct {
 type walSegment struct {
 	index   uint64 // index of the first entry
 	path    string
-	entries [][]byte // loaded at open for the tail only
+	entries [][]byte   // loaded at open for the tail only
+	load    sync.Mutex // readers of a segment being loaded wait for that one load
 }
 
 func openReadOnlyWAL(dir string) (l *readOnlyWAL, err error) {
@@ -284,25 +285,6 @@ func (l *readOnlyWAL) LastIndex() (uint64, error) {
 }
 
 func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
-	return (&readOnlyWALScan{log: l}).Read(index)
-}
-
-// newWALScan returns a reader for one goroutine; on a read-only WAL it keeps the segment it
-// last read and returns slices of that segment's buffer, which must not be modified.
-func newWALScan(log walReader) walIndexReader {
-	if l, ok := log.(*readOnlyWAL); ok {
-		return &readOnlyWALScan{log: l}
-	}
-	return log
-}
-
-type readOnlyWALScan struct {
-	log *readOnlyWAL
-	cur loadedWALSegment
-}
-
-func (s *readOnlyWALScan) Read(index uint64) ([]byte, error) {
-	l := s.log
 	if l.closed.Load() {
 		return nil, wal.ErrClosed
 	}
@@ -310,26 +292,28 @@ func (s *readOnlyWALScan) Read(index uint64) ([]byte, error) {
 		return nil, wal.ErrNotFound
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
-	if seg != s.cur.seg {
-		entries, err := l.segmentEntries(seg)
-		if err != nil {
-			return nil, err
-		}
-		s.cur = loadedWALSegment{seg: seg, entries: entries}
+	entries, err := l.segmentEntries(seg)
+	if err != nil {
+		return nil, err
 	}
 	offset := index - seg.index
-	if offset >= uint64(len(s.cur.entries)) {
+	if offset >= uint64(len(entries)) {
 		return nil, wal.ErrCorrupt
 	}
-	return s.cur.entries[offset], nil
+	return entries[offset], nil
 }
 
 func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 	if seg.entries != nil {
 		return seg.entries, nil
 	}
-	if recent := l.recent.Load(); recent != nil && recent.seg == seg {
-		return recent.entries, nil
+	if entries := l.cachedEntries(seg); entries != nil {
+		return entries, nil
+	}
+	seg.load.Lock()
+	defer seg.load.Unlock()
+	if entries := l.cachedEntries(seg); entries != nil {
+		return entries, nil
 	}
 	entries, torn, err := readWALEntries(seg.path)
 	if err != nil {
@@ -339,8 +323,35 @@ func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
 		// only the tail can hold an entry the writer is still appending.
 		return nil, wal.ErrCorrupt
 	}
-	l.recent.Store(&loadedWALSegment{seg: seg, entries: entries})
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cached = append(l.cached, &loadedWALSegment{seg: seg, entries: entries})
+	if len(l.cached) > readOnlyWALCachedSegments {
+		l.cached = l.cached[1:]
+	}
 	return entries, nil
+}
+
+// cachedEntries returns nil when seg isn't cached, and marks it most recently used otherwise.
+func (l *readOnlyWAL) cachedEntries(seg *walSegment) [][]byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, c := range l.cached {
+		if c.seg == seg {
+			l.cached = append(append(l.cached[:i:i], l.cached[i+1:]...), c)
+			return c.entries
+		}
+	}
+	return nil
+}
+
+// dropCache releases the cached segments, which a read-only Load's catch-up would otherwise
+// keep for the DB's lifetime.
+func (l *readOnlyWAL) dropCache() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cached = nil
 }
 
 func (l *readOnlyWAL) Close() error {
