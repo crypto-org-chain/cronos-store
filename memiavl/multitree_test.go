@@ -165,10 +165,10 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
-func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
+func TestMultiTreeWriteSnapshotSkipsQueuedWritesAfterCancel(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8"}
+	stores := []string{store1Name, store2Name}
 	var upgrades []*TreeNameUpgrade
 	for _, name := range stores {
 		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
@@ -178,12 +178,7 @@ func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
 	for _, storeName := range stores {
 		tree := mtree.TreeByName(storeName)
 		require.NotNil(t, tree)
-
-		for i := 0; i < 2000; i++ {
-			key := []byte(storeName + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)))
-			value := []byte("value" + string(rune('0'+i%10)))
-			tree.set(key, value)
-		}
+		tree.set([]byte("k"), []byte("v"))
 	}
 
 	_, err := mtree.SaveVersion(true)

@@ -1392,6 +1392,8 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
+	// the default async writer may not have written the entry FirstVersion reads below.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
@@ -1434,9 +1436,11 @@ func TestGetLatestVersionClosesWAL(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	fdsBefore := countOpenFDsUnder(t, dir)
-	version, err := GetLatestVersion(dir)
-	require.NoError(t, err)
-	require.EqualValues(t, 3, version)
+	for range 10 {
+		version, err := GetLatestVersion(dir)
+		require.NoError(t, err)
+		require.EqualValues(t, 3, version)
+	}
 	require.Equal(t, fdsBefore, countOpenFDsUnder(t, dir), "no file under dir may stay open")
 }
 
