@@ -1194,6 +1194,11 @@ func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 // waitForWALVersion gives up on a writer error or after timeout, since a failed
 // WAL write leaves lastCommitInfo ahead of the WAL for good.
 func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64, timeout time.Duration, checkWriter func() error) error {
+	// checked before every wal read, so a writer error fails the wait even when the wal
+	// looks caught up, and is reported rather than a timeout.
+	if err := checkWriter(); err != nil {
+		return err
+	}
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1208,14 +1213,13 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 		if lastIndex >= targetIndex {
 			return nil
 		}
-		// before the deadline check, so a dead writer reports its error rather than a timeout.
-		if err := checkWriter(); err != nil {
-			return err
-		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to version %d, last wal index: %d", targetVersion, lastIndex)
 		}
 		time.Sleep(walPollInterval)
+		if err := checkWriter(); err != nil {
+			return err
+		}
 	}
 }
 

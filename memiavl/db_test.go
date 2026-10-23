@@ -1763,6 +1763,14 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			},
 		},
 		{
+			name:     "latched writer error fails even when the wal is caught up",
+			malleate: func(_ *testing.T, db *DB) { db.walErr = errors.New("simulated latched wal error") },
+			wait: func(db *DB) error {
+				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
+			},
+			expErr: "simulated latched wal error",
+		},
+		{
 			name:     "wal catching up mid-wait succeeds",
 			malleate: delayAsyncWrite,
 			wait: func(db *DB) error {
