@@ -790,6 +790,8 @@ func TestCheckBackgroundSnapshotRewriteClosesMTreeOnCatchupFailure(t *testing.T)
 	_, err = db.Commit()
 	require.NoError(t, err)
 	require.NoError(t, db.RewriteSnapshot())
+	// the async writer must land its entry first, or the corrupt one takes its index.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptVersion := corruptTrailingWALEntry(t, db)
 	// the corrupt entry bypassed Commit, so nudge lastCommitInfo to match the wal's
@@ -822,6 +824,8 @@ func TestRewriteSnapshotBackgroundClosesMTreeOnCatchupFailure(t *testing.T) {
 	}))
 	_, err = db.Commit()
 	require.NoError(t, err)
+	// the async writer must land its entry first, or the corrupt one takes its index.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	corruptTrailingWALEntry(t, db)
 
