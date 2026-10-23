@@ -1520,6 +1520,10 @@ func (w advancingWAL) LastIndex() (uint64, error) {
 	return 1 + uint64(time.Since(w.start)/w.step), nil
 }
 
+type emptyWAL struct{ walReader }
+
+func (emptyWAL) LastIndex() (uint64, error) { return 0, nil }
+
 func lockAndWaitCommittedVersion(db *DB, version int64) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -1752,6 +1756,13 @@ func (s *WALWaitTestSuite) TestWait() {
 			name:           "range below initialVersion is empty without waiting",
 			initialVersion: 100,
 			wait:           traverseExpect(1, 5, []int64{}),
+		},
+		{
+			// the default catch-up timeout exceeds the test's cap, so only the guard returns in time.
+			name: "target below initialVersion on an empty wal doesn't wait",
+			wait: func(db *DB) error {
+				return db.waitForWAL(walTarget{log: emptyWAL{db.walReader}, initialVersion: 100, version: 5}, walReadPollInterval)
+			},
 		},
 		{
 			// end is past the wal too, so only the reversed-range check avoids the full timeout.

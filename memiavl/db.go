@@ -1138,7 +1138,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		return result, nil
 	}
 
-	walLog, initialVersion, err := db.waitWALForRead(0)
+	walLog, initialVersion, err := db.waitWALForRead(0, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,16 +1190,14 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// skipWALWait tells waitWALForRead there's nothing to wait for.
-const skipWALWait = -1
-
-// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
-func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower,
+// unless wait is false.
+func (db *DB) waitWALForRead(upTo int64, wait bool) (walReader, uint32, error) {
 	db.mtx.Lock()
 	version := db.lastCommitInfo.Version
 	switch {
 	// a read-only wal never advances, so waiting can only time out.
-	case upTo == skipWALWait || db.walWriter == nil:
+	case !wait || db.readOnly:
 		version = 0
 	case upTo > 0 && upTo < version:
 		version = upTo
@@ -1240,7 +1238,8 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 }
 
 // a latched wal error wins, even when the wal looks caught up; the timeout restarts whenever the
-// wal advances, so only a stalled wal times out (a write hung inside the log blocks LastIndex too).
+// wal advances, so only a stalled wal times out. It can't bound a write hung inside wal.Log:
+// LastIndex waits on the same lock.
 // The snapshot only stands in for an empty wal: right after a reload it can be ahead of the wal.
 func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 	// no wal entry exists below initialVersion.
