@@ -578,7 +578,7 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return walVersion(lastIndex, db.initialVersion), nil
 }
 
-// waitCommittedVersion runs under db.mtx, which the async writer never takes.
+// waitCommittedVersion requires db.mtx; the async writer never takes it, so waiting under it is safe.
 func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
 	if db.walReader == nil {
 		return wal.ErrClosed
@@ -1214,8 +1214,8 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 	}
 }
 
-// checkAsyncCommitIfIdle skips the check while db.mtx is busy so the poll loop
-// never blocks on it; the caller's deadline still bounds the wait.
+// checkAsyncCommitIfIdle skips the check while db.mtx is busy, since Commit or a
+// snapshot rewrite can hold it for long; the caller's deadline still bounds the wait.
 func (db *DB) checkAsyncCommitIfIdle() error {
 	if !db.mtx.TryLock() {
 		return nil

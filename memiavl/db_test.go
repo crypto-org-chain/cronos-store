@@ -1787,6 +1787,10 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			if tc.malleate != nil {
 				tc.malleate(t, db)
 			}
+			// runs before the deferred Close, which needs db.mtx.
+			if tc.postCheck != nil {
+				defer tc.postCheck(t, db)
+			}
 
 			done := make(chan error, 1)
 			go func() { done <- tc.wait(db) }()
@@ -1799,9 +1803,6 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 				}
 			case <-time.After(testTimeout * 10):
 				t.Fatal("wal wait spun forever")
-			}
-			if tc.postCheck != nil {
-				tc.postCheck(t, db)
 			}
 		})
 	}
