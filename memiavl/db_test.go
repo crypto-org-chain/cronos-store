@@ -1538,7 +1538,6 @@ func TestWALWaitTestSuite(t *testing.T) {
 	suite.Run(t, new(WALWaitTestSuite))
 }
 
-// a read-only wal never advances, so a snapshot ahead of it must not make readers wait.
 func (s *WALWaitTestSuite) TestReadOnlySnapshotAheadOfWAL() {
 	dir := s.T().TempDir()
 	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
@@ -1586,7 +1585,7 @@ func (s *WALWaitTestSuite) TestWait() {
 		_, err := db.Commit()
 		return err
 	}
-	// commits one more version through writer, leaving commit info ahead of the wal until it writes.
+	// leaves commit info ahead of the wal until writer writes.
 	commitThrough := func(t *testing.T, db *DB, writer writeAheadLog) error {
 		t.Helper()
 		db.walWriter = writer
@@ -1604,7 +1603,6 @@ func (s *WALWaitTestSuite) TestWait() {
 	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
 		t.Helper()
 		release := make(chan struct{})
-		// best effort: a badly stalled runner can reach the wait after the gate opens.
 		time.AfterFunc(testTimeout/4, func() { close(release) })
 		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
 	}
@@ -1613,7 +1611,6 @@ func (s *WALWaitTestSuite) TestWait() {
 		commitGated(t, db, failingWriteWAL{db.walWriter})
 	}
 	latchErr := func(_ *testing.T, db *DB) { db.latchWalErr(errors.New(simulatedLatchedErr)) }
-	// the writer each case's DB opened with, before any test wrapper.
 	var healthyWriter writeAheadLog
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
@@ -1660,8 +1657,7 @@ func (s *WALWaitTestSuite) TestWait() {
 	}
 	committed := func(db *DB) int64 { return db.lastCommitInfo.Version }
 
-	// the mid-wait cases wait with the full catch-up timeout, longer than the test's cap,
-	// so the in-loop writer check is what normally ends them in time.
+	// mid-wait cases use the full timeout, past the test's cap, so the in-loop check must end them.
 	testCases := []struct {
 		name              string
 		asyncCommitBuffer int
@@ -1686,8 +1682,7 @@ func (s *WALWaitTestSuite) TestWait() {
 						return nil
 					})
 				}()
-				// before the gate opens the reader is waiting, and must not hold db.mtx; retried
-				// so a reader briefly inside a locked section doesn't fail the check.
+				// the reader is now waiting and must not hold db.mtx; retried past brief locked sections.
 				time.Sleep(testTimeout / 8)
 				locked := false
 				for range 5 {

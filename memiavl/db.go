@@ -81,10 +81,9 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan struct{} // closed when the async writer exits
-	// latched wal write error (async or sync); fails Commit and wal readers from then on.
-	// Atomic so waiting readers see it without db.mtx.
+	// latched wal write error; atomic so waiting readers see it without db.mtx.
 	walErr atomic.Pointer[error]
-	// bounds wal catch-up waits; a field so tests can shorten it.
+	// a field so tests can shorten it.
 	catchupTimeout time.Duration
 
 	// pending changes, will be written into WAL in next Commit call
@@ -550,7 +549,6 @@ func (db *DB) checkAsyncTasks() error {
 	)
 }
 
-// latchWalErr keeps the first error only.
 func (db *DB) latchWalErr(err error) {
 	if err != nil {
 		db.walErr.CompareAndSwap(nil, &err)
@@ -737,7 +735,7 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case <-db.walQuit:
-				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer latches its error before closing walQuit
+				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer latches before closing walQuit
 				return 0, db.walError()
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
@@ -788,7 +786,6 @@ func (db *DB) initAsyncCommit() {
 	db.walQuit = walQuit
 }
 
-// writeWALAsync drains walChan until it's closed or a write fails.
 func (db *DB) writeWALAsync(walChan <-chan *walEntry) error {
 	batch := wal.Batch{}
 	for {
@@ -995,7 +992,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	return nil
 }
 
-// Close releases everything even on error, and also reports a latched wal write error.
+// Close also reports a latched wal write error.
 func (db *DB) Close() error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -1190,8 +1187,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower,
-// unless wait is false.
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
 func (db *DB) waitWALForRead(upTo int64, wait bool) (walReader, uint32, error) {
 	db.mtx.Lock()
 	version := db.lastCommitInfo.Version
@@ -1237,10 +1233,8 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 	}, nil
 }
 
-// a latched wal error wins, even when the wal looks caught up; the timeout restarts whenever the
-// wal advances, so only a stalled wal times out. It can't bound a write hung inside wal.Log:
-// LastIndex waits on the same lock.
-// The snapshot only stands in for an empty wal: right after a reload it can be ahead of the wal.
+// a latched wal error wins even when the wal looks caught up. The timeout restarts on progress,
+// but can't bound a write hung inside wal.Log, whose lock LastIndex shares.
 func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 	// no wal entry exists below initialVersion.
 	if t.version < int64(t.initialVersion) || t.version <= 0 {
