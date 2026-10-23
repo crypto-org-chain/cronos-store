@@ -1548,12 +1548,17 @@ func (s *WALWaitTestSuite) TestWait() {
 	const testTimeout = 200 * time.Millisecond
 
 	// commits one more version through writer, leaving commit info ahead of the wal until it writes.
+	commit := func(db *DB) error {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")); err != nil {
+			return err
+		}
+		_, err := db.Commit()
+		return err
+	}
 	commitThrough := func(t *testing.T, db *DB, writer writeAheadLog) error {
 		t.Helper()
 		db.walWriter = writer
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
-		_, err := db.Commit()
-		return err
+		return commit(db)
 	}
 	killWriter := func(t *testing.T, db *DB) {
 		t.Helper()
@@ -1579,9 +1584,8 @@ func (s *WALWaitTestSuite) TestWait() {
 		t.Helper()
 		// a healthy writer again, so only the latched error carries the simulated failure.
 		db.walWriter = healthyWAL(db.walWriter)
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
 		version := db.Version()
-		_, err := db.Commit()
+		err := commit(db)
 		require.ErrorContains(t, err, simulatedWALWriteErr)
 		require.Equal(t, version, db.Version(), "a latched error must fail Commit before it saves a version")
 		if db.walChanSize < 0 {
@@ -1591,15 +1595,23 @@ func (s *WALWaitTestSuite) TestWait() {
 		}
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
 	}
-	commit := func(db *DB) error {
-		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")); err != nil {
-			return err
-		}
-		_, err := db.Commit()
-		return err
-	}
 	traverse := func(db *DB) error {
 		return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
+	}
+	traverseExpect := func(start, end int64, want []int64) func(db *DB) error {
+		return func(db *DB) error {
+			var visited []int64
+			if err := db.TreeByName(testStoreName).TraverseStateChanges(start, end, func(v int64, _ *ChangeSet) error {
+				visited = append(visited, v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if !slices.Equal(visited, want) {
+				return fmt.Errorf("visited versions %v, want %v", visited, want)
+			}
+			return nil
+		}
 	}
 	firstStoreVersions := func(db *DB) error {
 		_, err := db.FirstStoreVersions([]string{testStoreName})
@@ -1615,6 +1627,7 @@ func (s *WALWaitTestSuite) TestWait() {
 	testCases := []struct {
 		name              string
 		asyncCommitBuffer int
+		initialVersion    uint32
 		malleate          func(t *testing.T, db *DB)
 		wait              func(db *DB) error
 		expErr            string
@@ -1670,19 +1683,17 @@ func (s *WALWaitTestSuite) TestWait() {
 		{
 			name:     "reader of a range already in the wal doesn't wait for later commits",
 			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
-			wait: func(db *DB) error {
-				var visited []int64
-				if err := db.TreeByName(testStoreName).TraverseStateChanges(1, 1, func(v int64, _ *ChangeSet) error {
-					visited = append(visited, v)
-					return nil
-				}); err != nil {
-					return err
-				}
-				if len(visited) != 1 || visited[0] != 1 {
-					return fmt.Errorf("visited versions %v, want [1]", visited)
-				}
-				return nil
-			},
+			wait:     traverseExpect(1, 1, []int64{1}),
+		},
+		{
+			name:           "range below initialVersion is empty without waiting",
+			initialVersion: 100,
+			wait:           traverseExpect(1, 5, nil),
+		},
+		{
+			name:     "reversed range is empty without waiting",
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
+			wait:     traverseExpect(2, 1, nil),
 		},
 		{
 			name:     "latched writer error fails a reader even when the wal is caught up",
@@ -1805,6 +1816,7 @@ func (s *WALWaitTestSuite) TestWait() {
 				CreateIfMissing:   true,
 				InitialStores:     []string{testStoreName},
 				AsyncCommitBuffer: tc.asyncCommitBuffer,
+				InitialVersion:    tc.initialVersion,
 			}, TestAppChainID)
 			require.NoError(t, err)
 			// a hung wait can still hold db.mtx, so Close only once the wait returned.

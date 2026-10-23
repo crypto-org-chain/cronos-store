@@ -82,10 +82,10 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan struct{} // closed when the async writer exits
-	// latched wal write error (async or sync); from then on Commit and readers waiting for
-	// lastCommitInfo return it. Atomic so waiting readers see it without db.mtx.
+	// latched wal write error (async or sync); fails Commit and every waiting reader from then on.
+	// Atomic so waiting readers see it without db.mtx.
 	walErr atomic.Pointer[error]
-	// bounds waits for the wal to reach lastCommitInfo; a field so tests can shorten it.
+	// bounds wal catch-up waits; a field so tests can shorten it.
 	catchupTimeout time.Duration
 
 	// pending changes, will be written into WAL in next Commit call
@@ -1234,7 +1234,8 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 
 // a latched wal error wins, even when the wal looks caught up; the timeout covers a stalled wal.
 func (db *DB) waitForWAL(t walTarget, timeout, pollInterval time.Duration) error {
-	if t.version <= 0 || t.version <= t.snapshotVersion {
+	// no wal entry exists below initialVersion, and walIndex would wrap there.
+	if t.version < int64(t.initialVersion) || t.version <= 0 || t.version <= t.snapshotVersion {
 		return db.walError()
 	}
 
