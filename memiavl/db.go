@@ -1190,13 +1190,16 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower;
-// a negative upTo skips the wait.
+// skipWALWait tells waitWALForRead there's nothing to wait for.
+const skipWALWait = -1
+
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
 func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
 	db.mtx.Lock()
 	version := db.lastCommitInfo.Version
 	switch {
-	case upTo < 0:
+	// a read-only wal never advances, so waiting can only time out.
+	case upTo == skipWALWait || db.walWriter == nil:
 		version = 0
 	case upTo > 0 && upTo < version:
 		version = upTo
@@ -1237,14 +1240,14 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 }
 
 // a latched wal error wins, even when the wal looks caught up; the timeout restarts whenever the
-// wal advances, so only a stalled wal times out.
+// wal advances, so only a stalled wal times out (a write hung inside the log blocks LastIndex too).
+// The snapshot only stands in for an empty wal: right after a reload it can be ahead of the wal.
 func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
-	// no wal entry exists below initialVersion, and walIndex would wrap there.
-	if t.version < int64(t.initialVersion) || t.version <= 0 || t.version <= t.snapshotVersion {
+	// no wal entry exists below initialVersion.
+	if t.version < int64(t.initialVersion) || t.version <= 0 {
 		return db.walError()
 	}
 
-	targetIndex := walIndex(t.version, t.initialVersion)
 	deadline := time.Now().Add(db.catchupTimeout)
 	var seenIndex uint64
 	for {
@@ -1255,7 +1258,7 @@ func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 		if err != nil {
 			return fmt.Errorf("get wal version failed: %w", err)
 		}
-		if lastIndex >= targetIndex {
+		if committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion) >= t.version {
 			return nil
 		}
 		if lastIndex > seenIndex {

@@ -472,7 +472,7 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	}
 	upTo := endVersion
 	if endVersion > 0 && endVersion < startVersion {
-		upTo = -1 // a reversed range yields nothing, so there's nothing to wait for
+		upTo = skipWALWait // a reversed range yields nothing
 	}
 	walLog, initialVersion, err := db.waitWALForRead(upTo)
 	if err != nil {
