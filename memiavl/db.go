@@ -586,12 +586,12 @@ func committedVersionAt(lastIndex uint64, initialVersion uint32, snapshotVersion
 }
 
 // waitCommittedVersion requires db.mtx; the async writer never takes it.
-func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
+func (db *DB) waitCommittedVersion(targetVersion int64) error {
 	target, err := db.walTargetLocked(targetVersion)
 	if err != nil {
 		return err
 	}
-	return db.waitForWAL(target, timeout, walPollInterval)
+	return db.waitForWAL(target, db.catchupTimeout, walPollInterval)
 }
 
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
@@ -614,7 +614,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, db.catchupTimeout); err != nil {
+		if err := db.waitCommittedVersion(db.lastCommitInfo.Version); err != nil {
 			return errors.Join(err, result.mtree.Close())
 		}
 
@@ -853,6 +853,7 @@ func (db *DB) copy(cacheSize int) *DB {
 		logger:              db.logger,
 		dir:                 db.dir,
 		snapshotWriterLimit: db.snapshotWriterLimit,
+		catchupTimeout:      db.catchupTimeout,
 	}
 	cloned.attachTraverseStateChanges()
 	return cloned

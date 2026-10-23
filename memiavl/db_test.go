@@ -1516,10 +1516,10 @@ func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
 	return w.writeAheadLog.WriteBatch(b)
 }
 
-func waitCommittedVersionLocked(db *DB, version int64, timeout time.Duration) error {
+func lockAndWaitCommittedVersion(db *DB, version int64) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
-	return db.waitCommittedVersion(version, timeout)
+	return db.waitCommittedVersion(version)
 }
 
 type WALWaitTestSuite struct {
@@ -1606,7 +1606,10 @@ func (s *WALWaitTestSuite) TestWait() {
 		return err
 	}
 	commitPathWait := func(target func(db *DB) int64, timeout time.Duration) func(db *DB) error {
-		return func(db *DB) error { return waitCommittedVersionLocked(db, target(db), timeout) }
+		return func(db *DB) error {
+			db.catchupTimeout = timeout
+			return lockAndWaitCommittedVersion(db, target(db))
+		}
 	}
 	committed := func(db *DB) int64 { return db.lastCommitInfo.Version }
 
@@ -1857,7 +1860,7 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 		_, err := db.Commit()
 		require.NoError(t, err)
 	}
-	require.NoError(t, waitCommittedVersionLocked(db, 3, walCatchupTimeout))
+	require.NoError(t, lockAndWaitCommittedVersion(db, 3))
 
 	// a half-written entry, as seen while the writer is mid-append.
 	tail := filepath.Join(walPath(dir), "00000000000000000001")
@@ -2388,7 +2391,7 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err, "commit version %d", v)
-		require.NoError(t, waitCommittedVersionLocked(db, int64(v), walCatchupTimeout))
+		require.NoError(t, lockAndWaitCommittedVersion(db, int64(v)))
 		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
 		latest.Store(int64(v))
 	}
