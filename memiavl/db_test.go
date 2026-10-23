@@ -1611,10 +1611,9 @@ func (s *WALWaitTestSuite) TestWait() {
 		commitGated(t, db, failingWriteWAL{db.walWriter})
 	}
 	latchErr := func(_ *testing.T, db *DB) { db.latchWalErr(errors.New(simulatedLatchedErr)) }
-	var healthyWriter writeAheadLog
-	requireWriterErrLatched := func(t *testing.T, db *DB) {
+	requireWriterErrLatched := func(t *testing.T, db *DB, healthyWriter writeAheadLog) {
 		t.Helper()
-		// a healthy writer again, so only the latched error carries the simulated failure.
+		// safe once the writer has latched; only the latched error then carries the simulated failure.
 		db.walWriter = healthyWriter
 		version := db.Version()
 		err := commit(db)
@@ -1665,7 +1664,7 @@ func (s *WALWaitTestSuite) TestWait() {
 		malleate          func(t *testing.T, db *DB)
 		wait              func(db *DB) error
 		expErr            string
-		postCheck         func(t *testing.T, db *DB)
+		postCheck         func(t *testing.T, db *DB, healthyWriter writeAheadLog)
 	}{
 		{
 			name: "wal catching up mid-wait is read in full",
@@ -1913,7 +1912,7 @@ func (s *WALWaitTestSuite) TestWait() {
 				InitialVersion:    tc.initialVersion,
 			}, TestAppChainID)
 			require.NoError(t, err)
-			healthyWriter = db.walWriter
+			healthyWriter := db.walWriter
 			// a hung wait can still hold db.mtx, so Close only once the wait returned.
 			waited := false
 			defer func() {
@@ -1943,7 +1942,7 @@ func (s *WALWaitTestSuite) TestWait() {
 				t.Fatal("wal wait spun forever")
 			}
 			if tc.postCheck != nil {
-				tc.postCheck(t, db)
+				tc.postCheck(t, db, healthyWriter)
 			}
 		})
 	}
