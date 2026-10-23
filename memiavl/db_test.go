@@ -1651,8 +1651,9 @@ func TestWALWait(t *testing.T) {
 	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
 		t.Helper()
 		release := make(chan struct{})
-		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
+		// scheduled first: a sync commit blocks in the gated write.
 		time.AfterFunc(testTimeout/4, func() { close(release) })
+		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
 	}
 	killWriterMidWait := func(t *testing.T, db *DB) {
 		t.Helper()
@@ -1660,7 +1661,7 @@ func TestWALWait(t *testing.T) {
 	}
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
-		// a healthy writer again, so only the latched error can fail the commit.
+		// a healthy writer again, so only the latched error carries the simulated failure.
 		db.walWriter = db.walWriter.(failingWriteWAL).writeAheadLog
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
 		version := db.Version()

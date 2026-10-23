@@ -734,7 +734,7 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case <-db.walQuit:
-				db.latchWalErr(errAsyncWriterQuit) // no-op unless the writer quit without latching
+				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer always latches before quitting
 				return 0, db.walError()
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
@@ -1221,9 +1221,7 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 	}, nil
 }
 
-// waitForWAL ends at once on a latched wal error, checked before every wal read so it wins
-// even when the wal looks caught up. The timeout covers a stalled wal, or commit info bumped
-// without a wal write.
+// a latched wal error wins, even when the wal looks caught up; the timeout covers a stalled wal.
 func (db *DB) waitForWAL(t walTarget, timeout time.Duration) error {
 	if t.version <= 0 || t.version <= t.snapshotVersion {
 		return db.walError()
