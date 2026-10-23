@@ -1691,6 +1691,88 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	}
 }
 
+func TestWaitForWALVersionGivesUp(t *testing.T) {
+	const testTimeout = 200 * time.Millisecond
+
+	testCases := []struct {
+		name     string
+		malleate func(db *DB)
+		wait     func(db *DB) error
+		expErr   string
+	}{
+		{
+			name: "caught up",
+			wait: func(db *DB) error {
+				return db.waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout)
+			},
+		},
+		{
+			name: "wal stuck behind commit info times out",
+			// a failed sync WAL write leaves commit info ahead with no writer error.
+			malleate: func(db *DB) { db.lastCommitInfo.Version++ },
+			wait: func(db *DB) error {
+				return db.waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout)
+			},
+			expErr: "timed out waiting for wal to reach version",
+		},
+		{
+			name: "dead async writer fails TraverseStateChanges",
+			malleate: func(db *DB) {
+				db.lastCommitInfo.Version++
+				db.walErr = errors.New("simulated async wal writer death")
+			},
+			wait: func(db *DB) error {
+				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
+			},
+			expErr: "simulated async wal writer death",
+		},
+		{
+			name: "dead async writer fails FirstStoreVersions",
+			malleate: func(db *DB) {
+				db.lastCommitInfo.Version++
+				db.walErr = errors.New("simulated async wal writer death")
+			},
+			wait: func(db *DB) error {
+				_, err := db.FirstStoreVersions([]string{testStoreName})
+				return err
+			},
+			expErr: "simulated async wal writer death",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := Load(t.TempDir(), Options{
+				CreateIfMissing: true,
+				InitialStores:   []string{testStoreName},
+			}, TestAppChainID)
+			require.NoError(t, err)
+			defer db.Close()
+
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			_, err = db.Commit()
+			require.NoError(t, err)
+			require.NoError(t, db.WaitAsyncCommit())
+			if tc.malleate != nil {
+				tc.malleate(db)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.wait(db) }()
+			select {
+			case err := <-done:
+				if tc.expErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, tc.expErr)
+				}
+			case <-time.After(testTimeout * 10):
+				t.Fatal("wal wait spun forever")
+			}
+		})
+	}
+}
+
 func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Load(dir, Options{

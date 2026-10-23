@@ -1138,7 +1138,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		return nil, err
 	}
 
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
+	if err := db.waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion, walCatchupTimeout); err != nil {
 		return nil, err
 	}
 
@@ -1199,12 +1199,16 @@ func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+// waitForWALVersion polls without holding db.mtx so commits keep flowing. It
+// gives up on a dead async writer or after timeout, since a failed WAL write
+// leaves lastCommitInfo ahead of the WAL for good.
+func (db *DB) waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64, timeout time.Duration) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
 
 	targetIndex := walIndex(targetVersion, initialVersion)
+	deadline := time.Now().Add(timeout)
 	for {
 		lastIndex, err := walLog.LastIndex()
 		if err != nil {
@@ -1213,8 +1217,20 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 		if lastIndex >= targetIndex {
 			return nil
 		}
+		if err := db.checkAsyncCommitLocked(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for wal to reach version %d, current: %d", targetVersion, walVersion(lastIndex, initialVersion))
+		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func (db *DB) checkAsyncCommitLocked() error {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+	return db.checkAsyncCommit()
 }
 
 // UpdateCommitInfo wraps MultiTree.UpdateCommitInfo to add a lock.
