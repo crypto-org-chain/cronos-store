@@ -1691,12 +1691,14 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	}
 }
 
+const simulatedWALWriteErr = "simulated wal write failure"
+
 type failingWriteWAL struct {
 	writeAheadLog
 }
 
 func (failingWriteWAL) WriteBatch(*wal.Batch) error {
-	return errors.New("simulated wal write failure")
+	return errors.New(simulatedWALWriteErr)
 }
 
 func TestWaitForWALVersionGivesUp(t *testing.T) {
@@ -1709,15 +1711,23 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
 		_, _ = db.Commit()
 	}
+	failSyncWrite := func(t *testing.T, db *DB) {
+		t.Helper()
+		db.walWriter = failingWriteWAL{db.walWriter}
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
+		_, err := db.Commit()
+		require.ErrorContains(t, err, simulatedWALWriteErr)
+	}
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
 		_, err := db.Commit()
-		require.ErrorContains(t, err, "simulated wal write failure")
-		require.ErrorContains(t, db.WaitAsyncCommit(), "simulated wal write failure")
+		require.ErrorContains(t, err, simulatedWALWriteErr)
+		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
 	}
 
 	testCases := []struct {
 		name      string
+		syncWAL   bool
 		malleate  func(t *testing.T, db *DB)
 		wait      func(db *DB) error
 		expErr    string
@@ -1730,8 +1740,7 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			},
 		},
 		{
-			name: "wal stuck behind commit info times out",
-			// a failed sync wal write leaves commit info ahead with no writer error.
+			name:     "wal stuck behind commit info times out",
 			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
 			wait: func(db *DB) error {
 				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
@@ -1756,7 +1765,7 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			wait: func(db *DB) error {
 				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
 			},
-			expErr:    "simulated wal write failure",
+			expErr:    simulatedWALWriteErr,
 			postCheck: requireWriterErrLatched,
 		},
 		{
@@ -1766,16 +1775,31 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 				_, err := db.FirstStoreVersions([]string{testStoreName})
 				return err
 			},
-			expErr:    "simulated wal write failure",
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			name:     "failed sync wal write fails TraverseStateChanges",
+			syncWAL:  true,
+			malleate: failSyncWrite,
+			wait: func(db *DB) error {
+				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
+			},
+			expErr:    simulatedWALWriteErr,
 			postCheck: requireWriterErrLatched,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			asyncCommitBuffer := 0
+			if tc.syncWAL {
+				asyncCommitBuffer = -1
+			}
 			db, err := Load(t.TempDir(), Options{
-				CreateIfMissing: true,
-				InitialStores:   []string{testStoreName},
+				CreateIfMissing:   true,
+				InitialStores:     []string{testStoreName},
+				AsyncCommitBuffer: asyncCommitBuffer,
 			}, TestAppChainID)
 			require.NoError(t, err)
 			defer db.Close()

@@ -735,20 +735,11 @@ func (db *DB) Commit() (int64, error) {
 				}
 				return 0, db.walErr
 			}
-		} else {
-			lastIndex, err := db.walWriter.LastIndex()
-			if err != nil {
-				return 0, err
-			}
-
-			db.wbatch.Clear()
-			if err := writeEntry(&db.wbatch, db.logger, lastIndex, &entry); err != nil {
-				return 0, err
-			}
-
-			if err := db.walWriter.WriteBatch(&db.wbatch); err != nil {
-				return 0, err
-			}
+		} else if err := db.writeWALSync(&entry); err != nil {
+			// latched like an async writer death: commit info is already ahead of the wal,
+			// so later commits can't write and readers must not wait for this version.
+			db.walErr = fmt.Errorf("sync wal write failed: %w", err)
+			return 0, db.walErr
 		}
 	}
 
@@ -763,6 +754,19 @@ func (db *DB) Commit() (int64, error) {
 	db.rewriteIfApplicable(v)
 
 	return v, nil
+}
+
+func (db *DB) writeWALSync(entry *walEntry) error {
+	lastIndex, err := db.walWriter.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	db.wbatch.Clear()
+	if err := writeEntry(&db.wbatch, db.logger, lastIndex, entry); err != nil {
+		return err
+	}
+	return db.walWriter.WriteBatch(&db.wbatch)
 }
 
 func (db *DB) initAsyncCommit() {
