@@ -1787,6 +1787,18 @@ func TestWALWait(t *testing.T) {
 			},
 		},
 		{
+			name: "reader times out on a live writer that never catches up",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				orig := walCatchupTimeout
+				walCatchupTimeout = testTimeout
+				t.Cleanup(func() { walCatchupTimeout = orig })
+				db.lastCommitInfo.Version++
+			},
+			wait:   traverse,
+			expErr: "timed out waiting for wal to catch up",
+		},
+		{
 			name:     "latched writer error fails a reader even when the wal is caught up",
 			malleate: func(_ *testing.T, db *DB) { db.walErr = errors.New("simulated latched wal error") },
 			wait:     traverse,

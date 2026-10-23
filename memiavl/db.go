@@ -23,9 +23,11 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	walCatchupTimeout = 5 * time.Second
-	walPollInterval   = time.Millisecond
+	walPollInterval = time.Millisecond
 )
+
+// a var so tests can shorten it.
+var walCatchupTimeout = 5 * time.Second
 
 var (
 	errReadOnly          = errors.New("db is read-only")
@@ -79,7 +81,8 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
-	// latched wal write error (async or sync); once set, every Commit and wal reader fails with it.
+	// latched wal write error (async or sync); once set, it fails every later Commit,
+	// TraverseStateChanges, FirstStoreVersions, WaitAsyncCommit and Close.
 	walErr error
 	// set by the async writer before it quits, so waiting readers see its death without db.mtx.
 	asyncWriterErr atomic.Pointer[error]
@@ -564,7 +567,7 @@ func (db *DB) checkAsyncCommit() error {
 // and returns the latched error. Callers hold db.mtx.
 func (db *DB) latchWalErr(err error) error {
 	if err != nil && db.walErr == nil {
-		db.walErr = fmt.Errorf("%w: %w", errAsyncWriterQuit, err)
+		db.walErr = err
 	}
 	return db.walErr
 }
@@ -792,6 +795,7 @@ func (db *DB) initAsyncCommit() {
 	go func() {
 		defer close(walQuit)
 		quit := func(err error) {
+			err = fmt.Errorf("%w: %w", errAsyncWriterQuit, err)
 			db.asyncWriterErr.Store(&err)
 			walQuit <- err
 		}
@@ -1216,7 +1220,7 @@ func (db *DB) waitWALForRead() (walReader, uint32, error) {
 
 func (db *DB) loadAsyncWriterErr() error {
 	if err := db.asyncWriterErr.Load(); err != nil {
-		return fmt.Errorf("%w: %w", errAsyncWriterQuit, *err)
+		return *err
 	}
 	return nil
 }
