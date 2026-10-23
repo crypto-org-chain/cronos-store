@@ -27,10 +27,8 @@ const (
 	// readers hold no lock and can wait seconds, so they poll slower.
 	walPollInterval     = 50 * time.Nanosecond
 	walReadPollInterval = time.Millisecond
+	walCatchupTimeout   = 5 * time.Second
 )
-
-// a var so tests can shorten it; tests that do must not run in parallel.
-var walCatchupTimeout = 5 * time.Second
 
 var (
 	errReadOnly          = errors.New("db is read-only")
@@ -87,6 +85,8 @@ type DB struct {
 	// latched wal write error (async or sync); from then on Commit and readers waiting for
 	// lastCommitInfo return it. Atomic so waiting readers see it without db.mtx.
 	walErr atomic.Pointer[error]
+	// bounds waits for the wal to reach lastCommitInfo; a field so tests can shorten it.
+	catchupTimeout time.Duration
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -326,6 +326,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		readOnly:               opts.ReadOnly,
 		walReader:              reader,
 		walWriter:              writer,
+		catchupTimeout:         walCatchupTimeout,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
@@ -613,7 +614,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, walCatchupTimeout); err != nil {
+		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, db.catchupTimeout); err != nil {
 			return errors.Join(err, result.mtree.Close())
 		}
 
@@ -737,7 +738,7 @@ func (db *DB) Commit() (int64, error) {
 			select {
 			case db.walChan <- &entry:
 			case <-db.walQuit:
-				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer always latches before quitting
+				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer latches its error before closing walQuit
 				return 0, db.walError()
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
@@ -1186,15 +1187,17 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// waitWALForRead waits until the wal holds every committed version, so readers see them all.
+// waitWALForRead waits, up to the catch-up timeout, for the wal to reach lastCommitInfo,
+// so readers see every committed version.
 func (db *DB) waitWALForRead() (walReader, uint32, error) {
 	db.mtx.Lock()
 	target, err := db.walTargetLocked(db.lastCommitInfo.Version)
+	timeout := db.catchupTimeout
 	db.mtx.Unlock()
 	if err != nil {
 		return nil, 0, err
 	}
-	return target.log, target.initialVersion, db.waitForWAL(target, walCatchupTimeout, walReadPollInterval)
+	return target.log, target.initialVersion, db.waitForWAL(target, timeout, walReadPollInterval)
 }
 
 type walTarget struct {
