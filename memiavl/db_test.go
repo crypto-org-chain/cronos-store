@@ -1533,7 +1533,6 @@ func TestWALWaitTestSuite(t *testing.T) {
 func (s *WALWaitTestSuite) TestWait() {
 	const testTimeout = 200 * time.Millisecond
 
-	// commits one more version through writer, leaving commit info ahead of the wal until it writes.
 	commit := func(db *DB) error {
 		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")); err != nil {
 			return err
@@ -1541,6 +1540,7 @@ func (s *WALWaitTestSuite) TestWait() {
 		_, err := db.Commit()
 		return err
 	}
+	// commits one more version through writer, leaving commit info ahead of the wal until it writes.
 	commitThrough := func(t *testing.T, db *DB, writer writeAheadLog) error {
 		t.Helper()
 		db.walWriter = writer
@@ -1558,6 +1558,7 @@ func (s *WALWaitTestSuite) TestWait() {
 	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
 		t.Helper()
 		release := make(chan struct{})
+		// best effort: a badly stalled runner can reach the wait after the gate opens.
 		time.AfterFunc(testTimeout/4, func() { close(release) })
 		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
 	}
