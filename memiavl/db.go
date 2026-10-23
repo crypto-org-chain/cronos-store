@@ -81,8 +81,8 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan struct{} // closed when the async writer exits
-	// latched wal write error (async or sync): the wal can't be trusted afterwards, so every
-	// wal-dependent call returns it. Atomic so waiting readers see it without db.mtx.
+	// latched wal write error (async or sync); from then on Commit and readers waiting for
+	// lastCommitInfo return it. Atomic so waiting readers see it without db.mtx.
 	walErr atomic.Pointer[error]
 
 	// pending changes, will be written into WAL in next Commit call
@@ -549,7 +549,9 @@ func (db *DB) checkAsyncTasks() error {
 
 // latchWalErr keeps the first error only.
 func (db *DB) latchWalErr(err error) {
-	db.walErr.CompareAndSwap(nil, &err)
+	if err != nil {
+		db.walErr.CompareAndSwap(nil, &err)
+	}
 }
 
 func (db *DB) walError() error {

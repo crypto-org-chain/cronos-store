@@ -1652,6 +1652,11 @@ func TestWALWait(t *testing.T) {
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
 		_, err := db.Commit()
 		require.ErrorContains(t, err, simulatedWALWriteErr)
+		if db.walChanSize < 0 {
+			require.ErrorContains(t, err, "sync wal write failed")
+		} else {
+			require.ErrorIs(t, err, errAsyncWriterQuit)
+		}
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
 	}
 	traverse := func(db *DB) error {
@@ -1745,6 +1750,11 @@ func TestWALWait(t *testing.T) {
 		{
 			// a concurrent commit can move the wal past the target between polls.
 			name: "commit-path wait succeeds when the wal is past the target",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				require.NoError(t, commitThrough(t, db, db.walWriter))
+				require.NoError(t, db.WaitAsyncCommit())
+			},
 			wait: commitPathWait(func(db *DB) int64 { return db.lastCommitInfo.Version - 1 }, testTimeout),
 		},
 		{
@@ -1838,7 +1848,9 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 		_, err := db.Commit()
 		require.NoError(t, err)
 	}
+	db.mtx.Lock()
 	require.NoError(t, db.waitCommittedVersion(3, walCatchupTimeout))
+	db.mtx.Unlock()
 
 	// a half-written entry, as seen while the writer is mid-append.
 	tail := filepath.Join(walPath(dir), "00000000000000000001")
@@ -2369,7 +2381,9 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err, "commit version %d", v)
+		db.mtx.Lock()
 		require.NoError(t, db.waitCommittedVersion(int64(v), walCatchupTimeout))
+		db.mtx.Unlock()
 		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
 		latest.Store(int64(v))
 	}
