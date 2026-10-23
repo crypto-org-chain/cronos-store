@@ -1754,7 +1754,7 @@ func TestWALWait(t *testing.T) {
 		return err
 	}
 
-	// the dying-writer cases wait with the full catch-up timeout, longer than the test's cap,
+	// the mid-wait cases wait with the full catch-up timeout, longer than the test's cap,
 	// so only the in-loop writer check can end them in time.
 	testCases := []struct {
 		name      string
@@ -1861,11 +1861,6 @@ func TestWALWait(t *testing.T) {
 			if tc.malleate != nil {
 				tc.malleate(t, db)
 			}
-			// runs before the deferred Close, which needs db.mtx.
-			if tc.postCheck != nil {
-				defer tc.postCheck(t, db)
-			}
-
 			done := make(chan error, 1)
 			go func() { done <- tc.wait(db) }()
 			select {
@@ -1877,6 +1872,9 @@ func TestWALWait(t *testing.T) {
 				}
 			case <-time.After(testTimeout * 10):
 				t.Fatal("wal wait spun forever")
+			}
+			if tc.postCheck != nil {
+				tc.postCheck(t, db)
 			}
 		})
 	}
