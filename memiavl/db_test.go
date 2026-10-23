@@ -1488,6 +1488,7 @@ func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
 const (
 	simulatedWALWriteErr = "simulated wal write failure"
 	simulatedLatchedErr  = "simulated latched wal error"
+	walTimeoutErr        = "timed out waiting for wal to catch up"
 )
 
 type failingWriteWAL struct {
@@ -1506,6 +1507,17 @@ type gatedWriteWAL struct {
 func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
 	<-w.release
 	return w.writeAheadLog.WriteBatch(b)
+}
+
+// advancingWAL's last index grows by one every step, from start.
+type advancingWAL struct {
+	walReader
+	start time.Time
+	step  time.Duration
+}
+
+func (w advancingWAL) LastIndex() (uint64, error) {
+	return 1 + uint64(time.Since(w.start)/w.step), nil
 }
 
 func lockAndWaitCommittedVersion(db *DB, version int64) error {
@@ -1661,7 +1673,34 @@ func (s *WALWaitTestSuite) TestWait() {
 				db.lastCommitInfo.Version++
 			},
 			wait:   traverse,
-			expErr: "timed out waiting for wal to catch up",
+			expErr: walTimeoutErr,
+		},
+		{
+			name: "FirstStoreVersions times out when commit info is ahead of a healthy wal",
+			malleate: func(_ *testing.T, db *DB) {
+				db.catchupTimeout = testTimeout
+				db.lastCommitInfo.Version++
+			},
+			wait:   firstStoreVersions,
+			expErr: walTimeoutErr,
+		},
+		{
+			// reaching the target takes twice the timeout, but each step is within it.
+			name:     "a slow but advancing wal doesn't time out",
+			malleate: func(_ *testing.T, db *DB) { db.catchupTimeout = testTimeout },
+			wait: func(db *DB) error {
+				log := advancingWAL{db.walReader, time.Now(), testTimeout / 2}
+				return db.waitForWAL(walTarget{log: log, initialVersion: db.initialVersion, version: 5}, walReadPollInterval)
+			},
+		},
+		{
+			name:     "FirstStoreVersions with no stores reports a latched wal error",
+			malleate: latchErr,
+			wait: func(db *DB) error {
+				_, err := db.FirstStoreVersions(nil)
+				return err
+			},
+			expErr: simulatedLatchedErr,
 		},
 		{
 			name:     "reader of a range already in the wal doesn't wait for later commits",
@@ -1765,7 +1804,7 @@ func (s *WALWaitTestSuite) TestWait() {
 		{
 			name:   "commit-path wait times out on a wal that never catches up",
 			wait:   commitPathWait(func(db *DB) int64 { return db.lastCommitInfo.Version + 1000 }, testTimeout),
-			expErr: "timed out waiting for wal to catch up",
+			expErr: walTimeoutErr,
 		},
 		{
 			name:      "dead async writer fails TraverseStateChanges",

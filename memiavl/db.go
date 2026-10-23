@@ -1132,7 +1132,7 @@ func (db *DB) EarliestVersion() (int64, error) {
 func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(stores))
 	if len(stores) == 0 {
-		return result, nil
+		return result, db.walError()
 	}
 
 	walLog, initialVersion, err := db.waitWALForRead(0)
@@ -1187,11 +1187,15 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower;
+// a negative upTo skips the wait.
 func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
 	db.mtx.Lock()
 	version := db.lastCommitInfo.Version
-	if upTo > 0 && upTo < version {
+	switch {
+	case upTo < 0:
+		version = 0
+	case upTo > 0 && upTo < version:
 		version = upTo
 	}
 	target, err := db.walTargetLocked(version)
@@ -1229,7 +1233,8 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 	}, nil
 }
 
-// a latched wal error wins, even when the wal looks caught up; the timeout covers a stalled wal.
+// a latched wal error wins, even when the wal looks caught up; the timeout restarts whenever the
+// wal advances, so only a stalled wal times out.
 func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 	// no wal entry exists below initialVersion, and walIndex would wrap there.
 	if t.version < int64(t.initialVersion) || t.version <= 0 || t.version <= t.snapshotVersion {
@@ -1238,6 +1243,7 @@ func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 
 	targetIndex := walIndex(t.version, t.initialVersion)
 	deadline := time.Now().Add(db.catchupTimeout)
+	var seenIndex uint64
 	for {
 		if err := db.walError(); err != nil {
 			return err
@@ -1248,6 +1254,10 @@ func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 		}
 		if lastIndex >= targetIndex {
 			return nil
+		}
+		if lastIndex > seenIndex {
+			seenIndex = lastIndex
+			deadline = time.Now().Add(db.catchupTimeout)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to version %d, current: %d",
