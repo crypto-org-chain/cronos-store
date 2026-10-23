@@ -1639,12 +1639,16 @@ func TestWALWait(t *testing.T) {
 			require.ErrorContains(t, err, simulatedWALWriteErr)
 		}
 	}
-	// the async writer is alive when the wait starts and dies during it.
-	killWriterMidWait := func(t *testing.T, db *DB) {
+	// the async writer holds the commit's write until shortly after the wait starts.
+	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
 		t.Helper()
 		release := make(chan struct{})
-		require.NoError(t, commitThrough(t, db, gatedWriteWAL{failingWriteWAL{db.walWriter}, release}))
+		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
 		time.AfterFunc(testTimeout/4, func() { close(release) })
+	}
+	killWriterMidWait := func(t *testing.T, db *DB) {
+		t.Helper()
+		commitGated(t, db, failingWriteWAL{db.walWriter})
 	}
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
@@ -1692,9 +1696,7 @@ func TestWALWait(t *testing.T) {
 			name: "wal catching up mid-wait is read in full",
 			malleate: func(t *testing.T, db *DB) {
 				t.Helper()
-				release := make(chan struct{})
-				require.NoError(t, commitThrough(t, db, gatedWriteWAL{db.walWriter, release}))
-				time.AfterFunc(testTimeout/4, func() { close(release) })
+				commitGated(t, db, db.walWriter)
 			},
 			wait: func(db *DB) error {
 				var last int64

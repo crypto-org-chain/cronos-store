@@ -811,7 +811,7 @@ func (db *DB) initAsyncCommit() {
 	db.walQuit = walQuit
 }
 
-// WaitAsyncCommit waits for the completion of async commit
+// WaitAsyncCommit waits for the completion of async commit and returns any latched wal write error.
 func (db *DB) WaitAsyncCommit() error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -1077,20 +1077,20 @@ func (db *DB) WorkingCommitInfo() *CommitInfo {
 // FirstVersion returns the earliest version that still has WAL entries on disk.
 func (db *DB) FirstVersion() (int64, error) {
 	db.mtx.Lock()
-	target, err := db.walTargetLocked(0)
+	walLog, initialVersion, err := db.walReaderLocked()
 	db.mtx.Unlock()
 	if err != nil {
 		return 0, err
 	}
 
-	firstIndex, err := target.log.FirstIndex()
+	firstIndex, err := walLog.FirstIndex()
 	if err != nil {
 		return 0, err
 	}
 	if firstIndex == 0 {
 		return 0, nil
 	}
-	return walVersion(firstIndex, target.initialVersion), nil
+	return walVersion(firstIndex, initialVersion), nil
 }
 
 // EarliestVersion returns the earliest queryable version, which is the
@@ -1198,14 +1198,23 @@ type walTarget struct {
 	snapshotVersion int64
 }
 
+// walReaderLocked requires db.mtx.
+func (db *DB) walReaderLocked() (walReader, uint32, error) {
+	if db.walReader == nil {
+		return nil, 0, errWALNotInitialized
+	}
+	return db.walReader, db.initialVersion, nil
+}
+
 // walTargetLocked requires db.mtx.
 func (db *DB) walTargetLocked(version int64) (walTarget, error) {
-	if db.walReader == nil {
-		return walTarget{}, errWALNotInitialized
+	walLog, initialVersion, err := db.walReaderLocked()
+	if err != nil {
+		return walTarget{}, err
 	}
 	return walTarget{
-		log:             db.walReader,
-		initialVersion:  db.initialVersion,
+		log:             walLog,
+		initialVersion:  initialVersion,
 		version:         version,
 		snapshotVersion: db.SnapshotVersion(),
 	}, nil
