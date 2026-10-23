@@ -1714,38 +1714,40 @@ func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
 func TestWaitForWALVersionGivesUp(t *testing.T) {
 	const testTimeout = 200 * time.Millisecond
 
-	// the writer takes the next commit's entry and dies, leaving commit info ahead of the wal.
-	killAsyncWriter := func(t *testing.T, db *DB) {
+	// commits one more version through writer, leaving commit info ahead of the wal until it writes.
+	commitThrough := func(t *testing.T, db *DB, writer writeAheadLog) error {
 		t.Helper()
-		db.walWriter = failingWriteWAL{db.walWriter}
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
-		_, _ = db.Commit()
-	}
-	failSyncWrite := func(t *testing.T, db *DB) {
-		t.Helper()
-		db.walWriter = failingWriteWAL{db.walWriter}
+		db.walWriter = writer
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
 		_, err := db.Commit()
-		require.ErrorContains(t, err, simulatedWALWriteErr)
+		return err
 	}
-	// the next commit's write is held back until shortly after the wait starts.
-	delayAsyncWrite := func(t *testing.T, db *DB) {
+	killWriter := func(t *testing.T, db *DB) {
 		t.Helper()
-		release := make(chan struct{})
-		db.walWriter = gatedWriteWAL{db.walWriter, release}
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
-		_, err := db.Commit()
-		require.NoError(t, err)
-		time.AfterFunc(testTimeout/4, func() { close(release) })
+		// async: Commit may or may not see the death yet; sync: it must.
+		err := commitThrough(t, db, failingWriteWAL{db.walWriter})
+		if db.walChanSize < 0 {
+			require.ErrorContains(t, err, simulatedWALWriteErr)
+		}
 	}
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
-		// restore a healthy writer so only the latched error can fail the commit.
+		// a healthy writer again, so only the latched error can fail the commit.
 		db.walWriter = db.walWriter.(failingWriteWAL).writeAheadLog
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
 		_, err := db.Commit()
 		require.ErrorContains(t, err, simulatedWALWriteErr)
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
+	}
+	waitDirect := func(db *DB, timeout time.Duration, checkWriter func() error) error {
+		return walTarget{db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0}.wait(timeout, checkWriter)
+	}
+	traverse := func(db *DB) error {
+		return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
+	}
+	firstStoreVersions := func(db *DB) error {
+		_, err := db.FirstStoreVersions([]string{testStoreName})
+		return err
 	}
 
 	testCases := []struct {
@@ -1758,32 +1760,41 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 	}{
 		{
 			name: "caught up",
+			wait: func(db *DB) error { return waitDirect(db, testTimeout, db.checkAsyncCommitIfIdle) },
+		},
+		{
+			name: "wal catching up mid-wait is read in full",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				release := make(chan struct{})
+				require.NoError(t, commitThrough(t, db, gatedWriteWAL{db.walWriter, release}))
+				time.AfterFunc(testTimeout/4, func() { close(release) })
+			},
 			wait: func(db *DB) error {
-				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
+				var last int64
+				if err := db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(v int64, _ *ChangeSet) error {
+					last = v
+					return nil
+				}); err != nil {
+					return err
+				}
+				if last != db.lastCommitInfo.Version {
+					return fmt.Errorf("traversal stopped at version %d, want %d", last, db.lastCommitInfo.Version)
+				}
+				return nil
 			},
 		},
 		{
-			name:     "latched writer error fails even when the wal is caught up",
+			name:     "latched writer error fails a reader even when the wal is caught up",
 			malleate: func(_ *testing.T, db *DB) { db.walErr = errors.New("simulated latched wal error") },
-			wait: func(db *DB) error {
-				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
-			},
-			expErr: "simulated latched wal error",
-		},
-		{
-			name:     "wal catching up mid-wait succeeds",
-			malleate: delayAsyncWrite,
-			wait: func(db *DB) error {
-				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
-			},
+			wait:     traverse,
+			expErr:   "simulated latched wal error",
 		},
 		{
 			name:     "wal stuck behind commit info times out",
 			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
-			wait: func(db *DB) error {
-				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
-			},
-			expErr: "timed out waiting for wal to catch up",
+			wait:     func(db *DB) error { return waitDirect(db, testTimeout, db.checkAsyncCommitIfIdle) },
+			expErr:   "timed out waiting for wal to catch up",
 		},
 		{
 			name: "busy db.mtx still times out",
@@ -1791,38 +1802,46 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 				db.lastCommitInfo.Version++
 				db.mtx.Lock()
 			},
-			wait: func(db *DB) error {
-				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
-			},
+			wait:      func(db *DB) error { return waitDirect(db, testTimeout, db.checkAsyncCommitIfIdle) },
 			expErr:    "timed out waiting for wal to catch up",
 			postCheck: func(_ *testing.T, db *DB) { db.mtx.Unlock() },
 		},
 		{
-			name:     "dead async writer fails TraverseStateChanges",
-			malleate: killAsyncWriter,
+			// the full catch-up timeout exceeds the test's cap, so only the in-loop writer check returns in time.
+			name:     "writer dying mid-wait fails before the timeout",
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
 			wait: func(db *DB) error {
-				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
+				return waitDirect(db, walCatchupTimeout, func() error { return errors.New("simulated writer death mid-wait") })
 			},
+			expErr: "simulated writer death mid-wait",
+		},
+		{
+			name:      "dead async writer fails TraverseStateChanges",
+			malleate:  killWriter,
+			wait:      traverse,
 			expErr:    simulatedWALWriteErr,
 			postCheck: requireWriterErrLatched,
 		},
 		{
-			name:     "dead async writer fails FirstStoreVersions",
-			malleate: killAsyncWriter,
-			wait: func(db *DB) error {
-				_, err := db.FirstStoreVersions([]string{testStoreName})
-				return err
-			},
+			name:      "dead async writer fails FirstStoreVersions",
+			malleate:  killWriter,
+			wait:      firstStoreVersions,
 			expErr:    simulatedWALWriteErr,
 			postCheck: requireWriterErrLatched,
 		},
 		{
-			name:     "failed sync wal write fails TraverseStateChanges",
-			syncWAL:  true,
-			malleate: failSyncWrite,
-			wait: func(db *DB) error {
-				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
-			},
+			name:      "failed sync wal write fails TraverseStateChanges",
+			syncWAL:   true,
+			malleate:  killWriter,
+			wait:      traverse,
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			name:      "failed sync wal write fails FirstStoreVersions",
+			syncWAL:   true,
+			malleate:  killWriter,
+			wait:      firstStoreVersions,
 			expErr:    simulatedWALWriteErr,
 			postCheck: requireWriterErrLatched,
 		},

@@ -462,11 +462,8 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
-	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
+	walLog, initialVersion, err := db.waitWALForRead()
 	if err != nil {
-		return err
-	}
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion, walCatchupTimeout, db.checkAsyncCommitIfIdle); err != nil {
 		return err
 	}
 	firstIndex, err := walLog.FirstIndex()
