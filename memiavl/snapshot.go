@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 const (
@@ -50,12 +51,16 @@ type Snapshot struct {
 
 	// nil means empty snapshot
 	root *PersistedNode
+
+	// trees sharing this snapshot: the opener's one plus one per Tree.Copy; the
+	// last Close unmaps the files.
+	refs atomic.Int32
 }
 
 func NewEmptySnapshot(version uint32) *Snapshot {
-	return &Snapshot{
-		version: version,
-	}
+	snapshot := &Snapshot{version: version}
+	snapshot.refs.Store(1)
+	return snapshot
 }
 
 // OpenSnapshot parse the version number and the root node index from metadata file,
@@ -150,6 +155,7 @@ func OpenSnapshot(snapshotDir string) (snapshot *Snapshot, err error) {
 		nodesLayout:  nodesData,
 		leavesLayout: leavesData,
 	}
+	snapshot.refs.Store(1)
 
 	if nodesLen > 0 {
 		snapshot.root = &PersistedNode{
@@ -168,8 +174,13 @@ func OpenSnapshot(snapshotDir string) (snapshot *Snapshot, err error) {
 	return snapshot, nil
 }
 
-// Close closes the file and mmap handles, clears the buffers.
+// Close drops one reference; the last one closes the file and mmap handles and
+// clears the buffers.
 func (snapshot *Snapshot) Close() error {
+	if snapshot.refs.Add(-1) > 0 {
+		return nil
+	}
+
 	var errs []error
 
 	if snapshot.nodesMap != nil {
@@ -183,7 +194,7 @@ func (snapshot *Snapshot) Close() error {
 	}
 
 	// reset to an empty tree
-	*snapshot = *NewEmptySnapshot(snapshot.version)
+	*snapshot = Snapshot{version: snapshot.version}
 	return errors.Join(errs...)
 }
 

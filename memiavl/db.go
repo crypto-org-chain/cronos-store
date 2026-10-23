@@ -97,7 +97,7 @@ type DB struct {
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
 	// scanning the directory.
-	earliestSnapshotCache atomic.Int64
+	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
 	wbatch wal.Batch
@@ -321,6 +321,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterLimit:    opts.SnapshotWriterLimit,
+		earliestSnapshotCache:  new(atomic.Int64),
 	}
 	ownershipMoved = true
 	db.attachTraverseStateChanges()
@@ -383,7 +384,13 @@ func (db *DB) SetInitialVersion(initialVersion int64) error {
 		return err
 	}
 
-	return initEmptyDB(db.dir, db.initialVersion, db.chainId)
+	if err := initEmptyDB(db.dir, db.initialVersion, db.chainId); err != nil {
+		return err
+	}
+
+	// the earliest version follows the initial version, so drop any cached value.
+	db.earliestSnapshotCache.Store(0)
+	return nil
 }
 
 // ApplyUpgrades wraps MultiTree.ApplyUpgrades, it also append the upgrades in a pending log,
@@ -839,11 +846,30 @@ func (db *DB) waitAsyncCommit() error {
 	return db.latchWalErr(err)
 }
 
+// Copy returns a read-only view of the current state that shares the live
+// snapshot's mmap. It stays valid across reloads; Close it when done.
 func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	return db.readOnlyCopy(db.cacheSize)
+}
+
+// CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
+// short-lived copy: its cache would start cold and never pay for itself.
+func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	return db.readOnlyCopy(cacheSize)
+}
+
+// A copy has no WAL and shares the source's directory, so writes through it
+// would be lost or would rewrite the source's snapshots.
+func (db *DB) readOnlyCopy(cacheSize int) *DB {
+	cloned := db.copy(cacheSize)
+	cloned.readOnly = true
+	return cloned
 }
 
 func (db *DB) copy(cacheSize int) *DB {
@@ -855,6 +881,8 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                 db.dir,
 		snapshotWriterLimit: db.snapshotWriterLimit,
 	}
+	// shared so a prune after this copy is taken still reaches its readers.
+	cloned.earliestSnapshotCache = db.earliestSnapshotCache
 	cloned.attachTraverseStateChanges()
 	return cloned
 }
@@ -916,8 +944,9 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 		}
 	}
 
-	// retain the outgoing generation for one reload cycle: copies and lock-free
-	// readers may still hold PersistedNodes into its mmap'd snapshot.
+	// retain the outgoing generation for one reload cycle: readers of the live
+	// trees may still hold PersistedNodes into its mmap'd snapshot. Copies hold
+	// their own reference.
 	old := db.MultiTree
 	db.MultiTree = *mtree
 	db.retiredMultiTree = &old
@@ -967,17 +996,25 @@ func (db *DB) rewriteSnapshotBackground() error {
 
 	cloned := db.copy(0)
 	wal := db.walReader
+	logger, dir, version := db.logger, db.dir, cloned.Version()
+	zeroCopy, cacheSize, chainID := db.zeroCopy, db.cacheSize, db.chainId
 	go func() {
 		defer close(ch)
 
-		cloned.logger.Info("start rewriting snapshot", "version", cloned.Version())
-		if err := cloned.RewriteSnapshotWithContext(ctx); err != nil {
+		logger.Info("start rewriting snapshot", "version", version)
+		err := cloned.RewriteSnapshotWithContext(ctx)
+		// release the clone before handing back a result, so the generation it pins
+		// can be unmapped once the DB drops it.
+		if cerr := cloned.Close(); cerr != nil {
+			logger.Error("failed to release snapshot rewrite copy", "err", cerr)
+		}
+		if err != nil {
 			// write error log but don't stop the client, it could happen when load an old version.
-			cloned.logger.Error("failed to rewrite snapshot", "err", err)
+			logger.Error("failed to rewrite snapshot", "err", err)
 			return
 		}
-		cloned.logger.Info("finished rewriting snapshot", "version", cloned.Version())
-		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, cloned.cacheSize, cloned.chainId)
+		logger.Info("finished rewriting snapshot", "version", version)
+		mtree, err := LoadMultiTree(currentPath(dir), zeroCopy, cacheSize, chainID)
 		if err != nil {
 			ch <- snapshotResult{err: err}
 			return
@@ -989,7 +1026,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 			return
 		}
 
-		cloned.logger.Info("finished best-effort WAL catchup", "version", cloned.Version(), "latest", mtree.Version())
+		logger.Info("finished best-effort WAL catchup", "version", version, "latest", mtree.Version())
 
 		ch <- snapshotResult{mtree: mtree}
 	}()
@@ -1019,11 +1056,11 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// nil after a previous Close
+	// copies have no wal, and a previous Close nils it.
 	if db.walReader != nil {
 		errs = append(errs, db.walReader.Close())
-		db.walReader = nil
 	}
+	db.walReader = nil
 	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
@@ -1122,8 +1159,14 @@ func (db *DB) EarliestVersion() (int64, error) {
 			v = 1
 		}
 	}
-	db.earliestSnapshotCache.Store(v)
+	db.cacheEarliestVersion(v)
 	return v, nil
+}
+
+// cacheEarliestVersion fills only an empty cache, so a scan that raced a prune
+// can't overwrite the prune's newer value.
+func (db *DB) cacheEarliestVersion(v int64) {
+	db.earliestSnapshotCache.CompareAndSwap(0, v)
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.
