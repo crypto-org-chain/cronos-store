@@ -574,7 +574,8 @@ func (db *DB) CommittedVersion() (int64, error) {
 	return committedVersionAt(lastIndex, db.initialVersion, db.SnapshotVersion()), nil
 }
 
-// committedVersionAt falls back to the snapshot version while the wal is empty.
+// committedVersionAt falls back to the snapshot version only while the wal is empty: a reload can
+// put the snapshot ahead of a non-empty wal.
 func committedVersionAt(lastIndex uint64, initialVersion uint32, snapshotVersion int64) int64 {
 	if lastIndex == 0 {
 		return snapshotVersion
@@ -1135,7 +1136,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		return result, nil
 	}
 
-	walLog, initialVersion, err := db.waitWALForRead(0, true)
+	walLog, initialVersion, err := db.waitWALForRead(0, true /* wait */)
 	if err != nil {
 		return nil, err
 	}

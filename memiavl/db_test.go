@@ -1749,7 +1749,7 @@ func (s *WALWaitTestSuite) TestWait() {
 			wait:     traverseExpect(1, 1, []int64{1}),
 		},
 		{
-			name:           "range below initialVersion is empty without waiting",
+			name:           "range below initialVersion is empty",
 			initialVersion: 100,
 			wait:           traverseExpect(1, 5, []int64{}),
 		},
