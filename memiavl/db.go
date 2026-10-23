@@ -23,7 +23,10 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	walPollInterval = time.Millisecond
+	// the commit path waits under db.mtx for the entry it just queued, so it polls tightly;
+	// readers hold no lock and can wait seconds, so they poll slower.
+	walPollInterval     = 50 * time.Nanosecond
+	walReadPollInterval = time.Millisecond
 )
 
 // a var so tests can shorten it; tests that do must not run in parallel.
@@ -587,7 +590,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) e
 	if err != nil {
 		return err
 	}
-	return db.waitForWAL(target, timeout)
+	return db.waitForWAL(target, timeout, walPollInterval)
 }
 
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
@@ -1191,7 +1194,7 @@ func (db *DB) waitWALForRead() (walReader, uint32, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	return target.log, target.initialVersion, db.waitForWAL(target, walCatchupTimeout)
+	return target.log, target.initialVersion, db.waitForWAL(target, walCatchupTimeout, walReadPollInterval)
 }
 
 type walTarget struct {
@@ -1222,7 +1225,7 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 }
 
 // a latched wal error wins, even when the wal looks caught up; the timeout covers a stalled wal.
-func (db *DB) waitForWAL(t walTarget, timeout time.Duration) error {
+func (db *DB) waitForWAL(t walTarget, timeout, pollInterval time.Duration) error {
 	if t.version <= 0 || t.version <= t.snapshotVersion {
 		return db.walError()
 	}
@@ -1244,7 +1247,7 @@ func (db *DB) waitForWAL(t walTarget, timeout time.Duration) error {
 			return fmt.Errorf("timed out waiting for wal to catch up to version %d, current: %d",
 				t.version, committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion))
 		}
-		time.Sleep(walPollInterval)
+		time.Sleep(pollInterval)
 	}
 }
 
