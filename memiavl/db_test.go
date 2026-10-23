@@ -1590,6 +1590,8 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
+		db.mtx.Lock()
+		defer db.mtx.Unlock()
 		done <- db.checkBackgroundSnapshotRewrite()
 	}()
 	select {
@@ -1700,10 +1702,20 @@ func TestWALWait(t *testing.T) {
 			},
 			wait: func(db *DB) error {
 				var last int64
-				if err := db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(v int64, _ *ChangeSet) error {
-					last = v
-					return nil
-				}); err != nil {
+				traversed := make(chan error, 1)
+				go func() {
+					traversed <- db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(v int64, _ *ChangeSet) error {
+						last = v
+						return nil
+					})
+				}()
+				// before the gate opens the reader is waiting, and must not hold db.mtx.
+				time.Sleep(testTimeout / 8)
+				if !db.mtx.TryLock() {
+					return errors.New("reader holds db.mtx while waiting for the wal")
+				}
+				db.mtx.Unlock()
+				if err := <-traversed; err != nil {
 					return err
 				}
 				if last != db.lastCommitInfo.Version {
@@ -1735,6 +1747,19 @@ func TestWALWait(t *testing.T) {
 			malleate: killWriterMidWait,
 			wait:     traverse,
 			expErr:   simulatedWALWriteErr,
+		},
+		{
+			// the next commit blocks on the send to the busy writer, then sees it quit.
+			name:     "async writer dying during a commit's send fails that commit",
+			malleate: killWriterMidWait,
+			wait: func(db *DB) error {
+				if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")); err != nil {
+					return err
+				}
+				_, err := db.Commit()
+				return err
+			},
+			expErr: simulatedWALWriteErr,
 		},
 		{
 			name:     "async writer dying mid-wait fails the commit-path wait",

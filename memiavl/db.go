@@ -777,38 +777,41 @@ func (db *DB) initAsyncCommit() {
 
 	go func() {
 		defer close(walQuit)
-
-		batch := wal.Batch{}
-		for {
-			entries := channelBatchRecv(walChan)
-			if len(entries) == 0 {
-				// channel is closed
-				break
-			}
-
-			lastIndex, err := db.walWriter.LastIndex()
-			if err != nil {
-				db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
-				return
-			}
-
-			for _, entry := range entries {
-				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
-					return
-				}
-			}
-
-			if err := db.walWriter.WriteBatch(&batch); err != nil {
-				db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
-				return
-			}
-			batch.Clear()
+		if err := db.writeWALAsync(walChan); err != nil {
+			db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
 		}
 	}()
 
 	db.walChan = walChan
 	db.walQuit = walQuit
+}
+
+// writeWALAsync drains walChan until it's closed or a write fails.
+func (db *DB) writeWALAsync(walChan chan *walEntry) error {
+	batch := wal.Batch{}
+	for {
+		entries := channelBatchRecv(walChan)
+		if len(entries) == 0 {
+			// channel is closed
+			return nil
+		}
+
+		lastIndex, err := db.walWriter.LastIndex()
+		if err != nil {
+			return err
+		}
+
+		for _, entry := range entries {
+			if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
+				return err
+			}
+		}
+
+		if err := db.walWriter.WriteBatch(&batch); err != nil {
+			return err
+		}
+		batch.Clear()
+	}
 }
 
 // WaitAsyncCommit waits for the completion of async commit and returns any latched wal write error.
@@ -1220,9 +1223,9 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 	}, nil
 }
 
-// waitForWAL gives up on a latched wal error or after timeout, since a failed wal write
-// leaves lastCommitInfo ahead of the wal for good. The error is checked before every wal
-// read, so it wins even when the wal looks caught up.
+// waitForWAL ends at once on a latched wal error, checked before every wal read so it wins
+// even when the wal looks caught up. The timeout covers a stalled wal, or commit info bumped
+// without a wal write.
 func (db *DB) waitForWAL(t walTarget, timeout time.Duration) error {
 	if t.version <= 0 || t.version <= t.snapshotVersion {
 		return db.walError()
