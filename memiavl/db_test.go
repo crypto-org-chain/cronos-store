@@ -1719,6 +1719,17 @@ func (s *WALWaitTestSuite) TestWait() {
 			wait:     traverseExpect(4, 3, []int64{}),
 		},
 		{
+			name: "reversed range inside the wal is empty",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				for range 2 {
+					require.NoError(t, commit(db))
+				}
+				require.NoError(t, db.WaitAsyncCommit())
+			},
+			wait: traverseExpect(3, 1, []int64{}),
+		},
+		{
 			name:     "reversed range reports a latched wal error",
 			malleate: latchErr,
 			wait:     traverseExpect(4, 3, []int64{}),

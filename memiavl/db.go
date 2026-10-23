@@ -81,7 +81,7 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan struct{} // closed when the async writer exits
-	// latched wal write error (async or sync); fails Commit and every waiting reader from then on.
+	// latched wal write error (async or sync); fails Commit and wal readers from then on.
 	// Atomic so waiting readers see it without db.mtx.
 	walErr atomic.Pointer[error]
 	// bounds wal catch-up waits; a field so tests can shorten it.
@@ -1128,11 +1128,14 @@ func (db *DB) EarliestVersion() (int64, error) {
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.
-// Fails if the wal can't catch up within the timeout or a wal write failed.
+// Fails if the wal stalls longer than the catch-up timeout or a wal write failed.
 func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(stores))
 	if len(stores) == 0 {
-		return result, db.walError()
+		if err := db.walError(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 
 	walLog, initialVersion, err := db.waitWALForRead(0)
