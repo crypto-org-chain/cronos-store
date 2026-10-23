@@ -1739,6 +1739,18 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			expErr: "timed out waiting for wal to catch up",
 		},
 		{
+			name: "busy db.mtx still times out",
+			malleate: func(_ *testing.T, db *DB) {
+				db.lastCommitInfo.Version++
+				db.mtx.Lock()
+			},
+			wait: func(db *DB) error {
+				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
+			},
+			expErr:    "timed out waiting for wal to catch up",
+			postCheck: func(_ *testing.T, db *DB) { db.mtx.Unlock() },
+		},
+		{
 			name:     "dead async writer fails TraverseStateChanges",
 			malleate: killAsyncWriter,
 			wait: func(db *DB) error {

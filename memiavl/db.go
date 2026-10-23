@@ -24,7 +24,7 @@ const (
 	TmpSuffix                  = "-tmp"
 
 	walCatchupTimeout = 5 * time.Second
-	walPollInterval   = 50 * time.Nanosecond
+	walPollInterval   = time.Millisecond
 )
 
 var errReadOnly = errors.New("db is read-only")
@@ -1197,15 +1197,15 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 	targetIndex := walIndex(targetVersion, initialVersion)
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := checkWriter(); err != nil {
-			return err
-		}
 		lastIndex, err := walLog.LastIndex()
 		if err != nil {
 			return fmt.Errorf("get wal version failed: %w", err)
 		}
 		if lastIndex >= targetIndex {
 			return nil
+		}
+		if err := checkWriter(); err != nil {
+			return err
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for wal to catch up to version %d, last wal index: %d", targetVersion, lastIndex)
@@ -1214,8 +1214,8 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 	}
 }
 
-// checkAsyncCommitIfIdle skips the check while db.mtx is busy so readers never
-// queue behind Commit; the caller's deadline still bounds the wait.
+// checkAsyncCommitIfIdle skips the check while db.mtx is busy so the poll loop
+// never blocks on it; the caller's deadline still bounds the wait.
 func (db *DB) checkAsyncCommitIfIdle() error {
 	if !db.mtx.TryLock() {
 		return nil
