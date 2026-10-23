@@ -280,8 +280,8 @@ func (t *Tree) remove(key []byte) {
 
 // SaveVersion increases the version number and optionally updates the hashes
 func (t *Tree) SaveVersion(updateHash bool) ([]byte, int64, error) {
-	if t.version == uint32(math.MaxUint32) {
-		return nil, 0, fmt.Errorf("version overflows uint32: %d", t.version)
+	if err := t.checkVersionOverflow(); err != nil {
+		return nil, 0, err
 	}
 
 	var hash []byte
@@ -291,6 +291,13 @@ func (t *Tree) SaveVersion(updateHash bool) ([]byte, int64, error) {
 
 	t.version++
 	return hash, int64(t.version), nil
+}
+
+func (t *Tree) checkVersionOverflow() error {
+	if t.version == uint32(math.MaxUint32) {
+		return fmt.Errorf("version overflows uint32: %d", t.version)
+	}
+	return nil
 }
 
 // Version returns the current tree version
