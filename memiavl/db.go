@@ -777,9 +777,6 @@ func (db *DB) initAsyncCommit() {
 
 	go func() {
 		defer close(walQuit)
-		quit := func(err error) {
-			db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
-		}
 
 		batch := wal.Batch{}
 		for {
@@ -791,19 +788,19 @@ func (db *DB) initAsyncCommit() {
 
 			lastIndex, err := db.walWriter.LastIndex()
 			if err != nil {
-				quit(err)
+				db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
 				return
 			}
 
 			for _, entry := range entries {
 				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					quit(err)
+					db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
 					return
 				}
 			}
 
 			if err := db.walWriter.WriteBatch(&batch); err != nil {
-				quit(err)
+				db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
 				return
 			}
 			batch.Clear()
@@ -1080,20 +1077,20 @@ func (db *DB) WorkingCommitInfo() *CommitInfo {
 // FirstVersion returns the earliest version that still has WAL entries on disk.
 func (db *DB) FirstVersion() (int64, error) {
 	db.mtx.Lock()
-	walLog, initialVersion := db.walReader, db.initialVersion
+	target, err := db.walTargetLocked(0)
 	db.mtx.Unlock()
-	if walLog == nil {
-		return 0, errWALNotInitialized
+	if err != nil {
+		return 0, err
 	}
 
-	firstIndex, err := walLog.FirstIndex()
+	firstIndex, err := target.log.FirstIndex()
 	if err != nil {
 		return 0, err
 	}
 	if firstIndex == 0 {
 		return 0, nil
 	}
-	return walVersion(firstIndex, initialVersion), nil
+	return walVersion(firstIndex, target.initialVersion), nil
 }
 
 // EarliestVersion returns the earliest queryable version, which is the

@@ -1574,6 +1574,7 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 		AsyncCommitBuffer: 0,
 	}, TestAppChainID)
 	require.NoError(t, err)
+	defer db.Close()
 
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 	_, err = db.Commit()
@@ -1593,8 +1594,8 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	}()
 	select {
 	case cerr := <-done:
-		require.Error(t, cerr, "snapshot rewrite catch-up must surface the async wal error")
-	case <-time.After(5 * time.Second):
+		require.ErrorContains(t, cerr, "simulated async wal writer death")
+	case <-time.After(walCatchupTimeout / 2):
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
 }
@@ -1650,8 +1651,10 @@ func TestWALWait(t *testing.T) {
 		// a healthy writer again, so only the latched error can fail the commit.
 		db.walWriter = db.walWriter.(failingWriteWAL).writeAheadLog
 		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
+		version := db.Version()
 		_, err := db.Commit()
 		require.ErrorContains(t, err, simulatedWALWriteErr)
+		require.Equal(t, version, db.Version(), "a latched error must fail Commit before it saves a version")
 		if db.walChanSize < 0 {
 			require.ErrorContains(t, err, "sync wal write failed")
 		} else {
@@ -1708,7 +1711,7 @@ func TestWALWait(t *testing.T) {
 			},
 		},
 		{
-			name: "reader times out on a live writer that never catches up",
+			name: "reader times out when commit info is ahead of a healthy wal",
 			malleate: func(t *testing.T, db *DB) {
 				t.Helper()
 				orig := walCatchupTimeout
@@ -1806,7 +1809,13 @@ func TestWALWait(t *testing.T) {
 				AsyncCommitBuffer: asyncCommitBuffer,
 			}, TestAppChainID)
 			require.NoError(t, err)
-			defer db.Close()
+			// a hung commit-path wait still holds db.mtx, so Close only once the wait returned.
+			waited := false
+			defer func() {
+				if waited {
+					_ = db.Close()
+				}
+			}()
 
 			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 			_, err = db.Commit()
@@ -1819,6 +1828,7 @@ func TestWALWait(t *testing.T) {
 			go func() { done <- tc.wait(db) }()
 			select {
 			case err := <-done:
+				waited = true
 				if tc.expErr == "" {
 					require.NoError(t, err)
 				} else {
