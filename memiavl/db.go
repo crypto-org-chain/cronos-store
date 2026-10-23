@@ -1240,9 +1240,6 @@ func (db *DB) waitForWAL(t walTarget, timeout, pollInterval time.Duration) error
 		return db.walError()
 	}
 
-	if timeout <= 0 { // a DB not built by Load
-		timeout = walCatchupTimeout
-	}
 	targetIndex := walIndex(t.version, t.initialVersion)
 	deadline := time.Now().Add(timeout)
 	for {
