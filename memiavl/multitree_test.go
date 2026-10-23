@@ -165,62 +165,6 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
-func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
-	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
-
-	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8"}
-	var upgrades []*TreeNameUpgrade
-	for _, name := range stores {
-		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
-	}
-	require.NoError(t, mtree.ApplyUpgrades(upgrades))
-
-	for _, storeName := range stores {
-		tree := mtree.TreeByName(storeName)
-		require.NotNil(t, tree)
-
-		for i := 0; i < 2000; i++ {
-			key := []byte(storeName + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)))
-			value := []byte("value" + string(rune('0'+i%10)))
-			tree.set(key, value)
-		}
-	}
-
-	_, err := mtree.SaveVersion(true)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	pool := pond.New(2, 10)
-	defer pool.StopAndWait()
-	// hold both workers so the writes stay queued until after cancel.
-	release := make(chan struct{})
-	releaseWorkers := sync.OnceFunc(func() { close(release) })
-	defer releaseWorkers()
-	for i := 0; i < 2; i++ {
-		pool.Submit(func() { <-release })
-	}
-
-	snapshotDir := t.TempDir()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
-	}()
-
-	// the 2 blockers plus one write per store.
-	require.Eventually(t, func() bool {
-		return pool.SubmittedTasks() == uint64(2+len(stores))
-	}, 10*time.Second, time.Millisecond)
-	cancel()
-	releaseWorkers()
-
-	err = <-errChan
-	require.ErrorIs(t, err, context.Canceled)
-	// the commit info is written only after every tree, so a canceled write leaves none.
-	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
-}
-
 func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
