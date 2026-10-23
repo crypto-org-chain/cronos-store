@@ -1683,9 +1683,10 @@ func (s *WALWaitTestSuite) TestWait() {
 			wait:           traverseExpect(1, 5, nil),
 		},
 		{
+			// end is past the wal too, so only the reversed-range check avoids the full timeout.
 			name:     "reversed range is empty without waiting",
-			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
-			wait:     traverseExpect(2, 1, nil),
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version += 3 },
+			wait:     traverseExpect(4, 3, nil),
 		},
 		{
 			name:     "latched writer error fails a reader even when the wal is caught up",

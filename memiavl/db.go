@@ -853,7 +853,6 @@ func (db *DB) copy(cacheSize int) *DB {
 		logger:              db.logger,
 		dir:                 db.dir,
 		snapshotWriterLimit: db.snapshotWriterLimit,
-		catchupTimeout:      db.catchupTimeout,
 	}
 	cloned.attachTraverseStateChanges()
 	return cloned
@@ -1130,6 +1129,7 @@ func (db *DB) EarliestVersion() (int64, error) {
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.
+// Fails if the wal can't catch up within the timeout or a wal write failed.
 func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(stores))
 	if len(stores) == 0 {
@@ -1240,6 +1240,9 @@ func (db *DB) waitForWAL(t walTarget, timeout, pollInterval time.Duration) error
 		return db.walError()
 	}
 
+	if timeout <= 0 { // a DB not built by Load
+		timeout = walCatchupTimeout
+	}
 	targetIndex := walIndex(t.version, t.initialVersion)
 	deadline := time.Now().Add(timeout)
 	for {

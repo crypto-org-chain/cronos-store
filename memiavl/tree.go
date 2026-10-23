@@ -379,6 +379,7 @@ func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 // TraverseStateChanges iterates the change sets between startVersion and endVersion (inclusive).
 // endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
 // A genuine reversed range (0 < endVersion < startVersion) yields nothing.
+// Fails if the wal can't catch up within the timeout or a wal write failed.
 func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
 	if t.traverseStateChanges == nil {
 		return fmt.Errorf("TraverseStateChanges not supported")
@@ -468,6 +469,9 @@ func (db *DB) attachTraverseStateChanges() {
 func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64, fn func(int64, *ChangeSet) error) error {
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
+	}
+	if endVersion > 0 && endVersion < startVersion {
+		return nil
 	}
 	walLog, initialVersion, err := db.waitWALForRead(endVersion)
 	if err != nil {
