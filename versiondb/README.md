@@ -87,6 +87,16 @@ User can control the peak ram usage by controlling the `--concurrency` and `--so
 
 With default parameters it can finish in around 12minutes for testnet archive node on our test node (8cores, peak RSS 2G).
 
+#### Compact VersionDB
+
+Ingested sst files are LZ4 compressed. Files from `restore-versiondb` are ZSTD without a dictionary (uncompressed in v1.9.0 and earlier). With the node stopped, recompress them with ZSTD and a dictionary:
+
+```bash
+$ cronosd changeset compact-versiondb /home/.cronosd/data/versiondb --rate-limit 100
+```
+
+`--rate-limit` caps writes in MiB/s, `0` (default) means unlimited. It rewrites every versiondb sst file, so it can take hours on an archive node and needs free disk space for the rewritten files while it runs; a rerun after an interrupt starts over.
+
 ### Restore IAVL Tree
 
 When migrating an existing archive node to versiondb, it's recommended to rebuild the `application.db` from scratch to reclaim disk space faster, we provide a command to restore a single version of IAVL trees from memiavl snapshot.
