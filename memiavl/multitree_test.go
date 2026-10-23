@@ -186,13 +186,14 @@ func TestMultiTreeWriteSnapshotCancelWithQueuedWritesLeavesNoMetadata(t *testing
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	pool := pond.New(2, 10)
+	const workers = 2
+	pool := pond.New(workers, 10)
 	defer pool.StopAndWait()
-	// hold both workers so the writes stay queued until after cancel.
+	// hold every worker so the writes stay queued until after cancel.
 	release := make(chan struct{})
 	releaseWorkers := sync.OnceFunc(func() { close(release) })
 	defer releaseWorkers()
-	for i := 0; i < 2; i++ {
+	for range workers {
 		pool.Submit(func() { <-release })
 	}
 
@@ -203,15 +204,19 @@ func TestMultiTreeWriteSnapshotCancelWithQueuedWritesLeavesNoMetadata(t *testing
 		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
 	}()
 
-	// the 2 blockers plus one write per store.
+	// the blockers plus one write per store.
 	require.Eventually(t, func() bool {
-		return pool.SubmittedTasks() == uint64(2+len(stores))
+		return pool.SubmittedTasks() == uint64(workers+len(stores))
 	}, 10*time.Second, time.Millisecond)
 	cancel()
 	releaseWorkers()
 
-	err = <-errChan
-	require.ErrorIs(t, err, context.Canceled)
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteSnapshotWithContext did not return after the workers were released")
+	}
 	// the commit info is written only after every tree, so a canceled write leaves none.
 	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
 }

@@ -1424,7 +1424,7 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	require.EqualValues(t, 100, firstVersion)
 }
 
-func TestGetLatestVersionClosesWAL(t *testing.T) {
+func TestGetLatestVersionLeavesNoOpenFiles(t *testing.T) {
 	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
