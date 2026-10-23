@@ -1,0 +1,73 @@
+package tsrocksdb
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/linxGnu/grocksdb"
+)
+
+// CompactVersionDB rewrites every sst file of the versiondb column family, bottommost level included,
+// with the current compression options. rateBytesPerSec caps flush and compaction writes, 0 means unlimited.
+func CompactVersionDB(dir string, rateBytesPerSec int64) (before, after uint64, err error) {
+	if rateBytesPerSec < 0 {
+		return 0, 0, fmt.Errorf("negative rate limit: %d", rateBytesPerSec)
+	}
+	db, cfHandle, err := openVersionDB(dir, compactionDBOpts(rateBytesPerSec))
+	if err != nil {
+		return 0, 0, fmt.Errorf("open versiondb: %w", err)
+	}
+	defer func() {
+		cfHandle.Destroy()
+		db.Close()
+	}()
+
+	before, err = liveSSTFilesSize(db, cfHandle)
+	if err != nil {
+		return 0, 0, err
+	}
+	oldFiles := liveSSTFiles(db)
+	compactOpts := grocksdb.NewCompactRangeOptions()
+	defer compactOpts.Destroy()
+	// not KForceOptimized: rocksdb 10.x can leave a bottommost file that sits after one the same compaction wrote
+	compactOpts.SetBottommostLevelCompaction(grocksdb.KForce)
+	db.CompactRangeCFOpt(cfHandle, grocksdb.Range{}, compactOpts)
+
+	// CompactRangeCFOpt drops its status, so check background errors and surviving files instead
+	bgErrors, ok := db.GetIntProperty("rocksdb.background-errors")
+	if !ok {
+		return 0, 0, errors.New("failed to read rocksdb.background-errors")
+	}
+	if bgErrors > 0 {
+		return 0, 0, fmt.Errorf("compaction failed with %d background errors, see the rocksdb LOG file", bgErrors)
+	}
+	for _, f := range db.GetLiveFilesMetaData() {
+		if _, ok := oldFiles[f.Name]; ok {
+			return 0, 0, fmt.Errorf("sst file %s was not rewritten", f.Name)
+		}
+	}
+	after, err = liveSSTFilesSize(db, cfHandle)
+	if err != nil {
+		return 0, 0, err
+	}
+	return before, after, nil
+}
+
+// liveSSTFiles returns the versiondb column family's live sst file names.
+func liveSSTFiles(db *grocksdb.DB) map[string]struct{} {
+	files := make(map[string]struct{})
+	for _, f := range db.GetLiveFilesMetaData() {
+		if f.ColumnFamilyName == VersionDBCFName {
+			files[f.Name] = struct{}{}
+		}
+	}
+	return files
+}
+
+func liveSSTFilesSize(db *grocksdb.DB, cfHandle *grocksdb.ColumnFamilyHandle) (uint64, error) {
+	size, ok := db.GetIntPropertyCF("rocksdb.live-sst-files-size", cfHandle)
+	if !ok {
+		return 0, errors.New("failed to read rocksdb.live-sst-files-size")
+	}
+	return size, nil
+}
