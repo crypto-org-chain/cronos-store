@@ -787,7 +787,7 @@ func (db *DB) initAsyncCommit() {
 }
 
 // writeWALAsync drains walChan until it's closed or a write fails.
-func (db *DB) writeWALAsync(walChan chan *walEntry) error {
+func (db *DB) writeWALAsync(walChan <-chan *walEntry) error {
 	batch := wal.Batch{}
 	for {
 		entries := channelBatchRecv(walChan)
@@ -1201,7 +1201,6 @@ type walTarget struct {
 	snapshotVersion int64
 }
 
-// walReaderLocked requires db.mtx.
 func (db *DB) walReaderLocked() (walReader, uint32, error) {
 	if db.walReader == nil {
 		return nil, 0, errWALNotInitialized
@@ -1209,7 +1208,6 @@ func (db *DB) walReaderLocked() (walReader, uint32, error) {
 	return db.walReader, db.initialVersion, nil
 }
 
-// walTargetLocked requires db.mtx.
 func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 	walLog, initialVersion, err := db.walReaderLocked()
 	if err != nil {
