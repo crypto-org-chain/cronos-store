@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores (behavior change: loaded stores without change sets now count in the app hash)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
 - [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback
