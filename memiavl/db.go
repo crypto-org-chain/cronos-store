@@ -1204,6 +1204,7 @@ func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, s
 		if lastIndex >= targetIndex {
 			return nil
 		}
+		// before the deadline check, so a dead writer reports its error rather than a timeout.
 		if err := checkWriter(); err != nil {
 			return err
 		}
