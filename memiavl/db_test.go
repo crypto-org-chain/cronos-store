@@ -1701,6 +1701,16 @@ func (failingWriteWAL) WriteBatch(*wal.Batch) error {
 	return errors.New(simulatedWALWriteErr)
 }
 
+type gatedWriteWAL struct {
+	writeAheadLog
+	release <-chan struct{}
+}
+
+func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
+	<-w.release
+	return w.writeAheadLog.WriteBatch(b)
+}
+
 func TestWaitForWALVersionGivesUp(t *testing.T) {
 	const testTimeout = 200 * time.Millisecond
 
@@ -1718,8 +1728,21 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 		_, err := db.Commit()
 		require.ErrorContains(t, err, simulatedWALWriteErr)
 	}
+	// the next commit's write is held back until shortly after the wait starts.
+	delayAsyncWrite := func(t *testing.T, db *DB) {
+		t.Helper()
+		release := make(chan struct{})
+		db.walWriter = gatedWriteWAL{db.walWriter, release}
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
+		_, err := db.Commit()
+		require.NoError(t, err)
+		time.AfterFunc(testTimeout/4, func() { close(release) })
+	}
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
+		// restore a healthy writer so only the latched error can fail the commit.
+		db.walWriter = db.walWriter.(failingWriteWAL).writeAheadLog
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v3")))
 		_, err := db.Commit()
 		require.ErrorContains(t, err, simulatedWALWriteErr)
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
@@ -1737,6 +1760,13 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			name: "caught up",
 			wait: func(db *DB) error {
 				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
+			},
+		},
+		{
+			name:     "wal catching up mid-wait succeeds",
+			malleate: delayAsyncWrite,
+			wait: func(db *DB) error {
+				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
 			},
 		},
 		{
