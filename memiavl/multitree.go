@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 
 	"github.com/alitto/pond"
@@ -82,11 +83,15 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 			continue
 		}
 		name := e.Name()
-		treeNames = append(treeNames, name)
 		snapshot, err := OpenSnapshot(filepath.Join(dir, name))
 		if err != nil {
-			return nil, err
+			errs := []error{err}
+			for _, opened := range treeNames {
+				errs = append(errs, treeMap[opened].Close())
+			}
+			return nil, errors.Join(errs...)
 		}
+		treeNames = append(treeNames, name)
 		treeMap[name] = NewFromSnapshot(snapshot, zeroCopy, cacheSize)
 	}
 
@@ -120,7 +125,7 @@ func LoadMultiTree(dir string, zeroCopy bool, cacheSize int, chainId string) (*M
 	}
 	actual := mtree.buildCommitInfo(actualVersion)
 	if err := commitInfoEqual(metadata.CommitInfo, actual); err != nil {
-		return nil, fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err)
+		return nil, errors.Join(fmt.Errorf("snapshot metadata commit info does not match loaded trees: %w", err), mtree.Close())
 	}
 	return mtree, nil
 }
@@ -356,11 +361,15 @@ func commitInfoEqual(trusted, actual *CommitInfo) error {
 // CatchupWAL replay the new entries in the WAL on the tree to catch-up to the target or latest version.
 // endVersion == 0 means "to the latest version"; a negative endVersion returns an error.
 func (t *MultiTree) CatchupWAL(wal *wal.Log, endVersion int64) error {
+	return t.catchupWAL(wal, endVersion)
+}
+
+func (t *MultiTree) catchupWAL(reader walReader, endVersion int64) error {
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
 
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
 		return fmt.Errorf("read wal last index failed, %w", err)
 	}
@@ -387,7 +396,7 @@ func (t *MultiTree) CatchupWAL(wal *wal.Log, endVersion int64) error {
 	}
 
 	for i := firstIndex; i <= endIndex; i++ {
-		bz, err := wal.Read(i)
+		bz, err := reader.Read(i)
 		if err != nil {
 			return fmt.Errorf("read wal log failed, %w", err)
 		}
@@ -410,23 +419,76 @@ func (t *MultiTree) WriteSnapshot(dir string, wp *pond.WorkerPool) error {
 	return t.WriteSnapshotWithContext(context.Background(), dir, wp)
 }
 
+// RunWorkerGroup runs fn once per index in [0, len(labels)) on wp's workers, waits
+// for all of them, and joins their errors. labels name the tasks for error
+// reporting.
+//
+// The first failing task cancels the ctx handed to the rest. Tasks that start after
+// ctx is done are skipped with its error, so a failure (or the caller's cancel)
+// doesn't wait out every queued task.
+//
+// A panicking fn becomes an error. pond's worker recovers task panics itself and
+// only logs them, so without this the group's Wait would return normally and the
+// caller would promote whatever half-finished output the task left behind.
+//
+// A plain group is used instead of pond's GroupContext: the latter's Wait returns
+// as soon as its context is canceled, so the caller would resume — and may free
+// what the tasks are reading — while workers are still running.
+func RunWorkerGroup(
+	ctx context.Context,
+	wp *pond.WorkerPool,
+	labels []string,
+	fn func(ctx context.Context, i int) error,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	group := wp.Group()
+	// Each worker owns exactly one index, so no synchronization is needed to write it.
+	errs := make([]error, len(labels))
+	for i := range errs {
+		group.Submit(func() {
+			if err := ctx.Err(); err != nil {
+				errs[i] = err
+				return
+			}
+			if errs[i] = runWorkerTask(ctx, labels[i], i, fn); errs[i] != nil {
+				cancel()
+			}
+		})
+	}
+	group.Wait()
+	return errors.Join(errs...)
+}
+
+func runWorkerTask(ctx context.Context, label string, i int, fn func(ctx context.Context, i int) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in worker task %q: %v\n%s", label, r, debug.Stack())
+		}
+	}()
+	return fn(ctx, i)
+}
+
 func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp *pond.WorkerPool) error {
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
 		return err
 	}
 
-	// write the snapshots in parallel and wait all jobs done
-	// group, _ := wp.GroupContext(context.Background())
-	group, _ := wp.GroupContext(ctx)
-
-	for _, entry := range t.trees {
-		tree, name := entry.Tree, entry.Name
-		group.Submit(func() error {
-			return tree.WriteSnapshotWithContext(ctx, filepath.Join(dir, name))
-		})
+	names := make([]string, len(t.trees))
+	for i, entry := range t.trees {
+		names[i] = entry.Name
 	}
 
-	if err := group.Wait(); err != nil {
+	if err := RunWorkerGroup(ctx, wp, names, func(ctx context.Context, i int) error {
+		entry := t.trees[i]
+		return entry.WriteSnapshotWithContext(ctx, filepath.Join(dir, entry.Name))
+	}); err != nil {
+		return err
+	}
+	// A caller that canceled ctx after the last write started must still be told,
+	// even if every write succeeded.
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 

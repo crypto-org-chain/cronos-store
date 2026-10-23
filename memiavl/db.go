@@ -70,7 +70,8 @@ type DB struct {
 	triggerStateSyncExport func(height int64)
 
 	// invariant: the LastIndex always match the current version of MultiTree
-	wal         *wal.Log
+	walReader   walReader
+	walWriter   writeAheadLog // on a read-write DB, the same log as walReader; nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
@@ -89,8 +90,9 @@ type DB struct {
 	//   this method is the sole entry point for tree modifications, and there's no concurrency internally
 	//   (the background snapshot rewrite is handled separately), so we don't need locks in the Tree.
 	mtx sync.Mutex
-	// worker goroutine IdleTimeout = 5s
-	snapshotWriterPool *pond.WorkerPool
+
+	// max concurrent tree writers within one snapshot write.
+	snapshotWriterLimit int
 
 	// cached earliest snapshot version. Loaded lazily and refreshed by
 	// pruneSnapshots. Zero means "not cached"; readers should fall back to
@@ -122,9 +124,10 @@ type Options struct {
 	CacheSize int
 	// LoadForOverwriting if true rollbacks the state, specifically the Load method will
 	// truncate the versions after the `TargetVersion`, the `TargetVersion` becomes the latest version.
-	// it do nothing if the target version is `0`.
+	// it does nothing if the target version is `0`, and fails with wal.ErrOutOfRange if the target is outside the WAL.
 	LoadForOverwriting bool
 
+	// SnapshotWriterLimit caps concurrent tree writers within one snapshot write.
 	SnapshotWriterLimit int
 }
 
@@ -159,7 +162,7 @@ const (
 	SnapshotDirLen = len(SnapshotPrefix) + 20
 )
 
-func Load(dir string, opts Options, chainId string) (*DB, error) {
+func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 	if err := opts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid options: %w", err)
 	}
@@ -174,7 +177,27 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	var (
 		err      error
 		fileLock FileLock
+		mtree    *MultiTree
+		reader   walReader
+		writer   writeAheadLog
 	)
+	// until the DB takes ownership, an early return would leak the lock, the
+	// snapshot's mmaps and the WAL, and a retried Load could never re-lock the dir.
+	ownershipMoved := false
+	defer func() {
+		if ownershipMoved {
+			return
+		}
+		if mtree != nil {
+			retErr = errors.Join(retErr, mtree.Close())
+		}
+		if reader != nil {
+			retErr = errors.Join(retErr, reader.Close())
+		}
+		if fileLock != nil {
+			retErr = errors.Join(retErr, fileLock.Unlock(), fileLock.Destroy())
+		}
+	}()
 	if !opts.ReadOnly {
 		fileLock, err = LockFile(filepath.Join(dir, LockFileName))
 		if err != nil {
@@ -184,6 +207,10 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 		// cleanup any temporary directories left by interrupted snapshot rewrite
 		if err := removeTmpDirs(dir); err != nil {
 			return nil, fmt.Errorf("fail to cleanup tmp directories: %w", err)
+		}
+		// under the lock, a leftover tmp link is from a crash and would block every later link update.
+		if err := os.Remove(currentTmpPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("fail to cleanup tmp current link: %w", err)
 		}
 	}
 
@@ -198,74 +225,104 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 	}
 
 	path := filepath.Join(dir, snapshot)
-	mtree, err := LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
 	if err != nil {
 		return nil, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true})
+	if opts.ReadOnly {
+		// a live writer may own the WAL, so it must not be repaired from here.
+		var readOnly *readOnlyWAL
+		if readOnly, err = openReadOnlyWAL(walPath(dir)); err == nil {
+			reader = readOnly
+		}
+	} else {
+		var writable *wal.Log
+		if writable, err = OpenWAL(walPath(dir), &wal.Options{NoCopy: true, NoSync: true}); err == nil {
+			reader, writer = writable, writable
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
-		if err := mtree.CatchupWAL(wal, int64(opts.TargetVersion)); err != nil {
-			return nil, errors.Join(err, wal.Close())
+	rollback := opts.LoadForOverwriting && opts.TargetVersion > 0
+	var targetIndex uint64
+	if rollback {
+		// writer is set: Validate rejects LoadForOverwriting with ReadOnly.
+		targetIndex = walIndex(int64(opts.TargetVersion), mtree.initialVersion)
+		firstIndex, err := writer.FirstIndex()
+		if err != nil {
+			return nil, fmt.Errorf("fail to read wal first index: %w", err)
+		}
+		lastIndex, err := writer.LastIndex()
+		if err != nil {
+			return nil, fmt.Errorf("fail to read wal last index: %w", err)
+		}
+		if targetIndex == 0 || targetIndex < firstIndex || targetIndex > lastIndex {
+			return nil, fmt.Errorf("rollback target version %d is outside the wal: %w", opts.TargetVersion, wal.ErrOutOfRange)
 		}
 	}
 
-	if opts.LoadForOverwriting && opts.TargetVersion > 0 {
+	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
+		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
+			return nil, err
+		}
+	}
+
+	if rollback {
 		currentSnapshot, err := os.Readlink(currentPath(dir))
 		if err != nil {
 			return nil, fmt.Errorf("fail to read current version: %w", err)
 		}
 
 		if snapshot != currentSnapshot {
-			// downgrade `"current"` link first
+			// move the link first: current may point at a snapshot deleted below.
 			opts.Logger.Info("downgrade current link to", "snapshot", snapshot)
 			if err := updateCurrentSymlink(dir, snapshot); err != nil {
 				return nil, fmt.Errorf("fail to update current snapshot link: %w", err)
 			}
 		}
 
-		// truncate the WAL
-		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
-		if err := wal.TruncateBack(walIndex(int64(opts.TargetVersion), mtree.initialVersion)); err != nil {
-			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
-		}
-
-		// prune snapshots that's larger than the target version
+		// delete newer snapshots before the WAL cut, so no snapshot is ever newer than the WAL.
 		if err := traverseSnapshots(dir, false, func(version int64) (bool, error) {
 			if version <= int64(opts.TargetVersion) {
 				return true, nil
 			}
 
 			if err := atomicRemoveDir(filepath.Join(dir, snapshotName(version))); err != nil {
-				opts.Logger.Error("fail to prune snapshot", "version", version, "err", err)
-			} else {
-				opts.Logger.Info("prune snapshot", "version", version)
+				return true, fmt.Errorf("version %d: %w", version, err)
 			}
+			opts.Logger.Info("prune snapshot", "version", version)
 			return false, nil
 		}); err != nil {
 			return nil, fmt.Errorf("fail to prune snapshots: %w", err)
 		}
-	}
-	// create worker pool. recv tasks to write snapshot
-	workerPool := pond.New(opts.SnapshotWriterLimit, opts.SnapshotWriterLimit*10)
+		// persist the deletions before the cut, so a power loss can't bring a snapshot back.
+		if err := fsyncDir(dir); err != nil {
+			return nil, fmt.Errorf("fail to sync snapshot deletions: %w", err)
+		}
 
+		opts.Logger.Info("truncate WAL from back", "version", opts.TargetVersion)
+		if err := writer.TruncateBack(targetIndex); err != nil {
+			return nil, fmt.Errorf("fail to truncate wal logs: %w", err)
+		}
+	}
 	db := &DB{
 		MultiTree:              *mtree,
 		logger:                 opts.Logger,
 		dir:                    dir,
 		fileLock:               fileLock,
 		readOnly:               opts.ReadOnly,
-		wal:                    wal,
+		walReader:              reader,
+		walWriter:              writer,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
-		snapshotWriterPool:     workerPool,
+		snapshotWriterLimit:    opts.SnapshotWriterLimit,
 	}
+	ownershipMoved = true
 	db.attachTraverseStateChanges()
 
 	if !db.readOnly && db.Version() == 0 && len(opts.InitialStores) > 0 {
@@ -275,6 +332,7 @@ func Load(dir string, opts Options, chainId string) (*DB, error) {
 			upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
 		}
 		if err := db.ApplyUpgrades(upgrades); err != nil {
+			// the DB owns the lock, tree and WAL now, so Close releases them.
 			return nil, errors.Join(err, db.Close())
 		}
 	}
@@ -507,7 +565,10 @@ func (db *DB) latchWalErr(err error) error {
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
 func (db *DB) CommittedVersion() (int64, error) {
-	lastIndex, err := db.wal.LastIndex()
+	if db.walReader == nil {
+		return 0, wal.ErrClosed
+	}
+	lastIndex, err := db.walReader.LastIndex()
 	if err != nil {
 		return 0, err
 	}
@@ -562,7 +623,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 		}
 
 		// catchup the remaining wal
-		if err := result.mtree.CatchupWAL(db.wal, 0); err != nil {
+		if err := result.mtree.catchupWAL(db.walReader, 0); err != nil {
 			return errors.Join(fmt.Errorf("final catchup failed: %w", err), result.mtree.Close())
 		}
 
@@ -590,7 +651,7 @@ func (db *DB) pruneSnapshots() {
 	db.pruneSnapshotLock.Lock()
 
 	initialVersion := db.initialVersion
-	wal := db.wal
+	wal := db.walWriter
 	if wal == nil {
 		db.pruneSnapshotLock.Unlock()
 		return
@@ -669,7 +730,7 @@ func (db *DB) Commit() (int64, error) {
 	}
 
 	// write logs if enabled
-	if db.wal != nil {
+	if db.walWriter != nil {
 		entry := walEntry{index: walIndex(v, db.initialVersion), data: db.pendingLog}
 		if db.walChanSize >= 0 {
 			if db.walChan == nil {
@@ -687,7 +748,7 @@ func (db *DB) Commit() (int64, error) {
 				return 0, db.walErr
 			}
 		} else {
-			lastIndex, err := db.wal.LastIndex()
+			lastIndex, err := db.walWriter.LastIndex()
 			if err != nil {
 				return 0, err
 			}
@@ -697,7 +758,7 @@ func (db *DB) Commit() (int64, error) {
 				return 0, err
 			}
 
-			if err := db.wal.WriteBatch(&db.wbatch); err != nil {
+			if err := db.walWriter.WriteBatch(&db.wbatch); err != nil {
 				return 0, err
 			}
 		}
@@ -732,7 +793,7 @@ func (db *DB) initAsyncCommit() {
 				break
 			}
 
-			lastIndex, err := db.wal.LastIndex()
+			lastIndex, err := db.walWriter.LastIndex()
 			if err != nil {
 				walQuit <- err
 				return
@@ -745,7 +806,7 @@ func (db *DB) initAsyncCommit() {
 				}
 			}
 
-			if err := db.wal.WriteBatch(&batch); err != nil {
+			if err := db.walWriter.WriteBatch(&batch); err != nil {
 				walQuit <- err
 				return
 			}
@@ -789,10 +850,10 @@ func (db *DB) copy(cacheSize int) *DB {
 	mtree := db.MultiTree.Copy(cacheSize)
 
 	cloned := &DB{
-		MultiTree:          *mtree,
-		logger:             db.logger,
-		dir:                db.dir,
-		snapshotWriterPool: db.snapshotWriterPool,
+		MultiTree:           *mtree,
+		logger:              db.logger,
+		dir:                 db.dir,
+		snapshotWriterLimit: db.snapshotWriterLimit,
 	}
 	cloned.attachTraverseStateChanges()
 	return cloned
@@ -815,7 +876,7 @@ func (db *DB) RewriteSnapshotWithContext(ctx context.Context) error {
 	snapshotDir := snapshotName(db.lastCommitInfo.Version)
 	tmpDir := snapshotDir + TmpSuffix
 	path := filepath.Join(db.dir, tmpDir)
-	if err := db.MultiTree.WriteSnapshotWithContext(ctx, path, db.snapshotWriterPool); err != nil {
+	if err := writeSnapshotWithLimit(ctx, &db.MultiTree, path, db.snapshotWriterLimit); err != nil {
 		return errors.Join(err, os.RemoveAll(path))
 	}
 	if err := os.Rename(path, filepath.Join(db.dir, snapshotDir)); err != nil {
@@ -905,7 +966,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	db.snapshotRewriteCancel = cancel
 
 	cloned := db.copy(0)
-	wal := db.wal
+	wal := db.walReader
 	go func() {
 		defer close(ch)
 
@@ -923,7 +984,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 		}
 
 		// do a best effort catch-up, will do another final catch-up in main thread.
-		if err := mtree.CatchupWAL(wal, 0); err != nil {
+		if err := mtree.catchupWAL(wal, 0); err != nil {
 			ch <- snapshotResult{err: errors.Join(err, mtree.Close())}
 			return
 		}
@@ -944,7 +1005,10 @@ func (db *DB) Close() error {
 
 	if db.snapshotRewriteChan != nil {
 		db.snapshotRewriteCancel()
-		<-db.snapshotRewriteChan
+		// cancel can't stop a rewrite that already finished, so release the tree it loaded.
+		if result := <-db.snapshotRewriteChan; result.mtree != nil {
+			errs = append(errs, result.mtree.Close())
+		}
 		db.snapshotRewriteChan = nil
 		db.snapshotRewriteCancel = nil
 	}
@@ -953,12 +1017,14 @@ func (db *DB) Close() error {
 	db.pruneSnapshotLock.Lock()
 	defer db.pruneSnapshotLock.Unlock()
 
-	errs = append(errs,
-		db.MultiTree.Close(),
-		db.wal.Close(),
-	)
+	errs = append(errs, db.MultiTree.Close())
 
-	db.wal = nil
+	// nil after a previous Close
+	if db.walReader != nil {
+		errs = append(errs, db.walReader.Close())
+		db.walReader = nil
+	}
+	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
 		errs = append(errs, db.retiredMultiTree.Close())
@@ -1123,17 +1189,17 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (*wal.Log, uint32, int64, int64, error) {
+func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	if db.wal == nil {
+	if db.walReader == nil {
 		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
 	}
-	return db.wal, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
 }
 
-func waitForWALVersion(walLog *wal.Log, initialVersion uint32, targetVersion, snapshotVersion int64) error {
+func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
 	if targetVersion <= 0 || targetVersion <= snapshotVersion {
 		return nil
 	}
@@ -1173,7 +1239,7 @@ func (db *DB) WriteSnapshotWithContext(ctx context.Context, dir string) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.MultiTree.WriteSnapshotWithContext(ctx, dir, db.snapshotWriterPool)
+	return writeSnapshotWithLimit(ctx, &db.MultiTree, dir, db.snapshotWriterLimit)
 }
 
 func snapshotName(version int64) string {
@@ -1277,14 +1343,18 @@ func walPath(root string) string {
 func initEmptyDB(dir string, initialVersion uint32, chainId string) error {
 	tmp := NewEmptyMultiTree(initialVersion, 0, chainId)
 	snapshotDir := snapshotName(0)
-	// create tmp worker pool
-	pool := pond.New(DefaultSnapshotWriterLimit, DefaultSnapshotWriterLimit*10)
-	defer pool.Stop()
-
-	if err := tmp.WriteSnapshot(filepath.Join(dir, snapshotDir), pool); err != nil {
+	if err := writeSnapshotWithLimit(context.Background(), tmp, filepath.Join(dir, snapshotDir), DefaultSnapshotWriterLimit); err != nil {
 		return err
 	}
 	return updateCurrentSymlink(dir, snapshotDir)
+}
+
+// within one call, at most writerLimit trees are written at once; concurrent calls
+// don't share the limit. The pool lives only for the call, so no goroutine outlives it.
+func writeSnapshotWithLimit(ctx context.Context, mtree *MultiTree, dir string, writerLimit int) error {
+	pool := pond.New(writerLimit, writerLimit*10)
+	defer pool.StopAndWait()
+	return mtree.WriteSnapshotWithContext(ctx, dir, pool)
 }
 
 // updateCurrentSymlink creates or replace the current symblic link atomically.
@@ -1391,16 +1461,19 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	wal, err := OpenWAL(walPath(dir), &wal.Options{NoCopy: true})
+	reader, err := openReadOnlyWAL(walPath(dir))
 	if err != nil {
 		return 0, err
 	}
-	lastIndex, err := wal.LastIndex()
+	lastIndex, err := reader.LastIndex()
 	if err != nil {
-		return 0, errors.Join(err, wal.Close())
+		return 0, errors.Join(err, reader.Close())
 	}
-	if err := wal.Close(); err != nil {
+	if err := reader.Close(); err != nil {
 		return 0, err
+	}
+	if lastIndex == 0 {
+		return metadata.CommitInfo.Version, nil
 	}
 	return walVersion(lastIndex, uint32(metadata.InitialVersion)), nil
 }

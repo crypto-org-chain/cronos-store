@@ -3,6 +3,7 @@ package tsrocksdb
 import (
 	"encoding/binary"
 	"runtime"
+	"slices"
 
 	"github.com/linxGnu/grocksdb"
 )
@@ -39,6 +40,12 @@ func NewVersionDBOpts(sstFileWriter bool) *grocksdb.Options {
 	opts.SetCompressionOptionsParallelThreads(4)
 
 	if !sstFileWriter {
+		// OptimizeLevelStyleCompaction leaves L0/L1 uncompressed, but flushed files with no key overlap
+		// (e.g. from restore-versiondb) are moved down to the bottommost level as is.
+		levels := slices.Repeat([]grocksdb.CompressionType{grocksdb.LZ4Compression}, opts.GetNumLevels())
+		levels[0], levels[1] = grocksdb.ZSTDCompression, grocksdb.ZSTDCompression
+		opts.SetCompressionPerLevel(levels)
+
 		// compression options at bottommost level
 		opts.SetBottommostCompression(grocksdb.ZSTDCompression)
 		compressOpts := grocksdb.NewDefaultCompressionOptions()
@@ -57,6 +64,10 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 	opts := grocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
 	opts.SetCreateIfMissingColumnFamilies(true)
+	return openVersionDB(dir, opts)
+}
+
+func openVersionDB(dir string, opts *grocksdb.Options) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, error) {
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(
 		opts, dir, []string{defaultCFName, VersionDBCFName},
 		[]*grocksdb.Options{opts, NewVersionDBOpts(false)},
@@ -65,6 +76,17 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 		return nil, nil, err
 	}
 	return db, cfHandles[1], nil
+}
+
+func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {
+	opts := grocksdb.NewDefaultOptions()
+	// a manual compaction otherwise runs on a single thread
+	opts.SetMaxSubcompactions(uint32(runtime.NumCPU()))
+	if rateBytesPerSec > 0 {
+		// refill period and fairness are rocksdb's defaults; SetRateLimiter takes ownership of the limiter
+		opts.SetRateLimiter(grocksdb.NewGenericRateLimiter(rateBytesPerSec, 100_000, 10, grocksdb.RateLimiterModeWritesOnly, false))
+	}
+	return opts
 }
 
 // OpenVersionDBForReadOnly open versiondb in readonly mode
