@@ -1689,6 +1689,12 @@ func (s *WALWaitTestSuite) TestWait() {
 			wait:     traverseExpect(4, 3, nil),
 		},
 		{
+			name:     "reversed range reports a latched wal error",
+			malleate: latchErr,
+			wait:     traverseExpect(4, 3, nil),
+			expErr:   simulatedLatchedErr,
+		},
+		{
 			name:     "latched writer error fails a reader even when the wal is caught up",
 			malleate: latchErr,
 			wait:     traverse,

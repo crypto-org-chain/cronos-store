@@ -31,9 +31,8 @@ const (
 )
 
 var (
-	errReadOnly          = errors.New("db is read-only")
-	errAsyncWriterQuit   = errors.New("async wal writing goroutine quit unexpectedly")
-	errWALNotInitialized = errors.New("wal is not initialized")
+	errReadOnly        = errors.New("db is read-only")
+	errAsyncWriterQuit = errors.New("async wal writing goroutine quit unexpectedly")
 )
 
 // DB implements DB-like functionalities on top of MultiTree:
@@ -591,7 +590,7 @@ func (db *DB) waitCommittedVersion(targetVersion int64) error {
 	if err != nil {
 		return err
 	}
-	return db.waitForWAL(target, db.catchupTimeout, walPollInterval)
+	return db.waitForWAL(target, walPollInterval)
 }
 
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
@@ -1198,12 +1197,11 @@ func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
 		version = upTo
 	}
 	target, err := db.walTargetLocked(version)
-	timeout := db.catchupTimeout
 	db.mtx.Unlock()
 	if err != nil {
 		return nil, 0, err
 	}
-	return target.log, target.initialVersion, db.waitForWAL(target, timeout, walReadPollInterval)
+	return target.log, target.initialVersion, db.waitForWAL(target, walReadPollInterval)
 }
 
 type walTarget struct {
@@ -1215,7 +1213,7 @@ type walTarget struct {
 
 func (db *DB) walReaderLocked() (walReader, uint32, error) {
 	if db.walReader == nil {
-		return nil, 0, errWALNotInitialized
+		return nil, 0, errors.New("wal is not initialized")
 	}
 	return db.walReader, db.initialVersion, nil
 }
@@ -1234,14 +1232,14 @@ func (db *DB) walTargetLocked(version int64) (walTarget, error) {
 }
 
 // a latched wal error wins, even when the wal looks caught up; the timeout covers a stalled wal.
-func (db *DB) waitForWAL(t walTarget, timeout, pollInterval time.Duration) error {
+func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 	// no wal entry exists below initialVersion, and walIndex would wrap there.
 	if t.version < int64(t.initialVersion) || t.version <= 0 || t.version <= t.snapshotVersion {
 		return db.walError()
 	}
 
 	targetIndex := walIndex(t.version, t.initialVersion)
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(db.catchupTimeout)
 	for {
 		if err := db.walError(); err != nil {
 			return err
