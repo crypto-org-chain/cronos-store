@@ -1629,6 +1629,7 @@ func (s *WALWaitTestSuite) TestWait() {
 			require.ErrorIs(t, err, errAsyncWriterQuit)
 		}
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
+		require.ErrorContains(t, db.Close(), simulatedWALWriteErr)
 	}
 	// a nil want skips the visited check.
 	traverseExpect := func(start, end int64, want []int64) func(db *DB) error {

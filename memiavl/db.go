@@ -1257,7 +1257,8 @@ func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 		if err != nil {
 			return fmt.Errorf("get wal version failed: %w", err)
 		}
-		if committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion) >= t.version {
+		current := committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion)
+		if current >= t.version {
 			return nil
 		}
 		if lastIndex > seenIndex {
@@ -1265,8 +1266,7 @@ func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
 			deadline = time.Now().Add(db.catchupTimeout)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for wal to catch up to version %d, current: %d",
-				t.version, committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion))
+			return fmt.Errorf("timed out waiting for wal to catch up to version %d, current: %d", t.version, current)
 		}
 		time.Sleep(pollInterval)
 	}
