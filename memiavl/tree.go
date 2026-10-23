@@ -466,7 +466,7 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if err != nil {
 		return err
 	}
-	if err := db.waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion, walCatchupTimeout); err != nil {
+	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion, walCatchupTimeout, db.checkAsyncCommitIfIdle); err != nil {
 		return err
 	}
 	firstIndex, err := walLog.FirstIndex()

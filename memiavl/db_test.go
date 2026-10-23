@@ -1691,52 +1691,71 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	}
 }
 
+type failingWriteWAL struct {
+	writeAheadLog
+}
+
+func (failingWriteWAL) WriteBatch(*wal.Batch) error {
+	return errors.New("simulated wal write failure")
+}
+
 func TestWaitForWALVersionGivesUp(t *testing.T) {
 	const testTimeout = 200 * time.Millisecond
 
+	// the writer takes the next commit's entry and dies, leaving commit info ahead of the wal.
+	killAsyncWriter := func(t *testing.T, db *DB) {
+		t.Helper()
+		db.walWriter = failingWriteWAL{db.walWriter}
+		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")))
+		_, _ = db.Commit()
+	}
+	requireWriterErrLatched := func(t *testing.T, db *DB) {
+		t.Helper()
+		_, err := db.Commit()
+		require.ErrorContains(t, err, "simulated wal write failure")
+		require.ErrorContains(t, db.WaitAsyncCommit(), "simulated wal write failure")
+	}
+
 	testCases := []struct {
-		name     string
-		malleate func(db *DB)
-		wait     func(db *DB) error
-		expErr   string
+		name      string
+		malleate  func(t *testing.T, db *DB)
+		wait      func(db *DB) error
+		expErr    string
+		postCheck func(t *testing.T, db *DB)
 	}{
 		{
 			name: "caught up",
 			wait: func(db *DB) error {
-				return db.waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout)
+				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
 			},
 		},
 		{
 			name: "wal stuck behind commit info times out",
-			// a failed sync WAL write leaves commit info ahead with no writer error.
-			malleate: func(db *DB) { db.lastCommitInfo.Version++ },
+			// a failed sync wal write leaves commit info ahead with no writer error.
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
 			wait: func(db *DB) error {
-				return db.waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout)
+				return waitForWALVersion(db.walReader, db.initialVersion, db.lastCommitInfo.Version, 0, testTimeout, db.checkAsyncCommitIfIdle)
 			},
-			expErr: "timed out waiting for wal to reach version",
+			expErr: "timed out waiting for wal to catch up",
 		},
 		{
-			name: "dead async writer fails TraverseStateChanges",
-			malleate: func(db *DB) {
-				db.lastCommitInfo.Version++
-				db.walErr = errors.New("simulated async wal writer death")
-			},
+			name:     "dead async writer fails TraverseStateChanges",
+			malleate: killAsyncWriter,
 			wait: func(db *DB) error {
 				return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
 			},
-			expErr: "simulated async wal writer death",
+			expErr:    "simulated wal write failure",
+			postCheck: requireWriterErrLatched,
 		},
 		{
-			name: "dead async writer fails FirstStoreVersions",
-			malleate: func(db *DB) {
-				db.lastCommitInfo.Version++
-				db.walErr = errors.New("simulated async wal writer death")
-			},
+			name:     "dead async writer fails FirstStoreVersions",
+			malleate: killAsyncWriter,
 			wait: func(db *DB) error {
 				_, err := db.FirstStoreVersions([]string{testStoreName})
 				return err
 			},
-			expErr: "simulated async wal writer death",
+			expErr:    "simulated wal write failure",
+			postCheck: requireWriterErrLatched,
 		},
 	}
 
@@ -1754,7 +1773,7 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, db.WaitAsyncCommit())
 			if tc.malleate != nil {
-				tc.malleate(db)
+				tc.malleate(t, db)
 			}
 
 			done := make(chan error, 1)
@@ -1768,6 +1787,9 @@ func TestWaitForWALVersionGivesUp(t *testing.T) {
 				}
 			case <-time.After(testTimeout * 10):
 				t.Fatal("wal wait spun forever")
+			}
+			if tc.postCheck != nil {
+				tc.postCheck(t, db)
 			}
 		})
 	}
