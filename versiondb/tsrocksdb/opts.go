@@ -64,6 +64,10 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 	opts := grocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
 	opts.SetCreateIfMissingColumnFamilies(true)
+	return openVersionDB(dir, opts)
+}
+
+func openVersionDB(dir string, opts *grocksdb.Options) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, error) {
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(
 		opts, dir, []string{defaultCFName, VersionDBCFName},
 		[]*grocksdb.Options{opts, NewVersionDBOpts(false)},
@@ -72,6 +76,17 @@ func OpenVersionDB(dir string) (*grocksdb.DB, *grocksdb.ColumnFamilyHandle, erro
 		return nil, nil, err
 	}
 	return db, cfHandles[1], nil
+}
+
+func compactionDBOpts(rateBytesPerSec int64) *grocksdb.Options {
+	opts := grocksdb.NewDefaultOptions()
+	// a manual compaction otherwise runs on a single thread
+	opts.SetMaxSubcompactions(uint32(runtime.NumCPU()))
+	if rateBytesPerSec > 0 {
+		// refill period and fairness are rocksdb's defaults; SetRateLimiter takes ownership of the limiter
+		opts.SetRateLimiter(grocksdb.NewGenericRateLimiter(rateBytesPerSec, 100_000, 10, grocksdb.RateLimiterModeWritesOnly, false))
+	}
+	return opts
 }
 
 // OpenVersionDBForReadOnly open versiondb in readonly mode
