@@ -75,7 +75,7 @@ type DB struct {
 	walChanSize int
 	walChan     chan *walEntry
 	walQuit     chan error
-	// latched async wal writer error; once set, every Commit fails with it.
+	// latched wal write error (async writer death or failed sync write); once set, every Commit fails with it.
 	walErr error
 
 	// pending changes, will be written into WAL in next Commit call
@@ -736,8 +736,8 @@ func (db *DB) Commit() (int64, error) {
 				return 0, db.walErr
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
-			// latched like an async writer death: commit info is already ahead of the wal,
-			// so later commits can't write and readers must not wait for this version.
+			// latched like an async writer death: commit info is already ahead of the wal, and
+			// even if the entry landed before a failed fsync, the wal can't be trusted afterwards.
 			db.walErr = fmt.Errorf("sync wal write failed: %w", err)
 			return 0, db.walErr
 		}
