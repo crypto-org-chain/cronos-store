@@ -1574,7 +1574,6 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 		AsyncCommitBuffer: 0,
 	}, TestAppChainID)
 	require.NoError(t, err)
-	defer db.Close()
 
 	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
 	_, err = db.Commit()
@@ -1597,6 +1596,8 @@ func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
 	select {
 	case cerr := <-done:
 		require.ErrorContains(t, cerr, "simulated async wal writer death")
+		// only once the wait returned: a hung wait still holds db.mtx.
+		_ = db.Close()
 	case <-time.After(walCatchupTimeout / 2):
 		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
 	}
@@ -1651,7 +1652,6 @@ func TestWALWait(t *testing.T) {
 	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
 		t.Helper()
 		release := make(chan struct{})
-		// scheduled first: a sync commit blocks in the gated write.
 		time.AfterFunc(testTimeout/4, func() { close(release) })
 		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
 	}
