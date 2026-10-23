@@ -742,8 +742,7 @@ func (db *DB) Commit() (int64, error) {
 				return 0, db.walError()
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
-			// latched like an async writer death: commit info is ahead of the wal, which
-			// can't be trusted after a failed write or fsync.
+			// latched like an async writer death: commit info is already ahead of the wal.
 			db.latchWalErr(fmt.Errorf("sync wal write failed: %w", err))
 			return 0, db.walError()
 		}
@@ -997,6 +996,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	return nil
 }
 
+// Close releases everything even on error, and also reports a latched wal write error.
 func (db *DB) Close() error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()

@@ -1516,20 +1516,6 @@ func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
 	return w.writeAheadLog.WriteBatch(b)
 }
 
-// healthyWAL strips the test wrappers off a wal writer.
-func healthyWAL(w writeAheadLog) writeAheadLog {
-	for {
-		switch x := w.(type) {
-		case failingWriteWAL:
-			w = x.writeAheadLog
-		case gatedWriteWAL:
-			w = x.writeAheadLog
-		default:
-			return w
-		}
-	}
-}
-
 func waitCommittedVersionLocked(db *DB, version int64, timeout time.Duration) error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -1580,10 +1566,12 @@ func (s *WALWaitTestSuite) TestWait() {
 		commitGated(t, db, failingWriteWAL{db.walWriter})
 	}
 	latchErr := func(_ *testing.T, db *DB) { db.latchWalErr(errors.New(simulatedLatchedErr)) }
+	// the writer each case's DB opened with, before any test wrapper.
+	var healthyWriter writeAheadLog
 	requireWriterErrLatched := func(t *testing.T, db *DB) {
 		t.Helper()
 		// a healthy writer again, so only the latched error carries the simulated failure.
-		db.walWriter = healthyWAL(db.walWriter)
+		db.walWriter = healthyWriter
 		version := db.Version()
 		err := commit(db)
 		require.ErrorContains(t, err, simulatedWALWriteErr)
@@ -1819,6 +1807,7 @@ func (s *WALWaitTestSuite) TestWait() {
 				InitialVersion:    tc.initialVersion,
 			}, TestAppChainID)
 			require.NoError(t, err)
+			healthyWriter = db.walWriter
 			// a hung wait can still hold db.mtx, so Close only once the wait returned.
 			waited := false
 			defer func() {
