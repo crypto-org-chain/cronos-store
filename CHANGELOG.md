@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#148](https://github.com/crypto-org-chain/cronos-store/pull/148) fix(memiavl): stop read-only WAL readers waiting on each other's segment loads
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
 - [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback
 - [#140](https://github.com/crypto-org-chain/cronos-store/pull/140) fix(memiavl): release the lock, tree and WAL when Load fails
