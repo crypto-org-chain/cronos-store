@@ -1135,7 +1135,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 		return result, nil
 	}
 
-	walLog, initialVersion, err := db.waitWALForRead()
+	walLog, initialVersion, err := db.waitWALForRead(0)
 	if err != nil {
 		return nil, err
 	}
@@ -1188,10 +1188,15 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 }
 
 // waitWALForRead waits, up to the catch-up timeout, for the wal to reach lastCommitInfo,
-// so readers see every committed version.
-func (db *DB) waitWALForRead() (walReader, uint32, error) {
+// or only upTo when it's positive and lower, so a range already in the wal doesn't wait
+// for later commits.
+func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
 	db.mtx.Lock()
-	target, err := db.walTargetLocked(db.lastCommitInfo.Version)
+	version := db.lastCommitInfo.Version
+	if upTo > 0 && upTo < version {
+		version = upTo
+	}
+	target, err := db.walTargetLocked(version)
 	timeout := db.catchupTimeout
 	db.mtx.Unlock()
 	if err != nil {

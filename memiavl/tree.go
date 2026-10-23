@@ -462,7 +462,7 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
-	walLog, initialVersion, err := db.waitWALForRead()
+	walLog, initialVersion, err := db.waitWALForRead(endVersion)
 	if err != nil {
 		return err
 	}

@@ -1668,6 +1668,23 @@ func (s *WALWaitTestSuite) TestWait() {
 			expErr: "timed out waiting for wal to catch up",
 		},
 		{
+			name:     "reader of a range already in the wal doesn't wait for later commits",
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
+			wait: func(db *DB) error {
+				var visited []int64
+				if err := db.TreeByName(testStoreName).TraverseStateChanges(1, 1, func(v int64, _ *ChangeSet) error {
+					visited = append(visited, v)
+					return nil
+				}); err != nil {
+					return err
+				}
+				if len(visited) != 1 || visited[0] != 1 {
+					return fmt.Errorf("visited versions %v, want [1]", visited)
+				}
+				return nil
+			},
+		},
+		{
 			name:     "latched writer error fails a reader even when the wal is caught up",
 			malleate: latchErr,
 			wait:     traverse,
