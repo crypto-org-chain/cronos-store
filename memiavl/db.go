@@ -23,8 +23,7 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	// the commit path waits under db.mtx for the entry it just queued, so it polls tightly;
-	// readers hold no lock and can wait seconds, so they poll slower.
+	// the commit path polls under db.mtx; readers hold no lock.
 	walPollInterval     = 50 * time.Nanosecond
 	walReadPollInterval = time.Millisecond
 	walCatchupTimeout   = 5 * time.Second
@@ -33,6 +32,7 @@ const (
 var (
 	errReadOnly        = errors.New("db is read-only")
 	errAsyncWriterQuit = errors.New("async wal writing goroutine quit unexpectedly")
+	errSyncWALWrite    = errors.New("sync wal write failed")
 )
 
 // DB implements DB-like functionalities on top of MultiTree:
@@ -742,7 +742,7 @@ func (db *DB) Commit() (int64, error) {
 			}
 		} else if err := db.writeWALSync(&entry); err != nil {
 			// latched like an async writer death: commit info is already ahead of the wal.
-			db.latchWalErr(fmt.Errorf("sync wal write failed: %w", err))
+			db.latchWalErr(fmt.Errorf("%w: %w", errSyncWALWrite, err))
 			return 0, db.walError()
 		}
 	}
@@ -1187,9 +1187,7 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-// waitWALForRead waits, up to the catch-up timeout, for the wal to reach lastCommitInfo,
-// or only upTo when it's positive and lower, so a range already in the wal doesn't wait
-// for later commits.
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
 func (db *DB) waitWALForRead(upTo int64) (walReader, uint32, error) {
 	db.mtx.Lock()
 	version := db.lastCommitInfo.Version

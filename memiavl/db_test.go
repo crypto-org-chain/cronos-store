@@ -552,14 +552,6 @@ func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
 	}))
 	require.Equal(t, []int64{1, 2, 3}, versions, "endVersion=0 must traverse through the latest version")
 
-	// A genuine reversed range (0 < endVersion < startVersion) must traverse nothing.
-	versions = nil
-	require.NoError(t, tree.TraverseStateChanges(3, 1, func(version int64, cs *ChangeSet) error {
-		versions = append(versions, version)
-		return nil
-	}))
-	require.Empty(t, versions, "reversed range must traverse nothing")
-
 	// A negative endVersion is invalid and must return an error.
 	err = tree.TraverseStateChanges(1, -1, func(version int64, cs *ChangeSet) error {
 		return nil
@@ -1578,15 +1570,13 @@ func (s *WALWaitTestSuite) TestWait() {
 		require.ErrorContains(t, err, simulatedWALWriteErr)
 		require.Equal(t, version, db.Version(), "a latched error must fail Commit before it saves a version")
 		if db.walChanSize < 0 {
-			require.ErrorContains(t, err, "sync wal write failed")
+			require.ErrorIs(t, err, errSyncWALWrite)
 		} else {
 			require.ErrorIs(t, err, errAsyncWriterQuit)
 		}
 		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
 	}
-	traverse := func(db *DB) error {
-		return db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(int64, *ChangeSet) error { return nil })
-	}
+	// a nil want skips the visited check.
 	traverseExpect := func(start, end int64, want []int64) func(db *DB) error {
 		return func(db *DB) error {
 			var visited []int64
@@ -1596,12 +1586,13 @@ func (s *WALWaitTestSuite) TestWait() {
 			}); err != nil {
 				return err
 			}
-			if !slices.Equal(visited, want) {
+			if want != nil && !slices.Equal(visited, want) {
 				return fmt.Errorf("visited versions %v, want %v", visited, want)
 			}
 			return nil
 		}
 	}
+	traverse := traverseExpect(1, 0, nil)
 	firstStoreVersions := func(db *DB) error {
 		_, err := db.FirstStoreVersions([]string{testStoreName})
 		return err
@@ -1680,18 +1671,18 @@ func (s *WALWaitTestSuite) TestWait() {
 		{
 			name:           "range below initialVersion is empty without waiting",
 			initialVersion: 100,
-			wait:           traverseExpect(1, 5, nil),
+			wait:           traverseExpect(1, 5, []int64{}),
 		},
 		{
 			// end is past the wal too, so only the reversed-range check avoids the full timeout.
 			name:     "reversed range is empty without waiting",
 			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version += 3 },
-			wait:     traverseExpect(4, 3, nil),
+			wait:     traverseExpect(4, 3, []int64{}),
 		},
 		{
 			name:     "reversed range reports a latched wal error",
 			malleate: latchErr,
-			wait:     traverseExpect(4, 3, nil),
+			wait:     traverseExpect(4, 3, []int64{}),
 			expErr:   simulatedLatchedErr,
 		},
 		{
