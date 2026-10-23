@@ -576,6 +576,29 @@ func TestQueryEmptyStoreName(t *testing.T) {
 	}
 }
 
+func TestCloseIsIdempotent(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+
+	require.NoError(t, store.Close())
+	require.NoError(t, store.Close())
+}
+
+func TestQueryProveAgainstEmptyStore(t *testing.T) {
+	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
+	require.NoError(t, store.LoadLatestVersion())
+	t.Cleanup(func() { store.Close() })
+	store.Commit()
+
+	res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.ErrorIs(t, err, sdkerrors.ErrInvalidRequest)
+	require.Contains(t, err.Error(), "failed to build non-membership proof")
+}
+
 func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {
 	dir := t.TempDir()
 	setupOldStoreAtVersion2(t, dir, []*memiavl.TreeNameUpgrade{{Name: oldStoreName, Delete: true}})
@@ -687,6 +710,109 @@ func TestQuerySnapshotFollowsZeroCopy(t *testing.T) {
 			require.Equal(t, want, got)
 		})
 	}
+}
+
+func TestLiveDBLoadsWithoutNodeCache(t *testing.T) {
+	rs := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	rs.SetMemIAVLOptions(memiavl.Options{CacheSize: 1000, ZeroCopy: true})
+	key := types.NewKVStoreKey(testStoreName)
+	rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+	require.NoError(t, rs.LoadLatestVersion())
+	defer rs.Close()
+	keys := make([][]byte, 200)
+	for i := range keys {
+		keys[i] = []byte(fmt.Sprintf("k%03d", i))
+		rs.GetKVStore(key).Set(keys[i], []byte("v"))
+	}
+	target := rs.Commit().Version
+	// reload from the snapshot: set fills a cache, so only a fresh tree misses.
+	require.NoError(t, rs.db.RewriteSnapshot())
+	require.NoError(t, rs.db.Reload())
+	rs.GetKVStore(key).Set([]byte("late"), []byte("v"))
+	rs.Commit()
+
+	// a cached tree allocates an entry on every miss; a zero-copy tree without one allocates nothing.
+	requireNoCache := func() {
+		tree := rs.db.TreeByName(testStoreName)
+		i := 0
+		require.Zero(t, testing.AllocsPerRun(100, func() {
+			tree.Get(keys[i%len(keys)])
+			i++
+		}))
+	}
+	requireNoCache()
+	require.NoError(t, rs.RollbackToVersion(target))
+	requireNoCache()
+}
+
+func TestMountedStoreHeldAcrossDBClose(t *testing.T) {
+	testCases := []struct {
+		name     string
+		close    func(t *testing.T, rs *Store)
+		expValue []byte
+	}{
+		{name: "Close", close: func(t *testing.T, rs *Store) {
+			t.Helper()
+			require.NoError(t, rs.Close())
+		}},
+		{name: "reload", close: func(t *testing.T, rs *Store) {
+			t.Helper()
+			require.NoError(t, rs.LoadLatestVersion())
+		}, expValue: []byte("v")},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, key := newLoadedStore(t, memiavl.Options{})
+			rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+			rs.Commit()
+			// back the mounted store with the mmap'd snapshot.
+			rewriteAndReload(t, rs)
+			rs.Commit()
+			// like baseapp's check state, a store held across the close.
+			kv := rs.GetKVStore(key)
+			require.Equal(t, []byte("v"), kv.Get([]byte("k")))
+
+			tc.close(t, rs)
+			// a read of an unmapped page panics here instead of crashing the test binary.
+			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+			require.Equal(t, tc.expValue, kv.Get([]byte("k")))
+		})
+	}
+}
+
+func TestMountedIteratorOutlivesTwoReloads(t *testing.T) {
+	rs, key := newLoadedStore(t, memiavl.Options{ZeroCopy: true})
+	for i := 0; i < 20; i++ {
+		rs.GetKVStore(key).Set([]byte(fmt.Sprintf("k%02d", i)), []byte(fmt.Sprintf("v%02d", i)))
+	}
+	rs.Commit()
+	// back the mounted stores with the mmap'd snapshot.
+	rewriteAndReload(t, rs)
+	rs.Commit()
+
+	// like a simulate call spanning blocks, an iterator held while the DB drops its generation.
+	it := rs.GetKVStore(key).Iterator(nil, nil)
+	defer it.Close()
+	for i := 0; i < 2; i++ {
+		rs.GetKVStore(key).Set([]byte(fmt.Sprintf("n%d", i)), []byte("v"))
+		rs.Commit()
+		rewriteAndReload(t, rs)
+		rs.Commit()
+	}
+	// the mounted view the iterator holds must not be released while it is in use.
+	runtime.GC()
+	runtime.GC()
+
+	// a read of an unmapped page panics here instead of crashing the test binary.
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	n := 0
+	for ; it.Valid(); it.Next() {
+		require.Equal(t, []byte(fmt.Sprintf("k%02d", n)), it.Key())
+		require.Equal(t, []byte(fmt.Sprintf("v%02d", n)), it.Value())
+		n++
+	}
+	require.Equal(t, 20, n)
 }
 
 func TestLoadAtVersionDisablesZeroCopy(t *testing.T) {
@@ -1298,77 +1424,131 @@ func TestRestoreRejectsBranchNodeBeforeLeaves(t *testing.T) {
 }
 
 func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
-	store, key := newLoadedStore(t, memiavl.Options{})
-
-	// enough keys for multi-level paths, so each commit rewrites shared inner nodes.
-	commit := func(i int) {
-		kv := store.GetKVStore(key)
-		for j := 0; j < 16; j++ {
-			kv.Set([]byte(fmt.Sprintf("k%02d", j)), []byte{byte(i)})
-		}
-		store.Commit()
-	}
-	// a proof query on an empty tree panics in memiavlstore, so start readers on a populated one.
-	commit(0)
-
-	const commits = 30
-	done := make(chan struct{})
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(done)
-		for i := 1; i <= commits; i++ {
-			commit(i)
-		}
-	}()
-
-	readers := []func(){
-		func() { store.CacheMultiStore() },
-		func() {
-			cms, err := store.CacheMultiStoreWithVersion(0)
-			if err != nil {
-				return
-			}
-			kv := cms.GetKVStore(key)
-			_ = kv.Get([]byte("k07"))
-			it := kv.Iterator(nil, nil)
-			for ; it.Valid(); it.Next() {
-				_ = it.Value()
-			}
-			_ = it.Close()
-			_ = cms.(io.Closer).Close()
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07")})
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k07"), Prove: true})
-		},
-		func() {
-			_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
-		},
-		func() { store.LatestVersion() },
-		func() { store.EarliestVersion() },
+	testCases := []struct {
+		name string
+		opts memiavl.Options
+		// > 0 reloads before every n-th block; 0 leaves reloads to db.Commit, as in production.
+		reloadEvery int
+	}{
+		{name: "explicit reloads", reloadEvery: 5},
+		{name: "background reloads inside Commit", opts: memiavl.Options{SnapshotInterval: 1}},
 	}
 
-	for _, read := range readers {
-		wg.Add(1)
-		go func(read func()) {
-			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
-					read()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, key := newLoadedStore(t, tc.opts)
+			for i := 0; i < 200; i++ {
+				store.GetKVStore(key).Set([]byte(fmt.Sprintf("p%03d", i)), []byte("v"))
+			}
+			store.Commit()
+
+			const (
+				commits    = 30
+				minReloads = 5
+				maxCommits = 10000
+			)
+			done := make(chan struct{})
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer close(done)
+				// background rewrites finish on their own clock, so commit until enough have reloaded.
+				for i, reloads := 0, 0; i < commits || reloads < minReloads; i++ {
+					if i == maxCommits {
+						t.Errorf("%d reloads in %d commits", reloads, i)
+						return
+					}
+					if i >= commits {
+						// leaves the background rewrite CPU time on a single-core run.
+						time.Sleep(time.Millisecond)
+					}
+					snapshotVersion := store.db.SnapshotVersion()
+					if tc.reloadEvery > 0 && i%tc.reloadEvery == tc.reloadEvery-1 {
+						// like Commit's, each reload is followed by a publish before the next.
+						if err := store.db.RewriteSnapshot(); err != nil {
+							t.Error(err)
+							return
+						}
+						if err := store.db.Reload(); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+					kv := store.GetKVStore(key)
+					kv.Set([]byte("k"), []byte{byte(i)})
+					store.WorkingHash()
+					// a write after WorkingHash lands in the same version as the working copy.
+					kv.Set([]byte("late"), []byte{byte(i)})
+					store.Commit()
+					if store.db.SnapshotVersion() != snapshotVersion {
+						reloads++
+					}
 				}
-			}
-		}(read)
-	}
+			}()
 
-	wg.Wait()
+			// baseapp's CheckTx state: branched once, read while commits flush.
+			checkState := store.CacheMultiStore()
+
+			// like CheckTx with CometBFT's app mempool, which runs lock-free, readers here may span a Commit and a reload: mounted views are pinned.
+			readers := []func(){
+				func() { store.CacheMultiStore().GetKVStore(key).Get([]byte("k")) },
+				func() {
+					// iterate, since a Get would be served from the branch's cache after the first read.
+					it := checkState.GetKVStore(key).Iterator(nil, nil)
+					for ; it.Valid(); it.Next() {
+					}
+					_ = it.Close()
+				},
+				func() { store.GetKVStore(key).Get([]byte("k")) },
+				// hashes the mounted tree, which races WorkingHash if its copy is taken before hashing.
+				func() { store.GetCommitStore(key).LastCommitID() },
+				func() {
+					cms, err := store.CacheMultiStoreWithVersion(0)
+					if err != nil {
+						return
+					}
+					kv := cms.GetKVStore(key)
+					_ = kv.Get([]byte("k"))
+					it := kv.Iterator(nil, nil)
+					for ; it.Valid(); it.Next() {
+						_ = it.Value()
+					}
+					_ = it.Close()
+					_ = cms.(io.Closer).Close()
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k")})
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
+				},
+				func() {
+					_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/subspace", Data: []byte("k")})
+				},
+				func() { store.LatestVersion() },
+				func() { store.EarliestVersion() },
+			}
+
+			for _, read := range readers {
+				wg.Add(1)
+				go func(read func()) {
+					defer wg.Done()
+					for {
+						select {
+						case <-done:
+							return
+						default:
+							read()
+						}
+					}
+				}(read)
+			}
+
+			wg.Wait()
+		})
+	}
 }
 
 func TestHistoricalQueryAfterRollbackDoesNotServeStaleCache(t *testing.T) {
@@ -1477,8 +1657,32 @@ func TestRollbackToVersionAcrossStoreUpgrade(t *testing.T) {
 	}
 }
 
+func TestMountedStoresReadACopyAfterReload(t *testing.T) {
+	dir := t.TempDir()
+	key := types.NewKVStoreKey(testStoreName)
+	open := func() *Store {
+		rs := NewStore(dir, log.NewNopLogger(), false, false, TestAppChainID)
+		rs.MountStoreWithDB(key, types.StoreTypeIAVL, nil)
+		require.NoError(t, rs.LoadLatestVersion())
+		return rs
+	}
+	rs := open()
+	rs.GetKVStore(key).Set([]byte("k"), []byte("v"))
+	rs.Commit()
+	require.NoError(t, rs.Close())
+
+	rs = open()
+	t.Cleanup(func() { rs.Close() })
+	// a mounted store still on the live tree would see this uncommitted write.
+	require.NoError(t, rs.db.ApplyChangeSets([]*memiavl.NamedChangeSet{{
+		Name:      testStoreName,
+		Changeset: memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte("live")}}},
+	}}))
+	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
+}
+
 // WorkingHash flushes the next block into the live tree before Commit.
-func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
+func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	store, versions := newTestStore(t, 1)
 	defer store.Close()
 	key := store.keysByName[testStoreName]
@@ -1500,11 +1704,22 @@ func TestLatestHeightReadsIgnoreUncommittedWrites(t *testing.T) {
 		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
 		require.NoError(t, cms.(io.Closer).Close())
 	}
+	// baseapp's finalize state reads through the mounted stores until Commit.
+	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
 
+	// a write after WorkingHash must show once Commit swaps the view.
+	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
 	cid := store.Commit()
 	res, err = store.Query(newQuery(0))
 	require.NoError(t, err)
 	require.Equal(t, []byte("dirty"), res.Value)
 	require.Equal(t, cid.Version, res.Height)
 	require.Equal(t, cid.Version, store.LatestVersion())
+	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("late")))
+	require.Equal(t, []byte("v"), store.CacheMultiStore().GetKVStore(key).Get([]byte("late")))
+
+	// and a block committed without WorkingHash.
+	store.GetKVStore(key).Set([]byte("next"), []byte("v"))
+	store.Commit()
+	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("next")))
 }

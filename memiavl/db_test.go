@@ -294,6 +294,15 @@ func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
 	}
 }
 
+func rewriteAndReload(t *testing.T, db *DB, key, value string) {
+	t.Helper()
+	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, value)))
+	_, err := db.Commit()
+	require.NoError(t, err)
+	require.NoError(t, db.RewriteSnapshot())
+	require.NoError(t, db.Reload())
+}
+
 func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	db, err := Load(t.TempDir(), Options{
 		CreateIfMissing: true,
@@ -302,33 +311,21 @@ func TestReloadRetainsSnapshotForCopy(t *testing.T) {
 	require.NoError(t, err)
 
 	// commit a known key and make it snapshot-backed
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k", "v")
 
 	// a copy shares the live mmap'd snapshot
 	cp := db.Copy()
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// one more reload cycle: the old code munmaps the copy's snapshot here.
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k2", "v2")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k2", "v2")
 
 	// the copy must still read correctly from the retained generation
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// the DB drops that generation at the next reload; the copy's reference keeps it mapped.
 	snapshot := cp.TreeByName(testStoreName).snapshot
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k3", "v3")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.RewriteSnapshot())
-	require.NoError(t, db.Reload())
+	rewriteAndReload(t, db, "k3", "v3")
 	require.Equal(t, []byte("v"), cp.TreeByName(testStoreName).Get([]byte("k")))
 
 	// the last holder unmaps it.
@@ -373,14 +370,7 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
 
-	rewriteAndReload := func(key string) {
-		require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, key, "v")))
-		_, err := db.Commit()
-		require.NoError(t, err)
-		require.NoError(t, db.RewriteSnapshot())
-		require.NoError(t, db.Reload())
-	}
-	rewriteAndReload("k1")
+	rewriteAndReload(t, db, "k1", "v")
 	snapshot := db.TreeByName(testStoreName).snapshot
 
 	// a new version so the background rewrite writes a new snapshot; its clone holds
@@ -394,7 +384,7 @@ func TestRewriteSnapshotBackgroundReleasesCopy(t *testing.T) {
 	}
 
 	// the next reload drops the DB's reference, which unmaps it only if the clone released its own.
-	rewriteAndReload("k2")
+	rewriteAndReload(t, db, "k2", "v")
 	require.Nil(t, snapshot.nodesMap)
 }
 

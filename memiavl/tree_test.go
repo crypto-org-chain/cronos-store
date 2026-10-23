@@ -266,6 +266,22 @@ func TestTreeCopy(t *testing.T) {
 	// get modified in-place
 	require.Equal(t, []byte("world2"), tree.Get([]byte("hello")))
 	require.Equal(t, []byte("world2"), fakeSnapshot.Get([]byte("hello")))
+
+	// a copy of uncommitted state is protected from later writes in the same version
+	tree.ApplyChangeSet(ChangeSet{Pairs: []*KVPair{
+		{Key: []byte("hello"), Value: []byte("working")},
+	}})
+	working := tree.Copy(0)
+	// hashed by Copy, so the two trees never both fill in a lazy hash of a shared node.
+	require.NotNil(t, working.root.(*MemNode).hash)
+	tree.ApplyChangeSet(ChangeSet{Pairs: []*KVPair{
+		{Key: []byte("hello"), Value: []byte("world3")},
+	}})
+	_, _, err = tree.SaveVersion(true)
+	require.NoError(t, err)
+
+	require.Equal(t, []byte("world3"), tree.Get([]byte("hello")))
+	require.Equal(t, []byte("working"), working.Get([]byte("hello")))
 }
 
 func TestChangeSetMarshal(t *testing.T) {

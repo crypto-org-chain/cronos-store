@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#105](https://github.com/crypto-org-chain/cronos-store/pull/105) fix(store): publish copy-on-write trees to the mounted stores (memiavl cache-size now only applies to historical queries)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
 - [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback

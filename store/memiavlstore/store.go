@@ -1,8 +1,9 @@
 package memiavlstore
 
 import (
-	"fmt"
 	"io"
+	"runtime"
+	"sync/atomic"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
 	ics23 "github.com/cosmos/ics23/go"
@@ -26,6 +27,10 @@ var (
 
 // Store Implements types.KVStore and CommitKVStore.
 type Store struct {
+	// set for a mounted store, which reads its tree from mount's current view.
+	mount *Mount
+	name  string
+
 	tree   *memiavl.Tree
 	logger log.Logger
 
@@ -36,8 +41,75 @@ func New(tree *memiavl.Tree, logger log.Logger) *Store {
 	return &Store{tree: tree, logger: logger}
 }
 
+// NewMounted returns a store that reads the tree named name from mount's view.
+func NewMounted(mount *Mount, name string, logger log.Logger) *Store {
+	return &Store{mount: mount, name: name, logger: logger}
+}
+
 func (st *Store) SetTree(tree *memiavl.Tree) {
+	if st.mount != nil {
+		panic("memiavlstore: SetTree on a mounted store, which reads its mount's view")
+	}
 	st.tree = tree
+}
+
+// View is one set of trees that the mounted stores read together.
+type View struct {
+	// resolved once: DB.TreeByName takes the db lock.
+	trees map[string]*memiavl.Tree
+}
+
+// NewView takes db, a copy holding its snapshots' references, and closes it once
+// the view is unreachable; readers keep the view reachable while they use its trees.
+func NewView(db *memiavl.DB, logger log.Logger) *View {
+	return newView(db, func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to release mounted view", "err", err)
+		}
+	})
+}
+
+func newView(db *memiavl.DB, release func()) *View {
+	v := &View{trees: make(map[string]*memiavl.Tree)}
+	for _, entry := range db.Trees() {
+		v.trees[entry.Name] = entry.Tree
+	}
+	runtime.AddCleanup(v, func(release func()) { release() }, release)
+	return v
+}
+
+// Mount holds the view every mounted store reads, so one Publish moves them all.
+type Mount struct {
+	view atomic.Pointer[View]
+}
+
+// Publish swaps in v, nil for none; readers still using the previous view keep it.
+func (m *Mount) Publish(v *View) {
+	m.view.Store(v)
+}
+
+// emptyTree serves a mounted store with no view, or no tree in it.
+var emptyTree = memiavl.New(0)
+
+// load returns the tree to read and the view to keep reachable while reading it.
+func (st *Store) load() (*memiavl.Tree, *View) {
+	if st.mount == nil {
+		return st.tree, nil
+	}
+	v := st.mount.view.Load()
+	if v == nil {
+		return emptyTree, nil
+	}
+	if tree := v.trees[st.name]; tree != nil {
+		return tree, v
+	}
+	return emptyTree, v
+}
+
+// viewIterator keeps its view, and so the snapshot it reads, mapped while it is in use.
+type viewIterator struct {
+	types.Iterator
+	view *View
 }
 
 func (st *Store) Commit() types.CommitID {
@@ -45,9 +117,11 @@ func (st *Store) Commit() types.CommitID {
 }
 
 func (st *Store) LastCommitID() types.CommitID {
-	hash := st.tree.RootHash()
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	hash := tree.RootHash()
 	return types.CommitID{
-		Version: st.tree.Version(),
+		Version: tree.Version(),
 		Hash:    hash,
 	}
 }
@@ -89,12 +163,16 @@ func (st *Store) Set(key, value []byte) {
 
 // Get Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
-	return st.tree.Get(key)
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.Get(key)
 }
 
 // Has Implements types.KVStore.
 func (st *Store) Has(key []byte) bool {
-	return st.tree.Has(key)
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.Has(key)
 }
 
 // Delete Implements types.KVStore.
@@ -106,11 +184,20 @@ func (st *Store) Delete(key []byte) {
 }
 
 func (st *Store) Iterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, true)
+	return st.iterator(start, end, true)
 }
 
 func (st *Store) ReverseIterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, false)
+	return st.iterator(start, end, false)
+}
+
+func (st *Store) iterator(start, end []byte, ascending bool) types.Iterator {
+	tree, v := st.load()
+	it := tree.Iterator(start, end, ascending)
+	if v == nil {
+		return it
+	}
+	return viewIterator{Iterator: it, view: v}
 }
 
 // SetInitialVersion sets the initial version of the IAVL tree. It is used when
@@ -132,25 +219,30 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		return nil, errors.Wrap(types.ErrTxDecode, "query cannot be zero length")
 	}
 
-	if req.Height > 0 && req.Height != st.tree.Version() {
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	if req.Height > 0 && req.Height != tree.Version() {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidHeight, "invalid height")
 	}
 
 	res = &types.ResponseQuery{
-		Height: st.tree.Version(),
+		Height: tree.Version(),
 	}
 
 	switch req.Path {
 	case "/key": // get by key
 		res.Key = req.Data // data holds the key bytes
-		res.Value = st.tree.Get(res.Key)
+		res.Value = tree.Get(res.Key)
 
 		if !req.Prove {
 			break
 		}
 
 		// get proof from tree and convert to merkle.Proof before adding to result
-		res.ProofOps = getProofFromTree(st.tree, req.Data, res.Value != nil)
+		res.ProofOps, err = getProofFromTree(tree, req.Data, res.Value != nil)
+		if err != nil {
+			return nil, err
+		}
 	case "/subspace":
 		pairs := memiavl.Pairs{
 			Pairs: make([]memiavl.Pair, 0),
@@ -159,7 +251,8 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 		subspace := req.Data
 		res.Key = subspace
 
-		iterator := types.KVStorePrefixIterator(st, subspace)
+		// the tree loaded above, so a concurrent swap can't change the version mid-query.
+		iterator := tree.Iterator(subspace, types.PrefixEndBytes(subspace), true)
 		for ; iterator.Valid(); iterator.Next() {
 			pairs.Pairs = append(pairs.Pairs, memiavl.Pair{Key: iterator.Key(), Value: iterator.Value()})
 		}
@@ -182,34 +275,29 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 }
 
 func (st *Store) WorkingHash() []byte {
-	return st.tree.RootHash()
+	tree, v := st.load()
+	defer runtime.KeepAlive(v)
+	return tree.RootHash()
 }
 
-// Takes a MutableTree, a key, and a flag for creating existence or absence proof and returns the
-// appropriate merkle.Proof. Since this must be called after querying for the value, this function should never error
-// Thus, it will panic on error rather than returning it
-func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) *cmtprotocrypto.ProofOps {
+func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
 	)
 
 	if exists {
-		// value was found
 		commitmentProof, err = tree.GetMembershipProof(key)
 		if err != nil {
-			// sanity check: If value was found, membership proof must be creatable
-			panic(fmt.Sprintf("unexpected value for empty proof: %s", err.Error()))
+			return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build membership proof for key %X: %s", key, err)
 		}
 	} else {
-		// value wasn't found
 		commitmentProof, err = tree.GetNonMembershipProof(key)
 		if err != nil {
-			// sanity check: If value wasn't found, nonmembership proof must be creatable
-			panic(fmt.Sprintf("unexpected error for nonexistence proof: %s", err.Error()))
+			return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build non-membership proof for key %X: %s", key, err)
 		}
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)
-	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}
+	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}, nil
 }
