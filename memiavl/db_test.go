@@ -1396,6 +1396,8 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
+	// the default async writer may not have written the entry yet.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
 	// been rewritten at or after initialVersion yet, so earliestVersion stays 0.
