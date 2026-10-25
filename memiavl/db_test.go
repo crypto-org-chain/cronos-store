@@ -714,6 +714,8 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 // callers can keep lastCommitInfo consistent with the wal's reported committed version.
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
+	// the async writer would otherwise race it for the next index.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
@@ -1244,6 +1246,8 @@ func TestEarliestVersion(t *testing.T) {
 		require.NoError(t, db.RewriteSnapshot())
 		require.NoError(t, db.Reload())
 	}
+	// the prune's TruncateFront must not run ahead of the async writer.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// trigger prune; it spawns a goroutine guarded by pruneSnapshotLock.
 	db.pruneSnapshots()
