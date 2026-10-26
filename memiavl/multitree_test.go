@@ -2,8 +2,11 @@ package memiavl
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,61 +165,6 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
-func TestMultiTreeWriteSnapshotConcurrentCancellation(t *testing.T) {
-	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
-
-	stores := []string{store1Name, store2Name, store3Name, store4Name, store5Name, "store6", "store7", "store8"}
-	var upgrades []*TreeNameUpgrade
-	for _, name := range stores {
-		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
-	}
-	require.NoError(t, mtree.ApplyUpgrades(upgrades))
-
-	for _, storeName := range stores {
-		tree := mtree.TreeByName(storeName)
-		require.NotNil(t, tree)
-
-		for i := 0; i < 2000; i++ {
-			key := []byte(storeName + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)))
-			value := []byte("value" + string(rune('0'+i%10)))
-			tree.set(key, value)
-		}
-	}
-
-	_, err := mtree.SaveVersion(true)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	pool := pond.New(2, 10)
-	defer pool.StopAndWait()
-
-	snapshotDir := t.TempDir()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
-	}()
-
-	time.Sleep(5 * time.Millisecond)
-	cancel()
-
-	err = <-errChan
-
-	// Should return context.Canceled error
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.Canceled)
-
-	// Verify that the snapshot directory might be partially written or not at all
-	// This is acceptable - the important part is that we got the error and stopped
-	_, statErr := os.Stat(snapshotDir)
-	if statErr == nil {
-		// Directory exists, but may be incomplete - this is fine
-		// The important thing is we stopped and returned an error
-		t.Logf("this is acceptable")
-	}
-}
-
 func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
@@ -303,14 +251,11 @@ func TestMultiTreeWriteSnapshotParallelWrites(t *testing.T) {
 	}
 }
 
-// TestMultiTreeWorkerPoolQueuedTasksShouldNotStart tests that when context is
-// canceled, tasks that are queued but haven't started executing should NOT run.
-// This test DEMONSTRATES THE BUG at line 381 where context.Background() is used
-// instead of the passed ctx, causing all queued tasks to execute even after cancellation.
+// TestMultiTreeWorkerPoolQueuedTasksShouldNotStart checks that a canceled ctx stops
+// queued tree writes before they start.
 func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
-	// Create many stores to ensure tasks will be queued
 	numStores := 20
 	var stores []string
 	var upgrades []*TreeNameUpgrade
@@ -321,102 +266,65 @@ func TestMultiTreeWorkerPoolQueuedTasksShouldNotStart(t *testing.T) {
 	}
 	require.NoError(t, mtree.ApplyUpgrades(upgrades))
 
-	// Don't add any data - use empty trees so writeLeaf won't be called
-	// This means tasks won't check ctx.Done() internally
+	// Empty trees never check ctx themselves, so only the worker group can stop them.
 	_, err := mtree.SaveVersion(true)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Create worker pool with only 1 worker but capacity for all tasks
-	// This ensures most tasks will be queued waiting for the worker
+	// One worker, so the other tasks wait in the queue.
 	pool := pond.New(1, numStores)
 	defer pool.StopAndWait()
 
-	// Track how many tasks actually executed
-	var tasksExecuted atomic.Int32
-
-	// We need to slow down task execution so we can cancel while tasks are queued
-	// We'll patch this by checking the execution count after cancellation
-
-	snapshotDir := t.TempDir()
-
-	// Cancel context immediately
+	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Now call WriteSnapshotWithContext
-	// BUG: Because line 381 uses context.Background(), the worker pool group
-	// doesn't know about the cancellation. All 20 tasks will be submitted to the pool.
-	// With only 1 worker, they'll execute one by one.
-
-	// Since we're using empty trees, tree.WriteSnapshotWithContext doesn't actually
-	// check ctx (no data to write means no ctx.Done() check in writeLeaf).
-	// So all tasks will complete successfully despite ctx being canceled.
-
+	snapshotDir := t.TempDir()
 	err = mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
-
-	// With the BUG (context.Background() at line 381):
-	// - All tasks get queued
-	// - Worker executes them one by one
-	// - Empty trees don't trigger context checks
-	// - Result: err == nil (SUCCESS despite canceled context)
-	//
-	// With the FIX (using ctx at line 381):
-	// - Worker pool's group context would be canceled
-	// - Queued tasks wouldn't start
-	// - Result: err == context.Canceled
-
-	if err == nil {
-		// This proves the bug exists!
-		t.Logf("BUG REPRODUCED: All %d tasks completed despite canceled context!", numStores)
-		t.Logf("Tasks executed: %d", tasksExecuted.Load())
-		t.Logf("This happens because line 381 uses context.Background() instead of ctx")
-
-		// Verify all stores were actually written (proving tasks ran)
-		for _, storeName := range stores {
-			storeDir := filepath.Join(snapshotDir, storeName)
-			if _, err := os.Stat(storeDir); err == nil {
-				tasksExecuted.Add(1)
-			}
-		}
-
-		t.Logf("Verified: %d stores were written to disk", tasksExecuted.Load())
-		t.Fatal("Expected context.Canceled error but got nil - this proves the bug at line 381")
-	} else {
-		// If we get here, the bug has been fixed
-		t.Logf("Bug is FIXED: Got expected error: %v", err)
-		require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
+	for _, name := range stores {
+		require.NoDirExists(t, filepath.Join(snapshotDir, name))
 	}
 }
 
-func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
+func TestLoadMultiTreeRejectsCorruptSnapshot(t *testing.T) {
 	const wantErrMismatch = "snapshot metadata commit info does not match loaded trees"
+
+	// a leaked *os.File's finalizer would close its fd and hide the leak from the count.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
 	cases := []struct {
 		name    string
-		corrupt func(ci *CommitInfo)
+		corrupt func(t *testing.T, snapshotDir string, ci *CommitInfo)
 		wantErr string
 	}{
 		{
 			name: "hash mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.StoreInfos[0].CommitId.Hash = []byte("bogus-hash-from-torn-write")
 			},
 			wantErr: wantErrMismatch,
 		},
 		{
 			name: "version mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.Version++
 			},
 			wantErr: wantErrMismatch,
 		},
 		{
 			name: "store count mismatch",
-			corrupt: func(ci *CommitInfo) {
+			corrupt: func(_ *testing.T, _ string, ci *CommitInfo) {
 				ci.StoreInfos = ci.StoreInfos[:len(ci.StoreInfos)-1]
 			},
 			wantErr: wantErrMismatch,
+		},
+		{
+			// stores open in name order, so store1 is already open when store2 fails.
+			name: "later store fails to open",
+			corrupt: func(t *testing.T, snapshotDir string, _ *CommitInfo) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, store2Name, FileNameMetadata), nil, 0o600))
+			},
+			wantErr: "wrong metadata file size",
 		},
 	}
 
@@ -451,15 +359,14 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.NoError(t, err)
 			mtreeOK.Close()
 
-			// Corrupt the trusted metadata to no longer match the trees on disk,
-			// without touching the trees themselves or the WAL.
+			// Corrupt the snapshot without touching the WAL.
 			staleStoreInfos := make([]StoreInfo, len(mtree.lastCommitInfo.StoreInfos))
 			copy(staleStoreInfos, mtree.lastCommitInfo.StoreInfos)
 			staleCommitInfo := CommitInfo{
 				Version:    mtree.lastCommitInfo.Version,
 				StoreInfos: staleStoreInfos,
 			}
-			tc.corrupt(&staleCommitInfo)
+			tc.corrupt(t, snapshotDir, &staleCommitInfo)
 			staleMetadata := MultiTreeMetadata{
 				CommitInfo:     &staleCommitInfo,
 				InitialVersion: int64(mtree.initialVersion),
@@ -468,9 +375,201 @@ func TestLoadMultiTreeRejectsStaleMetadata(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, WriteFileSync(filepath.Join(snapshotDir, MetadataFileName), bz))
 
+			fdsBefore := countOpenFDsUnder(t, snapshotDir)
 			_, err = LoadMultiTree(snapshotDir, false, 0, TestAppChainID)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)
+			require.Equal(t, fdsBefore, countOpenFDsUnder(t, snapshotDir), "stores opened before the failure must be closed")
 		})
 	}
+}
+
+func TestRunWorkerGroup(t *testing.T) {
+	labels := []string{store1Name, store2Name, store3Name}
+	// Holds every task until all have started, so a failing task can't cancel a
+	// sibling before it runs.
+	allStarted := func() func() {
+		var started sync.WaitGroup
+		started.Add(len(labels))
+		return func() {
+			started.Done()
+			started.Wait()
+		}
+	}
+
+	testCases := []struct {
+		name    string
+		workers int
+		// newTask is called once per case, so the tasks can share per-case state.
+		newTask     func() func(ctx context.Context, i int) error
+		expErrs     []string
+		expFinished int32
+	}{
+		{
+			name: "waits for every task",
+			// one worker for three tasks, so two are still queued when Wait is entered.
+			workers: 1,
+			newTask: func() func(context.Context, int) error {
+				return func(context.Context, int) error {
+					time.Sleep(10 * time.Millisecond)
+					return nil
+				}
+			},
+			expFinished: 3,
+		},
+		{
+			name:    "panic becomes an error without taking down running siblings",
+			workers: 3,
+			newTask: func() func(context.Context, int) error {
+				wait := allStarted()
+				return func(_ context.Context, i int) error {
+					wait()
+					if i == 0 {
+						panic("boom")
+					}
+					return nil
+				}
+			},
+			expErrs:     []string{"boom", store1Name},
+			expFinished: 2,
+		},
+		{
+			name:    "joins every error",
+			workers: 3,
+			newTask: func() func(context.Context, int) error {
+				wait := allStarted()
+				return func(_ context.Context, i int) error {
+					wait()
+					if i == 1 {
+						return nil
+					}
+					return fmt.Errorf("task %d failed", i)
+				}
+			},
+			expErrs:     []string{"task 0 failed", "task 2 failed"},
+			expFinished: 3,
+		},
+		{
+			name: "first failure skips queued tasks",
+			// one worker runs the tasks in order, so the rest are still queued when task 0 fails.
+			workers: 1,
+			newTask: func() func(context.Context, int) error {
+				return func(_ context.Context, i int) error {
+					if i == 0 {
+						return fmt.Errorf("task %d failed", i)
+					}
+					return nil
+				}
+			},
+			expErrs:     []string{"task 0 failed", context.Canceled.Error()},
+			expFinished: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := pond.New(tc.workers, 10)
+			defer pool.StopAndWait()
+
+			var finished atomic.Int32
+			task := tc.newTask()
+			err := RunWorkerGroup(context.Background(), pool, labels, func(ctx context.Context, i int) error {
+				err := task(ctx, i)
+				finished.Add(1)
+				return err
+			})
+
+			if len(tc.expErrs) == 0 {
+				require.NoError(t, err)
+			}
+			for _, expErr := range tc.expErrs {
+				require.ErrorContains(t, err, expErr)
+			}
+			require.Equal(t, tc.expFinished, finished.Load())
+		})
+	}
+}
+
+// WriteSnapshotWithContext must not return while a tree write is still running:
+// RewriteSnapshotWithContext removes the snapshot directory as soon as it
+// returns an error, so an early return would race the in-flight writers.
+func TestMultiTreeWriteSnapshotWaitsForInFlightWorkers(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	mtree.TreeByName(store1Name).set([]byte("k"), []byte("v"))
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	// One worker, parked on a blocking task, so every snapshot write stays queued
+	// behind it until released.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+	release := make(chan struct{})
+	// Runs before StopAndWait on every exit, so a failed assertion can't hang the
+	// test on the parked worker.
+	releaseWorker := sync.OnceFunc(func() { close(release) })
+	defer releaseWorker()
+	held := make(chan struct{})
+	pool.Submit(func() {
+		close(held)
+		<-release
+	})
+	<-held
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mtree.WriteSnapshotWithContext(ctx, t.TempDir(), pool)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("returned %v while the writes were still queued behind a running task", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseWorker()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteSnapshotWithContext did not return after the worker was released")
+	}
+}
+
+func TestMultiTreeWriteSnapshotCancelsRemainingTreesOnFailure(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	mtree.TreeByName(store2Name).set([]byte("k"), []byte("v"))
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	// one worker runs the writes in tree order, so store2 starts only after store1 failed.
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	snapshotDir := t.TempDir()
+	// a file where store1's snapshot directory belongs makes its write fail.
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, store1Name), nil, 0o600))
+
+	err = mtree.WriteSnapshotWithContext(context.Background(), snapshotDir, pool)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled, "store2 must be canceled once store1 fails")
+}
+
+func TestWriteSnapshotFailsOnPanickingTree(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	// a persisted node without a snapshot makes writeRecursive panic on a nil dereference.
+	mtree.TreeByName(store1Name).root = PersistedNode{}
+
+	pool := pond.New(1, 10)
+	defer pool.StopAndWait()
+
+	snapshotDir := t.TempDir()
+	err := mtree.WriteSnapshotWithContext(context.Background(), snapshotDir, pool)
+	require.ErrorContains(t, err, "panic in worker task")
+	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
 }
