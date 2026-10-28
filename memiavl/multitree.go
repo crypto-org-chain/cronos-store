@@ -296,6 +296,12 @@ func (t *MultiTree) WorkingCommitInfo() *CommitInfo {
 
 // SaveVersion bumps the versions of all the stores and optionally returns the new app hash
 func (t *MultiTree) SaveVersion(updateCommitInfo bool) (int64, error) {
+	// checked up front so a failure leaves commit info and every tree unchanged.
+	for _, entry := range t.trees {
+		if err := entry.checkVersionOverflow(); err != nil {
+			return 0, err
+		}
+	}
 	t.lastCommitInfo.Version = nextVersion(t.lastCommitInfo.Version, t.initialVersion)
 	for _, entry := range t.trees {
 		if _, _, err := entry.SaveVersion(updateCommitInfo); err != nil {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"github.com/tidwall/wal"
 	"github.com/zbiljic/go-filelock"
 )
@@ -164,98 +165,6 @@ func TestRewriteSnapshotBackground(t *testing.T) {
 
 	// three files: snapshot, current link, wal, LOCK
 	require.Equal(t, 4, len(entries))
-}
-
-func TestWaitCommittedVersionTimesOut(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version that the wal will never reach, simulating a stuck/dead wal writer.
-	unreachableTarget := committedVersion + 1000
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(unreachableTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "timed out waiting for wal to catch up")
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return within the bounded timeout; it is spinning forever")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenCaughtUp(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(committedVersion, 5*time.Second)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitCommittedVersion did not return for an already-caught-up version")
-	}
-}
-
-func TestWaitCommittedVersionSucceedsWhenWalAdvancesPastTarget(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing: true,
-		InitialStores:   []string{testStoreName},
-	}, TestAppChainID)
-	require.NoError(t, err)
-	defer db.Close()
-
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	// the default async writer may not have written the entry yet.
-	require.NoError(t, db.WaitAsyncCommit())
-
-	committedVersion, err := db.CommittedVersion()
-	require.NoError(t, err)
-
-	// target a version the wal has already passed, simulating a concurrent commit
-	// that advanced the wal beyond the target between polls. An exact "==" check would
-	// never match again and spin until timeout; ">=" must succeed immediately.
-	pastTarget := committedVersion - 1
-	require.GreaterOrEqual(t, pastTarget, int64(0))
-
-	const testTimeout = 200 * time.Millisecond
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- db.waitCommittedVersion(pastTarget, testTimeout)
-	}()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(testTimeout * 10):
-		t.Fatal("waitCommittedVersion did not return promptly when wal already advanced past target")
-	}
 }
 
 func TestRewriteSnapshotBackgroundPreservesCacheSize(t *testing.T) {
@@ -810,14 +719,6 @@ func TestTraverseStateChangesEndVersionLatest(t *testing.T) {
 	}))
 	require.Equal(t, []int64{1, 2, 3}, versions, "endVersion=0 must traverse through the latest version")
 
-	// A genuine reversed range (0 < endVersion < startVersion) must traverse nothing.
-	versions = nil
-	require.NoError(t, tree.TraverseStateChanges(3, 1, func(version int64, cs *ChangeSet) error {
-		versions = append(versions, version)
-		return nil
-	}))
-	require.Empty(t, versions, "reversed range must traverse nothing")
-
 	// A negative endVersion is invalid and must return an error.
 	err = tree.TraverseStateChanges(1, -1, func(version int64, cs *ChangeSet) error {
 		return nil
@@ -881,6 +782,8 @@ func TestCatchupWALNegativeEndVersion(t *testing.T) {
 // callers can keep lastCommitInfo consistent with the wal's reported committed version.
 func corruptTrailingWALEntry(t *testing.T, db *DB) int64 {
 	t.Helper()
+	// the async writer would otherwise race it for the next index.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	lastIndex, err := db.walReader.LastIndex()
 	require.NoError(t, err)
@@ -1415,6 +1318,8 @@ func TestEarliestVersion(t *testing.T) {
 		require.NoError(t, db.RewriteSnapshot())
 		require.NoError(t, db.Reload())
 	}
+	// the prune's TruncateFront must not run ahead of the async writer.
+	require.NoError(t, db.WaitAsyncCommit())
 
 	// a copy published before the prune must not keep reporting a pruned version.
 	cp := db.CopyWithCacheSize(0)
@@ -1604,7 +1509,7 @@ func TestPruneSnapshotsInitialVersionUnderflowGuard(t *testing.T) {
 	v, err := db.Commit()
 	require.NoError(t, err)
 	require.EqualValues(t, 100, v)
-	// the default async writer may not have written the entry FirstVersion reads below.
+	// the default async writer may not have written the entry yet.
 	require.NoError(t, db.WaitAsyncCommit())
 
 	// snapshot-0 (the genesis placeholder) is still on disk; no snapshot has
@@ -1795,110 +1700,466 @@ func TestGetLatestVersionWithEmptyWAL(t *testing.T) {
 	}
 }
 
-func TestCommitAbortsOnAsyncWALWriteError(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{testStoreName},
-		AsyncCommitBuffer: 0, // unbuffered async writer: the worst case for the deadlock
-	}, TestAppChainID)
-	require.NoError(t, err)
+const (
+	simulatedWALWriteErr = "simulated wal write failure"
+	simulatedLatchedErr  = "simulated latched wal error"
+	walTimeoutErr        = "timed out waiting for wal to catch up"
+)
 
-	commit := func() (int64, error) {
-		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
-			return 0, err
-		}
-		return db.Commit()
-	}
-
-	// warm up: spin the async writer goroutine with a successful write.
-	_, err = commit()
-	require.NoError(t, err)
-
-	// break the underlying wal so the writer's next write fails.
-	require.NoError(t, db.walReader.Close())
-
-	_, _ = commit()
-	time.Sleep(100 * time.Millisecond)
-
-	done := make(chan error, 1)
-	go func() {
-		_, cerr := commit()
-		done <- cerr
-	}()
-	select {
-	case cerr := <-done:
-		require.Error(t, cerr, "Commit must surface the async wal write error")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Commit deadlocked after async wal writer failure")
-	}
-
-	// the error is latched, so every subsequent commit keeps failing.
-	_, cerr := commit()
-	require.Error(t, cerr, "Commit must stay failed after an async wal error")
+type failingWriteWAL struct {
+	writeAheadLog
 }
 
-func TestCommitAbortsOnAsyncWALWriteErrorBuffered(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{testStoreName},
-		AsyncCommitBuffer: 16,
-	}, TestAppChainID)
-	require.NoError(t, err)
-
-	commit := func() (int64, error) {
-		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")); err != nil {
-			return 0, err
-		}
-		return db.Commit()
-	}
-
-	_, err = commit()
-	require.NoError(t, err)
-
-	require.NoError(t, db.walReader.Close())
-
-	sawError := false
-	for i := 0; i < 20; i++ {
-		_, cerr := commit()
-		if sawError {
-			require.Error(t, cerr, "Commit returned success after a prior async wal failure")
-		} else if cerr != nil {
-			sawError = true
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	require.True(t, sawError, "async wal writer death never surfaced as a Commit error")
+func (failingWriteWAL) WriteBatch(*wal.Batch) error {
+	return errors.New(simulatedWALWriteErr)
 }
 
-func TestSnapshotRewriteWaitAbortsOnAsyncWALError(t *testing.T) {
-	db, err := Load(t.TempDir(), Options{
-		CreateIfMissing:   true,
-		InitialStores:     []string{testStoreName},
-		AsyncCommitBuffer: 0,
-	}, TestAppChainID)
-	require.NoError(t, err)
+type gatedWriteWAL struct {
+	writeAheadLog
+	release <-chan struct{}
+}
 
-	require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
-	_, err = db.Commit()
-	require.NoError(t, err)
-	require.NoError(t, db.WaitAsyncCommit())
+func (w gatedWriteWAL) WriteBatch(b *wal.Batch) error {
+	<-w.release
+	return w.writeAheadLog.WriteBatch(b)
+}
 
-	cv, err := db.CommittedVersion()
-	require.NoError(t, err)
-	db.lastCommitInfo.Version = cv + 1
-	db.walErr = errors.New("simulated async wal writer death")
+// advancingWAL's last index grows by one every step, from start.
+type advancingWAL struct {
+	walReader
+	start time.Time
+	step  time.Duration
+}
 
-	injectSnapshotRewriteResult(db, db.MultiTree.Copy(0))
+func (w advancingWAL) LastIndex() (uint64, error) {
+	return 1 + uint64(time.Since(w.start)/w.step), nil
+}
+
+type emptyWAL struct{ walReader }
+
+func (emptyWAL) LastIndex() (uint64, error) { return 0, nil }
+
+func lockAndWaitCommittedVersion(db *DB, version int64) error {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+	return db.waitCommittedVersion(version)
+}
+
+type WALWaitTestSuite struct {
+	suite.Suite
+}
+
+func TestWALWaitTestSuite(t *testing.T) {
+	suite.Run(t, new(WALWaitTestSuite))
+}
+
+func (s *WALWaitTestSuite) TestReadOnlySnapshotAheadOfWAL() {
+	dir := s.T().TempDir()
+	db, err := Load(dir, Options{CreateIfMissing: true, InitialStores: []string{testStoreName}}, TestAppChainID)
+	s.Require().NoError(err)
+	for range 3 {
+		s.Require().NoError(db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+		_, err = db.Commit()
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(db.WaitAsyncCommit())
+	s.Require().NoError(db.RewriteSnapshot())
+	// as after losing the unsynced wal tail in a crash.
+	s.Require().NoError(db.walWriter.TruncateBack(2))
+	s.Require().NoError(db.Close())
+
+	ro, err := Load(dir, Options{ReadOnly: true}, TestAppChainID)
+	s.Require().NoError(err)
+	defer ro.Close()
+	s.Require().Equal(int64(3), ro.SnapshotVersion())
 
 	done := make(chan error, 1)
+	var visited []int64
 	go func() {
-		done <- db.checkBackgroundSnapshotRewrite()
+		done <- ro.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(v int64, _ *ChangeSet) error {
+			visited = append(visited, v)
+			return nil
+		})
 	}()
 	select {
-	case cerr := <-done:
-		require.Error(t, cerr, "snapshot rewrite catch-up must surface the async wal error")
-	case <-time.After(5 * time.Second):
-		t.Fatal("snapshot rewrite catch-up spun forever after async wal writer death")
+	case err := <-done:
+		s.Require().NoError(err)
+		s.Require().Equal([]int64{1, 2}, visited)
+	case <-time.After(walCatchupTimeout / 2):
+		s.T().Fatal("read-only reader waited on a wal that can't advance")
+	}
+}
+
+func (s *WALWaitTestSuite) TestWait() {
+	const testTimeout = 200 * time.Millisecond
+
+	commit := func(db *DB) error {
+		if err := db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v2")); err != nil {
+			return err
+		}
+		_, err := db.Commit()
+		return err
+	}
+	// leaves commit info ahead of the wal until writer writes.
+	commitThrough := func(t *testing.T, db *DB, writer writeAheadLog) error {
+		t.Helper()
+		db.walWriter = writer
+		return commit(db)
+	}
+	killWriter := func(t *testing.T, db *DB) {
+		t.Helper()
+		// async: Commit may or may not see the death yet; sync: it must.
+		err := commitThrough(t, db, failingWriteWAL{db.walWriter})
+		if db.walChanSize < 0 {
+			require.ErrorContains(t, err, simulatedWALWriteErr)
+		}
+	}
+	// the async writer holds the commit's write until shortly after the wait starts.
+	commitGated := func(t *testing.T, db *DB, writer writeAheadLog) {
+		t.Helper()
+		release := make(chan struct{})
+		time.AfterFunc(testTimeout/4, func() { close(release) })
+		require.NoError(t, commitThrough(t, db, gatedWriteWAL{writer, release}))
+	}
+	killWriterMidWait := func(t *testing.T, db *DB) {
+		t.Helper()
+		commitGated(t, db, failingWriteWAL{db.walWriter})
+	}
+	latchErr := func(_ *testing.T, db *DB) { db.latchWalErr(errors.New(simulatedLatchedErr)) }
+	requireWriterErrLatched := func(t *testing.T, db *DB, healthyWriter writeAheadLog) {
+		t.Helper()
+		// safe once the writer has latched; only the latched error then carries the simulated failure.
+		db.walWriter = healthyWriter
+		version := db.Version()
+		err := commit(db)
+		require.ErrorContains(t, err, simulatedWALWriteErr)
+		require.Equal(t, version, db.Version(), "a latched error must fail Commit before it saves a version")
+		if db.walChanSize < 0 {
+			require.ErrorIs(t, err, errSyncWALWrite)
+		} else {
+			require.ErrorIs(t, err, errAsyncWriterQuit)
+		}
+		require.ErrorContains(t, db.WaitAsyncCommit(), simulatedWALWriteErr)
+		require.ErrorContains(t, db.Close(), simulatedWALWriteErr)
+	}
+	// a nil want skips the visited check.
+	traverseExpect := func(start, end int64, want []int64) func(db *DB) error {
+		return func(db *DB) error {
+			var visited []int64
+			if err := db.TreeByName(testStoreName).TraverseStateChanges(start, end, func(v int64, _ *ChangeSet) error {
+				visited = append(visited, v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if want != nil && !slices.Equal(visited, want) {
+				return fmt.Errorf("visited versions %v, want %v", visited, want)
+			}
+			return nil
+		}
+	}
+	traverse := traverseExpect(1, 0, nil)
+	firstStoreVersions := func(db *DB) error {
+		_, err := db.FirstStoreVersions([]string{testStoreName})
+		return err
+	}
+	commitPathWait := func(target func(db *DB) int64, timeout time.Duration) func(db *DB) error {
+		return func(db *DB) error {
+			db.catchupTimeout = timeout
+			return lockAndWaitCommittedVersion(db, target(db))
+		}
+	}
+	committed := func(db *DB) int64 { return db.lastCommitInfo.Version }
+
+	// mid-wait cases use the full timeout, past the test's cap, so the in-loop check must end them.
+	testCases := []struct {
+		name              string
+		asyncCommitBuffer int
+		initialVersion    uint32
+		malleate          func(t *testing.T, db *DB)
+		wait              func(db *DB) error
+		expErr            string
+		postCheck         func(t *testing.T, db *DB, healthyWriter writeAheadLog)
+	}{
+		{
+			name: "wal catching up mid-wait is read in full",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				commitGated(t, db, db.walWriter)
+			},
+			wait: func(db *DB) error {
+				var last int64
+				traversed := make(chan error, 1)
+				go func() {
+					traversed <- db.TreeByName(testStoreName).TraverseStateChanges(1, 0, func(v int64, _ *ChangeSet) error {
+						last = v
+						return nil
+					})
+				}()
+				// the reader is now waiting and must not hold db.mtx; retried past brief locked sections.
+				time.Sleep(testTimeout / 8)
+				locked := false
+				for range 5 {
+					if locked = db.mtx.TryLock(); locked {
+						db.mtx.Unlock()
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if !locked {
+					return errors.New("reader holds db.mtx while waiting for the wal")
+				}
+				if err := <-traversed; err != nil {
+					return err
+				}
+				if last != db.lastCommitInfo.Version {
+					return fmt.Errorf("traversal stopped at version %d, want %d", last, db.lastCommitInfo.Version)
+				}
+				return nil
+			},
+		},
+		{
+			name: "reader times out when commit info is ahead of a healthy wal",
+			malleate: func(_ *testing.T, db *DB) {
+				db.catchupTimeout = testTimeout
+				db.lastCommitInfo.Version++
+			},
+			wait:   traverse,
+			expErr: walTimeoutErr,
+		},
+		{
+			name: "FirstStoreVersions times out when commit info is ahead of a healthy wal",
+			malleate: func(_ *testing.T, db *DB) {
+				db.catchupTimeout = testTimeout
+				db.lastCommitInfo.Version++
+			},
+			wait:   firstStoreVersions,
+			expErr: walTimeoutErr,
+		},
+		{
+			// reaching the target takes twice the timeout, but each step is within it.
+			name:     "a slow but advancing wal doesn't time out",
+			malleate: func(_ *testing.T, db *DB) { db.catchupTimeout = testTimeout },
+			wait: func(db *DB) error {
+				log := advancingWAL{db.walReader, time.Now(), testTimeout / 2}
+				return db.waitForWAL(walTarget{log: log, initialVersion: db.initialVersion, version: 5}, walReadPollInterval)
+			},
+		},
+		{
+			name:     "FirstStoreVersions with no stores reports a latched wal error",
+			malleate: latchErr,
+			wait: func(db *DB) error {
+				m, err := db.FirstStoreVersions(nil)
+				if err != nil && m != nil {
+					return errors.New("got a result map along with the error")
+				}
+				return err
+			},
+			expErr: simulatedLatchedErr,
+		},
+		{
+			name:     "reader of a range already in the wal doesn't wait for later commits",
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version++ },
+			wait:     traverseExpect(1, 1, []int64{1}),
+		},
+		{
+			name:           "range below initialVersion is empty",
+			initialVersion: 100,
+			wait:           traverseExpect(1, 5, []int64{}),
+		},
+		{
+			// the default catch-up timeout exceeds the test's cap, so only the guard returns in time.
+			name: "target below initialVersion on an empty wal doesn't wait",
+			wait: func(db *DB) error {
+				return db.waitForWAL(walTarget{log: emptyWAL{db.walReader}, initialVersion: 100, version: 5}, walReadPollInterval)
+			},
+		},
+		{
+			// end is past the wal too, so only the reversed-range check avoids the full timeout.
+			name:     "reversed range is empty without waiting",
+			malleate: func(_ *testing.T, db *DB) { db.lastCommitInfo.Version += 3 },
+			wait:     traverseExpect(4, 3, []int64{}),
+		},
+		{
+			name: "reversed range inside the wal is empty",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				for range 2 {
+					require.NoError(t, commit(db))
+				}
+				require.NoError(t, db.WaitAsyncCommit())
+			},
+			wait: traverseExpect(3, 1, []int64{}),
+		},
+		{
+			name:     "reversed range reports a latched wal error",
+			malleate: latchErr,
+			wait:     traverseExpect(4, 3, []int64{}),
+			expErr:   simulatedLatchedErr,
+		},
+		{
+			name:     "latched writer error fails a reader even when the wal is caught up",
+			malleate: latchErr,
+			wait:     traverse,
+			expErr:   simulatedLatchedErr,
+		},
+		{
+			name:      "async writer dying mid-wait fails a reader",
+			malleate:  killWriterMidWait,
+			wait:      traverse,
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			// as right after a reload: the snapshot is ahead of the wal, which is still catching up.
+			name: "a snapshot ahead of the wal doesn't end the wait",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				commitGated(t, db, db.walWriter)
+				require.NoError(t, db.RewriteSnapshot())
+				require.NoError(t, db.Reload())
+				require.Equal(t, db.lastCommitInfo.Version, db.SnapshotVersion())
+			},
+			wait: traverseExpect(1, 0, []int64{1, 2}),
+		},
+		{
+			// unbuffered: the next commit blocks on the send to the busy writer, then sees it quit.
+			name:      "async writer dying during a commit's send fails that commit",
+			malleate:  killWriterMidWait,
+			wait:      commit,
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			name:              "buffered async writer death fails a later commit",
+			asyncCommitBuffer: 16,
+			malleate:          killWriter,
+			wait: func(db *DB) error {
+				for range 20 {
+					if err := commit(db); err != nil {
+						return err
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				return errors.New("async wal writer death never failed a commit")
+			},
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			name:     "async writer dying mid-wait fails the commit-path wait",
+			malleate: killWriterMidWait,
+			wait:     commitPathWait(committed, walCatchupTimeout),
+			expErr:   simulatedWALWriteErr,
+		},
+		{
+			name: "latched writer error aborts the snapshot rewrite catch-up",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				db.lastCommitInfo.Version++
+				latchErr(t, db)
+				injectSnapshotRewriteResult(db, db.MultiTree.Copy(0))
+			},
+			wait: func(db *DB) error {
+				db.mtx.Lock()
+				defer db.mtx.Unlock()
+				return db.checkBackgroundSnapshotRewrite()
+			},
+			expErr: simulatedLatchedErr,
+		},
+		{
+			name:     "latched writer error fails a wait that needs no wal",
+			malleate: latchErr,
+			wait:     commitPathWait(func(*DB) int64 { return 0 }, testTimeout),
+			expErr:   simulatedLatchedErr,
+		},
+		{
+			name: "commit-path wait succeeds when caught up",
+			wait: commitPathWait(committed, testTimeout),
+		},
+		{
+			// a concurrent commit can move the wal past the target between polls.
+			name: "commit-path wait succeeds when the wal is past the target",
+			malleate: func(t *testing.T, db *DB) {
+				t.Helper()
+				require.NoError(t, commitThrough(t, db, db.walWriter))
+				require.NoError(t, db.WaitAsyncCommit())
+			},
+			wait: commitPathWait(func(db *DB) int64 { return db.lastCommitInfo.Version - 1 }, testTimeout),
+		},
+		{
+			name:   "commit-path wait times out on a wal that never catches up",
+			wait:   commitPathWait(func(db *DB) int64 { return db.lastCommitInfo.Version + 1000 }, testTimeout),
+			expErr: walTimeoutErr,
+		},
+		{
+			name:      "dead async writer fails FirstStoreVersions",
+			malleate:  killWriter,
+			wait:      firstStoreVersions,
+			expErr:    simulatedWALWriteErr,
+			postCheck: requireWriterErrLatched,
+		},
+		{
+			name:              "failed sync wal write fails TraverseStateChanges",
+			asyncCommitBuffer: -1,
+			malleate:          killWriter,
+			wait:              traverse,
+			expErr:            simulatedWALWriteErr,
+			postCheck:         requireWriterErrLatched,
+		},
+		{
+			name:              "failed sync wal write fails FirstStoreVersions",
+			asyncCommitBuffer: -1,
+			malleate:          killWriter,
+			wait:              firstStoreVersions,
+			expErr:            simulatedWALWriteErr,
+			postCheck:         requireWriterErrLatched,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.name, func() {
+			t := s.T()
+			db, err := Load(t.TempDir(), Options{
+				CreateIfMissing:   true,
+				InitialStores:     []string{testStoreName},
+				AsyncCommitBuffer: tc.asyncCommitBuffer,
+				InitialVersion:    tc.initialVersion,
+			}, TestAppChainID)
+			require.NoError(t, err)
+			healthyWriter := db.walWriter
+			// a hung wait can still hold db.mtx, so Close only once the wait returned.
+			waited := false
+			defer func() {
+				if waited {
+					_ = db.Close()
+				}
+			}()
+
+			require.NoError(t, db.ApplyChangeSets(mockNameChangeSet(testStoreName, "k", "v")))
+			_, err = db.Commit()
+			require.NoError(t, err)
+			require.NoError(t, db.WaitAsyncCommit())
+			if tc.malleate != nil {
+				tc.malleate(t, db)
+			}
+			done := make(chan error, 1)
+			go func() { done <- tc.wait(db) }()
+			select {
+			case err := <-done:
+				waited = true
+				if tc.expErr == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, tc.expErr)
+				}
+			case <-time.After(testTimeout * 10):
+				t.Fatal("wal wait spun forever")
+			}
+			if tc.postCheck != nil {
+				tc.postCheck(t, db, healthyWriter)
+			}
+		})
 	}
 }
 
@@ -1940,7 +2201,7 @@ func TestReadOnlyOpenLeavesTornWALTail(t *testing.T) {
 		_, err := db.Commit()
 		require.NoError(t, err)
 	}
-	require.NoError(t, db.waitCommittedVersion(3, walCatchupTimeout))
+	require.NoError(t, lockAndWaitCommittedVersion(db, 3))
 
 	// a half-written entry, as seen while the writer is mid-append.
 	tail := filepath.Join(walPath(dir), "00000000000000000001")
@@ -2471,7 +2732,7 @@ func TestReadOnlyLoadDoesNotCorruptLiveWAL(t *testing.T) {
 		}))
 		_, err := db.Commit()
 		require.NoError(t, err, "commit version %d", v)
-		require.NoError(t, db.waitCommittedVersion(int64(v), walCatchupTimeout))
+		require.NoError(t, lockAndWaitCommittedVersion(db, int64(v)))
 		hashes.Store(int64(v), db.TreeByName(testStoreName).RootHash())
 		latest.Store(int64(v))
 	}
