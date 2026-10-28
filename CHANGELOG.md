@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#107](https://github.com/crypto-org-chain/cronos-store/pull/107) fix(versiondb): make verify fail on worker panics, dedup stores and keep loaded stores (behavior change: loaded stores without change sets now count in the app hash)
 - [#106](https://github.com/crypto-org-chain/cronos-store/pull/106) fix(memiavl): reject metadata with no commit info and cache a snapshot-0 marker instead of the initial-version fallback (a writable Load recreates snapshot-0 if its metadata was torn before any commit)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
 - [#150](https://github.com/crypto-org-chain/cronos-store/pull/150) fix(memiavl): bound WAL catch-up waits and latch sync WAL write errors

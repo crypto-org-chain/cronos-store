@@ -500,8 +500,13 @@ func (t *MultiTree) WriteSnapshotWithContext(ctx context.Context, dir string, wp
 	}
 
 	// write commit info
+	return t.WriteMetadata(dir, &t.lastCommitInfo)
+}
+
+// WriteMetadata writes the snapshot metadata with commitInfo in place of the tree's own.
+func (t *MultiTree) WriteMetadata(dir string, commitInfo *CommitInfo) error {
 	metadata := MultiTreeMetadata{
-		CommitInfo:     &t.lastCommitInfo,
+		CommitInfo:     commitInfo,
 		InitialVersion: int64(t.initialVersion),
 	}
 	bz, err := metadata.Marshal()
