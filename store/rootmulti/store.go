@@ -191,6 +191,13 @@ func (c *historicalDBCache) evictAllLocked() error {
 	return stderrors.Join(errs...)
 }
 
+// liveDBOptions drops the node cache: the live trees are only written; reads go through copies.
+func (rs *Store) liveDBOptions() memiavl.Options {
+	opts := rs.opts
+	opts.CacheSize = 0
+	return opts
+}
+
 // loadAtVersion loads a read-only memiavl DB pinned to version, rejecting
 // memiavl.Load's silent fallback to the latest reachable version.
 func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int64) (*memiavl.DB, error) {
@@ -261,6 +268,8 @@ type Store struct {
 
 	historicalDBCache *historicalDBCache
 	querySnapshot     atomic.Pointer[querySnapshot]
+	// the view the mounted iavl stores read; never the live trees flush mutates.
+	mount memiavlstore.Mount
 }
 
 func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) *Store {
@@ -280,13 +289,22 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 	}
 }
 
+// publishQuerySnapshot also moves the mounted stores to a copy of the committed state.
 func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
 	// zero-copy follows rs.db: results stay mapped while the DB or a reader holds their generation; the DB drops it one reload after retiring it, or on close.
 	db := rs.db.CopyWithCacheSize(0)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
+	rs.mountCopy()
 	return info
+}
+
+// mountCopy moves every mounted store to a copy of rs.db at once. The copy stays
+// mapped until no reader holds it, so an iterator held across Commit survives
+// later reloads.
+func (rs *Store) mountCopy() {
+	rs.mount.Publish(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 }
 
 func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
@@ -373,7 +391,10 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
+	commitInfo := rs.sdkCommitInfo(rs.db.WorkingCommitInfo())
+	// reads before Commit must see this block's writes.
+	rs.mountCopy()
+	return commitInfo.Hash()
 }
 
 // Commit Implements interface Committer
@@ -393,14 +414,6 @@ func (rs *Store) Commit() types.CommitID {
 		panic(err)
 	}
 
-	// the underlying memiavl tree might be reloaded, update the tree.
-	for key := range rs.stores {
-		store := rs.stores[key]
-		if store.GetStoreType() == types.StoreTypeIAVL {
-			store.(*memiavlstore.Store).SetTree(rs.db.TreeByName(key.Name()))
-		}
-	}
-
 	return rs.publishQuerySnapshot().CommitID()
 }
 
@@ -416,6 +429,8 @@ func (rs *Store) closeDB() error {
 		return nil
 	}
 
+	// mounted stores read empty from here; a reader still holding a view keeps it.
+	rs.mount.Publish(nil)
 	err := rs.db.Close()
 	rs.db = nil
 	return err
@@ -526,6 +541,7 @@ func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, mounted map[types.StoreKe
 // used to createQueryContext, abci_query or grpc query service.
 //
 // version == 0 means the latest committed snapshot, not the live working state.
+// A Write() on the result is dropped for iavl stores but reaches the transient and mem stores.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
 	snap, mounted, err := rs.acquireForVersion(version)
 	if err != nil {
@@ -703,7 +719,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 		}
 	}
 
-	opts := rs.opts
+	opts := rs.liveDBOptions()
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
@@ -799,11 +815,10 @@ func (rs *Store) loadCommitStoreFromParams(db *memiavl.DB, key types.StoreKey, p
 	case types.StoreTypeMulti:
 		panic("recursive MultiStores not yet supported")
 	case types.StoreTypeIAVL:
-		tree := db.TreeByName(key.Name())
-		if tree == nil {
+		if db.TreeByName(key.Name()) == nil {
 			return nil, fmt.Errorf("new store is not added in upgrades: %s", key.Name())
 		}
-		return types.CommitStore(memiavlstore.New(tree, rs.logger)), nil
+		return types.CommitStore(memiavlstore.NewMounted(&rs.mount, key.Name(), rs.logger)), nil
 	case types.StoreTypeDB:
 		panic("recursive MultiStores not yet supported")
 	case types.StoreTypeTransient:
@@ -831,7 +846,8 @@ func (rs *Store) LoadVersion(ver int64) error {
 	return rs.LoadVersionAndUpgrade(ver, nil)
 }
 
-// SetInterBlockCache is a noop here because memiavl do caching on it's own, which works well with zero-copy.
+// SetInterBlockCache is a noop: latest-height reads run uncached, which a mainnet replay
+// measured within 1% of memiavl's shared node cache (docs/memiavl_cache_performance.md).
 func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 
 // SetInitialVersion Implements interface CommitMultiStore
@@ -883,7 +899,7 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("failed to close db: %w", err)
 	}
 
-	opts := rs.opts
+	opts := rs.liveDBOptions()
 	opts.TargetVersion = uint32(target)
 	opts.LoadForOverwriting = true
 
@@ -894,20 +910,13 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		rs.stores = nil
 		return err
 	}
-	for key, store := range rs.stores {
-		if store.GetStoreType() != types.StoreTypeIAVL {
-			continue
+	for _, store := range rs.stores {
+		if ms, ok := store.(*memiavlstore.Store); ok {
+			// writes made before the rollback belong to a discarded height.
+			ms.PopChangeSet()
 		}
-		ms := store.(*memiavlstore.Store)
-		// writes made before the rollback belong to a discarded height.
-		ms.PopChangeSet()
-		tree := rs.db.TreeByName(key.Name())
-		if tree == nil {
-			// an upgrade after the target added this store; it has no tree there.
-			tree = memiavl.New(0)
-		}
-		ms.SetTree(tree)
 	}
+	// a store an upgrade added after the target has no tree there, so it reads empty.
 	rs.publishQuerySnapshot()
 
 	return nil
