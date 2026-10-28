@@ -107,11 +107,15 @@ const (
 	walEndSuffix   = ".END"
 	// covers the writer's TruncateFront removing the tail segment between listing and reading it.
 	readOnlyWALOpenAttempts = 3
+	// caps the non-tail segments a read-only WAL keeps cached, and its loads in flight;
+	// each is about the writer's segment size (20MB by default).
+	readOnlyWALCachedSegments = 4
 )
 
 type walReader interface {
 	FirstIndex() (uint64, error)
 	LastIndex() (uint64, error)
+	// Read may return a slice of a shared buffer, which must not be modified.
 	Read(index uint64) ([]byte, error)
 	Close() error
 }
@@ -141,14 +145,23 @@ type readOnlyWAL struct {
 	lastIndex  uint64
 	closed     atomic.Bool
 
-	mu     sync.Mutex  // guards loading and evicting non-tail segment entries
-	cached *walSegment // most recently read non-tail segment
+	mu     sync.Mutex          // guards cached, size and peak; never held during a file read
+	cached []*loadedWALSegment // non-tail segments, least recently used first
+	size   int                 // how many segments cached may hold
+	peak   int                 // most segments cached at once, which tests check
+	loads  chan struct{}       // held from a load's file read until its segment is cached
+}
+
+type loadedWALSegment struct {
+	seg     *walSegment
+	entries [][]byte
 }
 
 type walSegment struct {
 	index   uint64 // index of the first entry
 	path    string
-	entries [][]byte // loaded only for the tail and cached segments
+	entries [][]byte   // loaded at open for the tail only
+	load    sync.Mutex // readers of a segment being loaded wait for that one load
 }
 
 func openReadOnlyWAL(dir string) (l *readOnlyWAL, err error) {
@@ -165,7 +178,12 @@ func tryOpenReadOnlyWAL(dir string) (*readOnlyWAL, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &readOnlyWAL{segments: segments}
+	l := &readOnlyWAL{
+		segments: segments,
+		cached:   make([]*loadedWALSegment, 0, readOnlyWALCachedSegments),
+		size:     readOnlyWALCachedSegments,
+		loads:    make(chan struct{}, readOnlyWALCachedSegments),
+	}
 	if len(segments) == 0 {
 		return l, nil
 	}
@@ -275,7 +293,6 @@ func (l *readOnlyWAL) LastIndex() (uint64, error) {
 	return l.lastIndex, nil
 }
 
-// Read returns a slice of the segment buffer, which must not be modified.
 func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 	if l.closed.Load() {
 		return nil, wal.ErrClosed
@@ -284,31 +301,74 @@ func (l *readOnlyWAL) Read(index uint64) ([]byte, error) {
 		return nil, wal.ErrNotFound
 	}
 	seg := l.segments[sort.Search(len(l.segments), func(i int) bool { return l.segments[i].index > index })-1]
-
-	// the tail is loaded at open and never evicted, so only older segments need the lock.
-	if seg != l.segments[len(l.segments)-1] {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-	}
-	if seg.entries == nil {
-		entries, torn, err := readWALEntries(seg.path)
-		if err != nil {
-			return nil, err
-		}
-		if torn {
-			// only the tail can hold an entry the writer is still appending.
-			return nil, wal.ErrCorrupt
-		}
-		if l.cached != nil {
-			l.cached.entries = nil
-		}
-		seg.entries, l.cached = entries, seg
+	entries, err := l.segmentEntries(seg)
+	if err != nil {
+		return nil, err
 	}
 	offset := index - seg.index
-	if offset >= uint64(len(seg.entries)) {
+	if offset >= uint64(len(entries)) {
 		return nil, wal.ErrCorrupt
 	}
-	return seg.entries[offset], nil
+	return entries[offset], nil
+}
+
+func (l *readOnlyWAL) segmentEntries(seg *walSegment) ([][]byte, error) {
+	if seg.entries != nil {
+		return seg.entries, nil
+	}
+	if entries, ok := l.cachedEntries(seg); ok {
+		return entries, nil
+	}
+	seg.load.Lock()
+	defer seg.load.Unlock()
+	if entries, ok := l.cachedEntries(seg); ok {
+		return entries, nil
+	}
+	l.loads <- struct{}{}
+	defer func() { <-l.loads }()
+	entries, torn, err := readWALEntries(seg.path)
+	if err != nil {
+		return nil, err
+	}
+	if torn {
+		// only the tail can hold an entry the writer is still appending.
+		return nil, wal.ErrCorrupt
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.cached) == l.size {
+		// shift in place: reslicing would keep the evicted segment reachable through the backing array.
+		copy(l.cached, l.cached[1:])
+		l.cached = l.cached[:len(l.cached)-1]
+	}
+	l.cached = append(l.cached, &loadedWALSegment{seg: seg, entries: entries})
+	l.peak = max(l.peak, len(l.cached))
+	return entries, nil
+}
+
+// cachedEntries marks a cached seg most recently used.
+func (l *readOnlyWAL) cachedEntries(seg *walSegment) ([][]byte, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// from the most recently used end, where repeated reads of one segment hit.
+	for i := len(l.cached) - 1; i >= 0; i-- {
+		if c := l.cached[i]; c.seg == seg {
+			copy(l.cached[i:], l.cached[i+1:])
+			l.cached[len(l.cached)-1] = c
+			return c.entries, true
+		}
+	}
+	return nil, false
+}
+
+// resetCache empties the cache and lets it hold size segments, between 1 and readOnlyWALCachedSegments.
+func (l *readOnlyWAL) resetCache(size int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	clear(l.cached)
+	l.cached = l.cached[:0]
+	l.size = max(1, min(size, readOnlyWALCachedSegments))
 }
 
 func (l *readOnlyWAL) Close() error {

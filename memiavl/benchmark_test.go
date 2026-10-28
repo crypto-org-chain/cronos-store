@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"sync"
 	"testing"
 
 	iavlcache "github.com/cosmos/iavl/cache"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/btree"
+	"github.com/tidwall/wal"
 )
 
 // BenchmarkHashNodeLeaf measures HashNode on a leaf node (pool path).
@@ -383,4 +385,47 @@ func NewIavlCacheNode(key, value []byte) iavlCacheNode {
 
 func (n iavlCacheNode) GetKey() []byte {
 	return n.key
+}
+
+// BenchmarkReadOnlyWALConcurrentRead has each reader walk its own segment, as concurrent
+// TraverseStateChanges calls over different heights of one read-only DB would.
+func BenchmarkReadOnlyWALConcurrentRead(b *testing.B) {
+	const (
+		segmentSize = 4 << 20
+		entrySize   = 8 << 10
+		segments    = 9
+	)
+	dir := b.TempDir()
+	writer, err := wal.Open(dir, &wal.Options{SegmentSize: segmentSize, NoSync: true})
+	require.NoError(b, err)
+	entry := make([]byte, entrySize)
+	for i := uint64(1); i <= segments*(segmentSize/entrySize+1); i++ {
+		require.NoError(b, writer.Write(i, entry))
+	}
+	require.NoError(b, writer.Close())
+
+	for _, readers := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("readers=%d", readers), func(b *testing.B) {
+			l, err := openReadOnlyWAL(dir)
+			require.NoError(b, err)
+			defer l.Close()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				var wg sync.WaitGroup
+				for r := range readers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for index := l.segments[r].index; index < l.segments[r+1].index; index += 8 {
+							if _, err := l.Read(index); err != nil {
+								b.Error(err)
+								return
+							}
+						}
+					}()
+				}
+				wg.Wait()
+			}
+		})
+	}
 }

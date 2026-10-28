@@ -238,9 +238,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		return nil, err
 	}
 
+	var readOnly *readOnlyWAL
 	if opts.ReadOnly {
 		// a live writer may own the WAL, so it must not be repaired from here.
-		var readOnly *readOnlyWAL
 		if readOnly, err = openReadOnlyWAL(walPath(dir)); err == nil {
 			reader = readOnly
 		}
@@ -272,10 +272,17 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		}
 	}
 
+	if readOnly != nil {
+		// the catch-up reads forward, so one cached segment is enough.
+		readOnly.resetCache(1)
+	}
 	if opts.TargetVersion == 0 || int64(opts.TargetVersion) > mtree.Version() {
 		if err := mtree.catchupWAL(reader, int64(opts.TargetVersion)); err != nil {
 			return nil, err
 		}
+	}
+	if readOnly != nil {
+		readOnly.resetCache(readOnlyWALCachedSegments)
 	}
 
 	if rollback {
