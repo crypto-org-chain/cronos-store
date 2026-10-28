@@ -23,11 +23,17 @@ const (
 	DefaultSnapshotWriterLimit = 4
 	TmpSuffix                  = "-tmp"
 
-	walCatchupTimeout = 5 * time.Second
-	walPollInterval   = 50 * time.Nanosecond
+	// the commit path polls under db.mtx; readers hold no lock.
+	walPollInterval     = 50 * time.Nanosecond
+	walReadPollInterval = time.Millisecond
+	walCatchupTimeout   = 5 * time.Second
 )
 
-var errReadOnly = errors.New("db is read-only")
+var (
+	errReadOnly        = errors.New("db is read-only")
+	errAsyncWriterQuit = errors.New("async wal writing goroutine quit unexpectedly")
+	errSyncWALWrite    = errors.New("sync wal write failed")
+)
 
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
@@ -74,9 +80,11 @@ type DB struct {
 	walWriter   writeAheadLog // on a read-write DB, the same log as walReader; nil when read-only
 	walChanSize int
 	walChan     chan *walEntry
-	walQuit     chan error
-	// latched async wal writer error; once set, every Commit fails with it.
-	walErr error
+	walQuit     chan struct{} // closed when the async writer exits
+	// latched wal write error; atomic so waiting readers see it without db.mtx.
+	walErr atomic.Pointer[error]
+	// a field so tests can shorten it.
+	catchupTimeout time.Duration
 
 	// pending changes, will be written into WAL in next Commit call
 	pendingLog              WALEntry
@@ -316,6 +324,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		readOnly:               opts.ReadOnly,
 		walReader:              reader,
 		walWriter:              writer,
+		catchupTimeout:         walCatchupTimeout,
 		walChanSize:            opts.AsyncCommitBuffer,
 		snapshotKeepRecent:     opts.SnapshotKeepRecent,
 		snapshotInterval:       opts.SnapshotInterval,
@@ -535,32 +544,22 @@ func (db *DB) insertPendingChangeSet(cs *NamedChangeSet) {
 // checkAsyncTasks checks the status of background tasks non-blocking-ly and process the result
 func (db *DB) checkAsyncTasks() error {
 	return errors.Join(
-		db.checkAsyncCommit(),
+		db.walError(),
 		db.checkBackgroundSnapshotRewrite(),
 	)
 }
 
-// checkAsyncCommit check the quit signal of async wal writing
-func (db *DB) checkAsyncCommit() error {
-	if db.walErr != nil {
-		return db.walErr
+func (db *DB) latchWalErr(err error) {
+	if err != nil {
+		db.walErr.CompareAndSwap(nil, &err)
 	}
-	select {
-	case err := <-db.walQuit:
-		return db.latchWalErr(err)
-	default:
-	}
-
-	return nil
 }
 
-// latchWalErr records a non-nil async wal writer error the first time it's seen
-// and returns the latched error. Callers hold db.mtx.
-func (db *DB) latchWalErr(err error) error {
-	if err != nil && db.walErr == nil {
-		db.walErr = fmt.Errorf("async wal writing goroutine quit unexpectedly: %w", err)
+func (db *DB) walError() error {
+	if err := db.walErr.Load(); err != nil {
+		return *err
 	}
-	return db.walErr
+	return nil
 }
 
 // CommittedVersion returns the latest version written in wal, or snapshot version if wal is empty.
@@ -572,30 +571,25 @@ func (db *DB) CommittedVersion() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if lastIndex == 0 {
-		return db.SnapshotVersion(), nil
-	}
-	return walVersion(lastIndex, db.initialVersion), nil
+	return committedVersionAt(lastIndex, db.initialVersion, db.SnapshotVersion()), nil
 }
 
-func (db *DB) waitCommittedVersion(targetVersion int64, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		if err := db.checkAsyncCommit(); err != nil {
-			return err
-		}
-		committedVersion, err := db.CommittedVersion()
-		if err != nil {
-			return fmt.Errorf("get wal version failed: %w", err)
-		}
-		if committedVersion >= targetVersion {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for wal to catch up to committed version %d, current: %d", targetVersion, committedVersion)
-		}
-		time.Sleep(walPollInterval)
+// committedVersionAt falls back to the snapshot version only while the wal is empty: a reload can
+// put the snapshot ahead of a non-empty wal.
+func committedVersionAt(lastIndex uint64, initialVersion uint32, snapshotVersion int64) int64 {
+	if lastIndex == 0 {
+		return snapshotVersion
 	}
+	return walVersion(lastIndex, initialVersion)
+}
+
+// waitCommittedVersion requires db.mtx; the async writer never takes it.
+func (db *DB) waitCommittedVersion(targetVersion int64) error {
+	target, err := db.walTargetLocked(targetVersion)
+	if err != nil {
+		return err
+	}
+	return db.waitForWAL(target, walPollInterval)
 }
 
 // checkBackgroundSnapshotRewrite check the result of background snapshot rewrite, cleans up the old snapshots and switches to a new multitree
@@ -618,7 +612,7 @@ func (db *DB) checkBackgroundSnapshotRewrite() error {
 
 		// wait for potential pending wal writings to finish, to make sure we catch up to latest state.
 		// in real world, block execution should be slower than wal writing, so this should not block for long.
-		if err := db.waitCommittedVersion(db.lastCommitInfo.Version, walCatchupTimeout); err != nil {
+		if err := db.waitCommittedVersion(db.lastCommitInfo.Version); err != nil {
 			return errors.Join(err, result.mtree.Close())
 		}
 
@@ -720,7 +714,7 @@ func (db *DB) Commit() (int64, error) {
 		return 0, errReadOnly
 	}
 
-	if err := db.checkAsyncCommit(); err != nil {
+	if err := db.walError(); err != nil {
 		return 0, err
 	}
 
@@ -741,26 +735,14 @@ func (db *DB) Commit() (int64, error) {
 			// blocking the send forever under db.mtx.
 			select {
 			case db.walChan <- &entry:
-			case err := <-db.walQuit:
-				if db.walErr = db.latchWalErr(err); db.walErr == nil {
-					db.walErr = errors.New("async wal writing goroutine quit unexpectedly")
-				}
-				return 0, db.walErr
+			case <-db.walQuit:
+				db.latchWalErr(errAsyncWriterQuit) // defensive: the writer latches before closing walQuit
+				return 0, db.walError()
 			}
-		} else {
-			lastIndex, err := db.walWriter.LastIndex()
-			if err != nil {
-				return 0, err
-			}
-
-			db.wbatch.Clear()
-			if err := writeEntry(&db.wbatch, db.logger, lastIndex, &entry); err != nil {
-				return 0, err
-			}
-
-			if err := db.walWriter.WriteBatch(&db.wbatch); err != nil {
-				return 0, err
-			}
+		} else if err := db.writeWALSync(&entry); err != nil {
+			// latched like an async writer death: commit info is already ahead of the wal.
+			db.latchWalErr(fmt.Errorf("%w: %w", errSyncWALWrite, err))
+			return 0, db.walError()
 		}
 	}
 
@@ -777,40 +759,27 @@ func (db *DB) Commit() (int64, error) {
 	return v, nil
 }
 
+func (db *DB) writeWALSync(entry *walEntry) error {
+	lastIndex, err := db.walWriter.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	db.wbatch.Clear()
+	if err := writeEntry(&db.wbatch, db.logger, lastIndex, entry); err != nil {
+		return err
+	}
+	return db.walWriter.WriteBatch(&db.wbatch)
+}
+
 func (db *DB) initAsyncCommit() {
 	walChan := make(chan *walEntry, db.walChanSize)
-	// buffered so an erroring writer can exit instead of parking on the send.
-	walQuit := make(chan error, 1)
+	walQuit := make(chan struct{})
 
 	go func() {
 		defer close(walQuit)
-
-		batch := wal.Batch{}
-		for {
-			entries := channelBatchRecv(walChan)
-			if len(entries) == 0 {
-				// channel is closed
-				break
-			}
-
-			lastIndex, err := db.walWriter.LastIndex()
-			if err != nil {
-				walQuit <- err
-				return
-			}
-
-			for _, entry := range entries {
-				if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
-					walQuit <- err
-					return
-				}
-			}
-
-			if err := db.walWriter.WriteBatch(&batch); err != nil {
-				walQuit <- err
-				return
-			}
-			batch.Clear()
+		if err := db.writeWALAsync(walChan); err != nil {
+			db.latchWalErr(fmt.Errorf("%w: %w", errAsyncWriterQuit, err))
 		}
 	}()
 
@@ -818,7 +787,34 @@ func (db *DB) initAsyncCommit() {
 	db.walQuit = walQuit
 }
 
-// WaitAsyncCommit waits for the completion of async commit
+func (db *DB) writeWALAsync(walChan <-chan *walEntry) error {
+	batch := wal.Batch{}
+	for {
+		entries := channelBatchRecv(walChan)
+		if len(entries) == 0 {
+			// channel is closed
+			return nil
+		}
+
+		lastIndex, err := db.walWriter.LastIndex()
+		if err != nil {
+			return err
+		}
+
+		for _, entry := range entries {
+			if err := writeEntry(&batch, db.logger, lastIndex, entry); err != nil {
+				return err
+			}
+		}
+
+		if err := db.walWriter.WriteBatch(&batch); err != nil {
+			return err
+		}
+		batch.Clear()
+	}
+}
+
+// WaitAsyncCommit waits for the completion of async commit and returns any latched wal write error.
 func (db *DB) WaitAsyncCommit() error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -828,15 +824,15 @@ func (db *DB) WaitAsyncCommit() error {
 
 func (db *DB) waitAsyncCommit() error {
 	if db.walChan == nil {
-		return db.walErr
+		return db.walError()
 	}
 
 	close(db.walChan)
-	err := <-db.walQuit
+	<-db.walQuit
 
 	db.walChan = nil
 	db.walQuit = nil
-	return db.latchWalErr(err)
+	return db.walError()
 }
 
 func (db *DB) Copy() *DB {
@@ -997,6 +993,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 	return nil
 }
 
+// Close also reports a latched wal write error.
 func (db *DB) Close() error {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
@@ -1083,7 +1080,9 @@ func (db *DB) WorkingCommitInfo() *CommitInfo {
 
 // FirstVersion returns the earliest version that still has WAL entries on disk.
 func (db *DB) FirstVersion() (int64, error) {
-	walLog, initialVersion, _, _, err := db.walStateForRead()
+	db.mtx.Lock()
+	walLog, initialVersion, err := db.walReaderLocked()
+	db.mtx.Unlock()
 	if err != nil {
 		return 0, err
 	}
@@ -1127,18 +1126,18 @@ func (db *DB) EarliestVersion() (int64, error) {
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.
+// Fails if the wal stalls longer than the catch-up timeout or a wal write failed.
 func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(stores))
 	if len(stores) == 0 {
+		if err := db.walError(); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
-	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
+	walLog, initialVersion, err := db.waitWALForRead(0, true /* wait */)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return nil, err
 	}
 
@@ -1189,31 +1188,82 @@ func (db *DB) FirstStoreVersions(stores []string) (map[string]int64, error) {
 	return result, nil
 }
 
-func (db *DB) walStateForRead() (walReader, uint32, int64, int64, error) {
+// waitWALForRead waits for lastCommitInfo, or only upTo when it's positive and lower.
+func (db *DB) waitWALForRead(upTo int64, wait bool) (walReader, uint32, error) {
 	db.mtx.Lock()
-	defer db.mtx.Unlock()
-
-	if db.walReader == nil {
-		return nil, 0, 0, 0, fmt.Errorf("wal is not initialized")
+	version := db.lastCommitInfo.Version
+	switch {
+	// a read-only wal never advances, so waiting can only time out.
+	case !wait || db.readOnly:
+		version = 0
+	case upTo > 0 && upTo < version:
+		version = upTo
 	}
-	return db.walReader, db.initialVersion, db.lastCommitInfo.Version, db.SnapshotVersion(), nil
+	target, err := db.walTargetLocked(version)
+	db.mtx.Unlock()
+	if err != nil {
+		return nil, 0, err
+	}
+	return target.log, target.initialVersion, db.waitForWAL(target, walReadPollInterval)
 }
 
-func waitForWALVersion(walLog walReader, initialVersion uint32, targetVersion, snapshotVersion int64) error {
-	if targetVersion <= 0 || targetVersion <= snapshotVersion {
-		return nil
+type walTarget struct {
+	log             walReader
+	initialVersion  uint32
+	version         int64
+	snapshotVersion int64
+}
+
+func (db *DB) walReaderLocked() (walReader, uint32, error) {
+	if db.walReader == nil {
+		return nil, 0, errors.New("wal is not initialized")
+	}
+	return db.walReader, db.initialVersion, nil
+}
+
+func (db *DB) walTargetLocked(version int64) (walTarget, error) {
+	walLog, initialVersion, err := db.walReaderLocked()
+	if err != nil {
+		return walTarget{}, err
+	}
+	return walTarget{
+		log:             walLog,
+		initialVersion:  initialVersion,
+		version:         version,
+		snapshotVersion: db.SnapshotVersion(),
+	}, nil
+}
+
+// a latched wal error wins even when the wal looks caught up. The timeout restarts on progress,
+// but can't bound a write hung inside wal.Log, whose lock LastIndex shares.
+func (db *DB) waitForWAL(t walTarget, pollInterval time.Duration) error {
+	// no wal entry exists below initialVersion.
+	if t.version < int64(t.initialVersion) || t.version <= 0 {
+		return db.walError()
 	}
 
-	targetIndex := walIndex(targetVersion, initialVersion)
+	deadline := time.Now().Add(db.catchupTimeout)
+	var seenIndex uint64
 	for {
-		lastIndex, err := walLog.LastIndex()
-		if err != nil {
+		if err := db.walError(); err != nil {
 			return err
 		}
-		if lastIndex >= targetIndex {
+		lastIndex, err := t.log.LastIndex()
+		if err != nil {
+			return fmt.Errorf("get wal version failed: %w", err)
+		}
+		current := committedVersionAt(lastIndex, t.initialVersion, t.snapshotVersion)
+		if current >= t.version {
 			return nil
 		}
-		time.Sleep(time.Millisecond)
+		if lastIndex > seenIndex {
+			seenIndex = lastIndex
+			deadline = time.Now().Add(db.catchupTimeout)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for wal to catch up to version %d, current: %d", t.version, current)
+		}
+		time.Sleep(pollInterval)
 	}
 }
 
