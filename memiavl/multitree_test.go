@@ -3,6 +3,7 @@ package memiavl
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -628,4 +629,21 @@ func TestWriteSnapshotFailsOnPanickingTree(t *testing.T) {
 	err := mtree.WriteSnapshotWithContext(context.Background(), snapshotDir, pool)
 	require.ErrorContains(t, err, "panic in worker task")
 	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
+}
+
+func TestMultiTreeSaveVersionOverflowLeavesStateUnchanged(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+	require.NoError(t, mtree.ApplyUpgrades([]*TreeNameUpgrade{{Name: store1Name}, {Name: store2Name}}))
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	// the overflowing tree sorts after one that would otherwise be bumped first.
+	mtree.TreeByName(store2Name).version = math.MaxUint32
+	version := mtree.Version()
+	treeVersion := mtree.TreeByName(store1Name).Version()
+
+	_, err = mtree.SaveVersion(true)
+	require.ErrorContains(t, err, "version overflows uint32")
+	require.Equal(t, version, mtree.Version())
+	require.Equal(t, treeVersion, mtree.TreeByName(store1Name).Version())
 }

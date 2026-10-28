@@ -280,8 +280,8 @@ func (t *Tree) remove(key []byte) {
 
 // SaveVersion increases the version number and optionally updates the hashes
 func (t *Tree) SaveVersion(updateHash bool) ([]byte, int64, error) {
-	if t.version == uint32(math.MaxUint32) {
-		return nil, 0, fmt.Errorf("version overflows uint32: %d", t.version)
+	if err := t.checkVersionOverflow(); err != nil {
+		return nil, 0, err
 	}
 
 	var hash []byte
@@ -291,6 +291,13 @@ func (t *Tree) SaveVersion(updateHash bool) ([]byte, int64, error) {
 
 	t.version++
 	return hash, int64(t.version), nil
+}
+
+func (t *Tree) checkVersionOverflow() error {
+	if t.version == uint32(math.MaxUint32) {
+		return fmt.Errorf("version overflows uint32: %d", t.version)
+	}
+	return nil
 }
 
 // Version returns the current tree version
@@ -372,6 +379,7 @@ func (t *Tree) Iterator(start, end []byte, ascending bool) *Iterator {
 // TraverseStateChanges iterates the change sets between startVersion and endVersion (inclusive).
 // endVersion == 0 means "to the latest available version"; a negative endVersion returns an error.
 // A genuine reversed range (0 < endVersion < startVersion) yields nothing.
+// Fails if the wal stalls longer than the catch-up timeout or a wal write failed.
 func (t *Tree) TraverseStateChanges(startVersion, endVersion int64, fn func(version int64, changeSet *ChangeSet) error) error {
 	if t.traverseStateChanges == nil {
 		return fmt.Errorf("TraverseStateChanges not supported")
@@ -462,11 +470,9 @@ func (db *DB) traverseStateChanges(store string, startVersion, endVersion int64,
 	if endVersion < 0 {
 		return fmt.Errorf("invalid end version: %d", endVersion)
 	}
-	walLog, initialVersion, lastVersion, snapshotVersion, err := db.walStateForRead()
+	reversed := endVersion > 0 && endVersion < startVersion // yields nothing
+	walLog, initialVersion, err := db.waitWALForRead(endVersion, !reversed)
 	if err != nil {
-		return err
-	}
-	if err := waitForWALVersion(walLog, initialVersion, lastVersion, snapshotVersion); err != nil {
 		return err
 	}
 	firstIndex, err := walLog.FirstIndex()
