@@ -183,6 +183,7 @@ func (t *MultiTree) SetZeroCopy(zeroCopy bool) {
 }
 
 // Copy returns a snapshot of the tree which won't be corrupted by further modifications on the main tree.
+// It holds a reference on each tree's mmap'd snapshot; Close it when done.
 func (t *MultiTree) Copy(cacheSize int) *MultiTree {
 	trees := make([]NamedTree, len(t.trees))
 	treesByName := make(map[string]int, len(t.trees))
@@ -560,15 +561,23 @@ func walVersion(index uint64, initialVersion uint32) int64 {
 	return int64(index)
 }
 
+var errMissingCommitInfo = errors.New("missing commit info")
+
 func readMetadata(dir string) (*MultiTreeMetadata, error) {
 	// load commit info
-	bz, err := os.ReadFile(filepath.Join(dir, MetadataFileName))
+	path := filepath.Join(dir, MetadataFileName)
+	bz, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var metadata MultiTreeMetadata
 	if err := metadata.Unmarshal(bz); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("metadata file %s: %w", path, err)
+	}
+	// Every writer sets CommitInfo, so nil means the file is truncated or
+	// corrupt (an empty file unmarshals cleanly); fail instead of dereferencing.
+	if metadata.CommitInfo == nil {
+		return nil, fmt.Errorf("metadata file %s: %w", path, errMissingCommitInfo)
 	}
 	if metadata.CommitInfo.Version > math.MaxUint32 {
 		return nil, fmt.Errorf("commit info version overflows uint32: %d", metadata.CommitInfo.Version)

@@ -19,11 +19,10 @@ import (
 func (rs *Store) Restore(
 	height uint64, format uint32, protoReader protoio.Reader,
 ) (types.SnapshotItem, error) {
-	if rs.db != nil {
-		if err := rs.db.Close(); err != nil {
-			return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
-		}
-		rs.db = nil
+	// the importer needs the directory lock rs.db holds, and cached historical DBs
+	// would keep serving the history it replaces.
+	if err := rs.closeDBForReload(); err != nil {
+		return types.SnapshotItem{}, fmt.Errorf("failed to close db: %w", err)
 	}
 
 	item, err := rs.restore(height, format, protoReader)
