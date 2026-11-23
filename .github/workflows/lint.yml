@@ -54,7 +54,7 @@ jobs:
           mkdir build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -DROCKSDB_BUILD_SHARED=OFF \
             -DWITH_SNAPPY=ON -DWITH_LZ4=ON -DWITH_ZLIB=ON -DWITH_ZSTD=ON \
-            -DCMAKE_CXX_FLAGS="-faligned-allocation -Wno-error=unused-but-set-variable" \
+            -DFAIL_ON_WARNINGS=OFF -DCMAKE_CXX_FLAGS="-faligned-allocation" \
             -DCMAKE_PREFIX_PATH=$(brew --prefix) \
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/rocksdb-install
           make -j$(sysctl -n hw.ncpu)

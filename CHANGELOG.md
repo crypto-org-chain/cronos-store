@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#155](https://github.com/crypto-org-chain/cronos-store/pull/155) ci: build rocksdb with FAIL_ON_WARNINGS=OFF
 - [#150](https://github.com/crypto-org-chain/cronos-store/pull/150) fix(memiavl): bound WAL catch-up waits and latch sync WAL write errors
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
 - [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback
