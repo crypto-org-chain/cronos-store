@@ -296,15 +296,9 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	db := rs.db.CopyWithCacheSize(0)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
-	rs.mountCopy()
-	return info
-}
-
-// mountCopy moves every mounted store to a copy of rs.db at once. The copy stays
-// mapped until no reader holds it, so an iterator held across Commit survives
-// later reloads.
-func (rs *Store) mountCopy() {
+	// every mounted store moves at once; the copy stays mapped until no reader holds it, so an iterator held across Commit survives later reloads.
 	rs.mount.Publish(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
+	return info
 }
 
 func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
@@ -391,10 +385,8 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	commitInfo := rs.sdkCommitInfo(rs.db.WorkingCommitInfo())
-	// reads before Commit must see this block's writes.
-	rs.mountCopy()
-	return commitInfo.Hash()
+	// the mounted stores stay on the committed state: a check state branched from them must not read this block before Commit.
+	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
 }
 
 // Commit Implements interface Committer

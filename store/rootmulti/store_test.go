@@ -1479,7 +1479,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 					kv := store.GetKVStore(key)
 					kv.Set([]byte("k"), []byte{byte(i)})
 					store.WorkingHash()
-					// a write after WorkingHash lands in the same version as the working copy.
+					// a write after WorkingHash lands in the same version.
 					kv.Set([]byte("late"), []byte{byte(i)})
 					store.Commit()
 					if store.db.SnapshotVersion() != snapshotVersion {
@@ -1502,7 +1502,7 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 					_ = it.Close()
 				},
 				func() { store.GetKVStore(key).Get([]byte("k")) },
-				// hashes the mounted tree, which races WorkingHash if its copy is taken before hashing.
+				// hashes the mounted tree, which shares nodes with the live tree WorkingHash hashes.
 				func() { store.GetCommitStore(key).LastCommitID() },
 				func() {
 					cms, err := store.CacheMultiStoreWithVersion(0)
@@ -1681,45 +1681,78 @@ func TestMountedStoresReadACopyAfterReload(t *testing.T) {
 	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-// WorkingHash flushes the next block into the live tree before Commit.
+// WorkingHash flushes the next block into the live tree before Commit; every reader stays on the committed state until Commit.
 func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	store, versions := newTestStore(t, 1)
 	defer store.Close()
 	key := store.keysByName[testStoreName]
 
+	// branched before the block and read across it, like baseapp's check state.
+	checkState := store.CacheMultiStore()
+	closeCMS := func(cms types.CacheMultiStore) { require.NoError(t, cms.(io.Closer).Close()) }
+
+	readers := []struct {
+		name string
+		read func(k []byte) []byte
+	}{
+		{"mounted store", func(k []byte) []byte { return store.GetKVStore(key).Get(k) }},
+		{"new branch", func(k []byte) []byte { return store.CacheMultiStore().GetKVStore(key).Get(k) }},
+		{"branch taken before the block", func(k []byte) []byte {
+			// an iterator, since the branch caches what a Get read.
+			it := checkState.GetKVStore(key).Iterator(k, append(bytes.Clone(k), 0))
+			defer it.Close()
+			if !it.Valid() {
+				return nil
+			}
+			return it.Value()
+		}},
+		{"latest-height query", func(k []byte) []byte {
+			res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: k})
+			require.NoError(t, err)
+			require.Equal(t, store.LatestVersion(), res.Height)
+			return res.Value
+		}},
+		{"latest snapshot", func(k []byte) []byte {
+			cms, err := store.CacheMultiStoreWithVersion(0)
+			require.NoError(t, err)
+			defer closeCMS(cms)
+			return cms.GetKVStore(key).Get(k)
+		}},
+		{"snapshot at the committed height", func(k []byte) []byte {
+			cms, err := store.CacheMultiStoreWithVersion(store.LatestVersion())
+			require.NoError(t, err)
+			defer closeCMS(cms)
+			return cms.GetKVStore(key).Get(k)
+		}},
+	}
+	requireReads := func(step string, expected map[string][]byte) {
+		t.Helper()
+		for _, r := range readers {
+			for k, v := range expected {
+				require.Equal(t, v, r.read([]byte(k)), "%s: %s reads %q", step, r.name, k)
+			}
+		}
+	}
+
+	committed := store.GetCommitStore(key).LastCommitID()
+
 	store.GetKVStore(key).Set([]byte("k"), []byte("dirty"))
 	store.WorkingHash()
+	requireReads("after WorkingHash", map[string][]byte{"k": {0}})
+	require.Equal(t, versions[0], store.LatestVersion())
+	// a view of the flushed tree would pair the committed version with the next block's hash.
+	require.Equal(t, committed, store.GetCommitStore(key).LastCommitID())
 
-	newQuery := func(height int64) *types.RequestQuery {
-		return &types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Height: height}
-	}
-	res, err := store.Query(newQuery(0))
-	require.NoError(t, err)
-	require.Equal(t, []byte{0}, res.Value)
-	require.Equal(t, versions[0], res.Height)
-
-	for _, v := range []int64{0, versions[0]} {
-		cms, err := store.CacheMultiStoreWithVersion(v)
-		require.NoError(t, err)
-		require.Equal(t, []byte{0}, cms.GetKVStore(key).Get([]byte("k")))
-		require.NoError(t, cms.(io.Closer).Close())
-	}
-	// baseapp's finalize state reads through the mounted stores until Commit.
-	require.Equal(t, []byte("dirty"), store.GetKVStore(key).Get([]byte("k")))
-
-	// a write after WorkingHash must show once Commit swaps the view.
+	// a write after WorkingHash lands in the same block.
 	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
+	requireReads("after a late write", map[string][]byte{"k": {0}, "late": nil})
+
 	cid := store.Commit()
-	res, err = store.Query(newQuery(0))
-	require.NoError(t, err)
-	require.Equal(t, []byte("dirty"), res.Value)
-	require.Equal(t, cid.Version, res.Height)
 	require.Equal(t, cid.Version, store.LatestVersion())
-	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("late")))
-	require.Equal(t, []byte("v"), store.CacheMultiStore().GetKVStore(key).Get([]byte("late")))
+	requireReads("after Commit", map[string][]byte{"k": []byte("dirty"), "late": []byte("v")})
 
 	// and a block committed without WorkingHash.
 	store.GetKVStore(key).Set([]byte("next"), []byte("v"))
 	store.Commit()
-	require.Equal(t, []byte("v"), store.GetKVStore(key).Get([]byte("next")))
+	requireReads("after a Commit without WorkingHash", map[string][]byte{"next": []byte("v")})
 }
