@@ -3,6 +3,7 @@ package memiavlstore
 import (
 	"io"
 	"runtime"
+	"slices"
 	"sync/atomic"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
@@ -30,6 +31,8 @@ type Store struct {
 	// set for a mounted store, which reads its tree from mount's current view.
 	mount *Mount
 	name  string
+	// where the last view held this store's tree; a hint, checked by name on every read.
+	pos atomic.Int64
 
 	tree   *memiavl.Tree
 	logger log.Logger
@@ -55,8 +58,7 @@ func (st *Store) SetTree(tree *memiavl.Tree) {
 
 // View is one set of trees that the mounted stores read together.
 type View struct {
-	// resolved once: DB.TreeByName takes the db lock.
-	trees map[string]*memiavl.Tree
+	trees []memiavl.NamedTree
 }
 
 // NewView takes db, a copy holding its snapshots' references, and closes it once
@@ -70,10 +72,7 @@ func NewView(db *memiavl.DB, logger log.Logger) *View {
 }
 
 func newView(db *memiavl.DB, release func()) *View {
-	v := &View{trees: make(map[string]*memiavl.Tree)}
-	for _, entry := range db.Trees() {
-		v.trees[entry.Name] = entry.Tree
-	}
+	v := &View{trees: db.Trees()}
 	runtime.AddCleanup(v, func(release func()) { release() }, release)
 	return v
 }
@@ -100,10 +99,20 @@ func (st *Store) load() (*memiavl.Tree, *View) {
 	if v == nil {
 		return emptyTree, nil
 	}
-	if tree := v.trees[st.name]; tree != nil {
-		return tree, v
+	if i := int(st.pos.Load()); i < len(v.trees) && v.trees[i].Name == st.name {
+		return v.trees[i].Tree, v
 	}
-	return emptyTree, v
+	return st.find(v), v
+}
+
+// find searches v by name, for a first read or after the stores in the db changed.
+func (st *Store) find(v *View) *memiavl.Tree {
+	i := slices.IndexFunc(v.trees, func(entry memiavl.NamedTree) bool { return entry.Name == st.name })
+	if i < 0 {
+		return emptyTree
+	}
+	st.pos.Store(int64(i))
+	return v.trees[i].Tree
 }
 
 // viewIterator keeps its view, and so the snapshot it reads, mapped while it is in use.

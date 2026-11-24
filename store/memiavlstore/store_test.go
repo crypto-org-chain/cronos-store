@@ -2,6 +2,7 @@ package memiavlstore
 
 import (
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -11,15 +12,20 @@ import (
 	log "cosmossdk.io/log/v2"
 )
 
-func newViewTestDB(t *testing.T) *memiavl.DB {
+// newViewTestDB commits key "k" in each store, with the store's name as the value.
+func newViewTestDB(t *testing.T, stores ...string) *memiavl.DB {
 	t.Helper()
-	db, err := memiavl.Load(t.TempDir(), memiavl.Options{CreateIfMissing: true, InitialStores: []string{"s"}}, "test_chain")
+	db, err := memiavl.Load(t.TempDir(), memiavl.Options{CreateIfMissing: true, InitialStores: stores}, "test_chain")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	require.NoError(t, db.ApplyChangeSets([]*memiavl.NamedChangeSet{{
-		Name:      "s",
-		Changeset: memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte("v")}}},
-	}}))
+	changeSets := make([]*memiavl.NamedChangeSet, len(stores))
+	for i, name := range stores {
+		changeSets[i] = &memiavl.NamedChangeSet{
+			Name:      name,
+			Changeset: memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte(name)}}},
+		}
+	}
+	require.NoError(t, db.ApplyChangeSets(changeSets))
 	_, err = db.Commit()
 	require.NoError(t, err)
 	return db
@@ -51,7 +57,7 @@ func TestMountedViewRelease(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			db := newViewTestDB(t)
+			db := newViewTestDB(t, "s")
 			cp := db.CopyWithCacheSize(0)
 			done := make(chan struct{})
 			var mount Mount
@@ -60,7 +66,7 @@ func TestMountedViewRelease(t *testing.T) {
 				_ = cp.Close()
 			}))
 			st := NewMounted(&mount, "s", log.NewNopLogger())
-			require.Equal(t, []byte("v"), st.Get([]byte("k")))
+			require.Equal(t, []byte("s"), st.Get([]byte("k")))
 
 			held := tc.hold(st)
 			mount.Publish(nil)
@@ -70,6 +76,36 @@ func TestMountedViewRelease(t *testing.T) {
 				runtime.KeepAlive(held)
 			}
 			require.True(t, released(done, 5*time.Second), "an unreachable view must be released")
+		})
+	}
+}
+
+func TestMountedStoreFollowsItsTreeAcrossViews(t *testing.T) {
+	testCases := []struct {
+		name string
+		// the stores of each view published in turn; "s" is read after every publish.
+		views [][]string
+	}{
+		{name: "same position", views: [][]string{{"a", "s"}, {"a", "s"}}},
+		{name: "moved forward", views: [][]string{{"a", "s"}, {"s"}}},
+		{name: "moved back", views: [][]string{{"s"}, {"a", "b", "s"}}},
+		{name: "another store took its position", views: [][]string{{"a", "s"}, {"a", "b", "s"}}},
+		{name: "removed then added back", views: [][]string{{"a", "s"}, {"a", "b"}, {"a", "s"}}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mount Mount
+			st := NewMounted(&mount, "s", log.NewNopLogger())
+			for _, stores := range tc.views {
+				mount.Publish(NewView(newViewTestDB(t, stores...).CopyWithCacheSize(0), log.NewNopLogger()))
+				var expected []byte
+				if slices.Contains(stores, "s") {
+					expected = []byte("s")
+				}
+				require.Equal(t, expected, st.Get([]byte("k")))
+			}
+			mount.Publish(nil)
 		})
 	}
 }
