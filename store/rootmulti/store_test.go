@@ -1502,7 +1502,6 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 					_ = it.Close()
 				},
 				func() { store.GetKVStore(key).Get([]byte("k")) },
-				// hashes the mounted tree, which shares nodes with the live tree WorkingHash hashes.
 				func() { store.GetCommitStore(key).LastCommitID() },
 				func() {
 					cms, err := store.CacheMultiStoreWithVersion(0)
@@ -1681,7 +1680,6 @@ func TestMountedStoresReadACopyAfterReload(t *testing.T) {
 	require.Equal(t, []byte("v"), rs.GetKVStore(key).Get([]byte("k")))
 }
 
-// WorkingHash flushes the next block into the live tree before Commit; every reader stays on the committed state until Commit.
 func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	store, versions := newTestStore(t, 1)
 	defer store.Close()
@@ -1742,16 +1740,16 @@ func TestReadsBetweenWorkingHashAndCommit(t *testing.T) {
 	require.Equal(t, versions[0], store.LatestVersion())
 	// a view of the flushed tree would pair the committed version with the next block's hash.
 	require.Equal(t, committed, store.GetCommitStore(key).LastCommitID())
+	require.Equal(t, committed.Hash, store.GetCommitStore(key).WorkingHash())
 
-	// a write after WorkingHash lands in the same block.
 	store.GetKVStore(key).Set([]byte("late"), []byte("v"))
-	requireReads("after a late write", map[string][]byte{"k": {0}, "late": nil})
+	store.WorkingHash()
+	requireReads("after a late write and a second WorkingHash", map[string][]byte{"k": {0}, "late": nil})
 
 	cid := store.Commit()
 	require.Equal(t, cid.Version, store.LatestVersion())
 	requireReads("after Commit", map[string][]byte{"k": []byte("dirty"), "late": []byte("v")})
 
-	// and a block committed without WorkingHash.
 	store.GetKVStore(key).Set([]byte("next"), []byte("v"))
 	store.Commit()
 	requireReads("after a Commit without WorkingHash", map[string][]byte{"next": []byte("v")})

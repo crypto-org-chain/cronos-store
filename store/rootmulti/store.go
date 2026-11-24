@@ -296,7 +296,6 @@ func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
 	db := rs.db.CopyWithCacheSize(0)
 	info := rs.commitInfoFromDB(db)
 	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
-	// every mounted store moves at once; the copy stays mapped until no reader holds it, so an iterator held across Commit survives later reloads.
 	rs.mount.Publish(memiavlstore.NewView(rs.db.CopyWithCacheSize(0), rs.logger))
 	return info
 }
@@ -385,7 +384,7 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	// the mounted stores stay on the committed state: a check state branched from them must not read this block before Commit.
+	// the mounted stores stay on the committed state, so a check state branched from them cannot read this block before Commit; neither can a finalize state after it is written.
 	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
 }
 
