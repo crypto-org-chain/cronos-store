@@ -31,7 +31,7 @@ type Store struct {
 	// set for a mounted store, which reads its tree from mount's current view.
 	mount *Mount
 	name  string
-	// where the last view held this store's tree; a hint, checked by name on every read.
+	// where the last view held this store's tree; a hint, checked by name.
 	pos atomic.Int64
 
 	tree   *memiavl.Tree
@@ -102,11 +102,11 @@ func (st *Store) load() (*memiavl.Tree, *View) {
 	if i := int(st.pos.Load()); i < len(v.trees) && v.trees[i].Name == st.name {
 		return v.trees[i].Tree, v
 	}
-	return st.find(v), v
+	return st.relocate(v), v
 }
 
-// find searches v by name, for a first read or after the stores in the db changed.
-func (st *Store) find(v *View) *memiavl.Tree {
+// relocate searches v by name and records where it found the tree.
+func (st *Store) relocate(v *View) *memiavl.Tree {
 	i := slices.IndexFunc(v.trees, func(entry memiavl.NamedTree) bool { return entry.Name == st.name })
 	if i < 0 {
 		return emptyTree

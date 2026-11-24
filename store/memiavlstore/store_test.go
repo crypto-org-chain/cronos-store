@@ -3,6 +3,7 @@ package memiavlstore
 import (
 	"runtime"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	log "cosmossdk.io/log/v2"
 )
 
-// newViewTestDB commits key "k" in each store, with the store's name as the value.
 func newViewTestDB(t *testing.T, stores ...string) *memiavl.DB {
 	t.Helper()
 	db, err := memiavl.Load(t.TempDir(), memiavl.Options{CreateIfMissing: true, InitialStores: stores}, "test_chain")
@@ -20,6 +20,7 @@ func newViewTestDB(t *testing.T, stores ...string) *memiavl.DB {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	changeSets := make([]*memiavl.NamedChangeSet, len(stores))
 	for i, name := range stores {
+		// the value is the store's name, so a read shows which tree served it.
 		changeSets[i] = &memiavl.NamedChangeSet{
 			Name:      name,
 			Changeset: memiavl.ChangeSet{Pairs: []*memiavl.KVPair{{Key: []byte("k"), Value: []byte(name)}}},
@@ -83,7 +84,7 @@ func TestMountedViewRelease(t *testing.T) {
 func TestMountedStoreFollowsItsTreeAcrossViews(t *testing.T) {
 	testCases := []struct {
 		name string
-		// the stores of each view published in turn; "s" is read after every publish.
+		// the stores of each view published in turn, while "s" is read.
 		views [][]string
 	}{
 		{name: "same position", views: [][]string{{"a", "s"}, {"a", "s"}}},
@@ -97,15 +98,44 @@ func TestMountedStoreFollowsItsTreeAcrossViews(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mount Mount
 			st := NewMounted(&mount, "s", log.NewNopLogger())
-			for _, stores := range tc.views {
-				mount.Publish(NewView(newViewTestDB(t, stores...).CopyWithCacheSize(0), log.NewNopLogger()))
-				var expected []byte
-				if slices.Contains(stores, "s") {
-					expected = []byte("s")
-				}
-				require.Equal(t, expected, st.Get([]byte("k")))
+			dbs := make([]*memiavl.DB, len(tc.views))
+			for i, stores := range tc.views {
+				dbs[i] = newViewTestDB(t, stores...)
 			}
-			mount.Publish(nil)
+
+			stop := make(chan struct{})
+			var readers sync.WaitGroup
+			for range 4 {
+				readers.Go(func() {
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						if value := st.Get([]byte("k")); value != nil && string(value) != "s" {
+							t.Errorf("read the tree of store %q", value)
+							return
+						}
+					}
+				})
+			}
+			// deferred so a failed assertion below still stops the readers.
+			defer func() {
+				close(stop)
+				readers.Wait()
+			}()
+
+			for range 20 {
+				for i, stores := range tc.views {
+					mount.Publish(NewView(dbs[i].CopyWithCacheSize(0), log.NewNopLogger()))
+					var expected []byte
+					if slices.Contains(stores, "s") {
+						expected = []byte("s")
+					}
+					require.Equal(t, expected, st.Get([]byte("k")))
+				}
+			}
 		})
 	}
 }
