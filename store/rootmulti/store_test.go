@@ -2,6 +2,8 @@ package rootmulti
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -1546,6 +1548,98 @@ func TestLatestHeightQueryRaceAgainstCommit(t *testing.T) {
 			}
 
 			wg.Wait()
+		})
+	}
+}
+
+// Every write is derived from the value its block read, so one stale consensus read changes all later hashes.
+func appHashesUnderReads(t *testing.T, readers int, read func(store *Store, key types.StoreKey, k []byte)) [][]byte {
+	t.Helper()
+
+	const (
+		blocks         = 400
+		writesPerBlock = 40
+		cacheSize      = 16
+		// a node cache shared with readers is how a paused read goes stale; twice as many keys keep it refilling.
+		numKeys = 2 * cacheSize
+	)
+	store, key := newLoadedStore(t, memiavl.Options{CacheSize: cacheSize})
+	keys := make([][]byte, numKeys)
+	for i := range keys {
+		keys[i] = []byte(fmt.Sprintf("k%02d", i))
+		store.GetKVStore(key).Set(keys[i], []byte("v"))
+	}
+	store.Commit()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer close(stop)
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func(next int) {
+			defer wg.Done()
+			for ; ; next++ {
+				select {
+				case <-stop:
+					return
+				default:
+					read(store, key, keys[next%numKeys])
+				}
+			}
+		}(r)
+	}
+
+	hashes := make([][]byte, 0, blocks)
+	for write := 0; len(hashes) < blocks; {
+		kv := store.GetKVStore(key)
+		for range writesPerBlock {
+			// 7 is coprime with numKeys, so the writes cycle through every key.
+			k := keys[write*7%numKeys]
+			h := sha256.New()
+			h.Write(kv.Get(k))
+			h.Write(binary.BigEndian.AppendUint32(nil, uint32(write)))
+			kv.Set(k, h.Sum(nil))
+			write++
+		}
+		hashes = append(hashes, store.WorkingHash())
+		store.Commit()
+	}
+	return hashes
+}
+
+func TestConcurrentReadsKeepAppHash(t *testing.T) {
+	testCases := []struct {
+		name string
+		read func(store *Store, key types.StoreKey, k []byte)
+	}{
+		{
+			// CheckTx under CometBFT's app mempool reads this way, with no lock against FinalizeBlock or Commit.
+			name: "mounted store read",
+			read: func(store *Store, key types.StoreKey, k []byte) { store.GetKVStore(key).Get(k) },
+		},
+		{
+			name: "latest-height proof query",
+			read: func(store *Store, _ types.StoreKey, k []byte) {
+				_, _ = store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: k, Prove: true})
+			},
+		},
+	}
+
+	// four readers per CPU, so some are paused mid-read while blocks commit; more CPUs only slow the race detector.
+	const (
+		cpus    = 4
+		readers = 4 * cpus
+	)
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(cpus))
+
+	expected := appHashesUnderReads(t, 0, nil)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hashes := appHashesUnderReads(t, readers, tc.read)
+			for block := range expected {
+				require.Equalf(t, expected[block], hashes[block], "app hash of block %d", block)
+			}
 		})
 	}
 }
