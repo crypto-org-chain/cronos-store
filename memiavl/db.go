@@ -35,6 +35,19 @@ var (
 	errSyncWALWrite    = errors.New("sync wal write failed")
 )
 
+// earliestIsGenesis is the earliestSnapshotCache marker for "the earliest
+// kept snapshot is snapshot-0"; a real earliest version is always positive and
+// zero means uncached.
+const earliestIsGenesis = -1
+
+// earliestCacheEntry keeps snapshot-0 distinct from the uncached zero.
+func earliestCacheEntry(snapshotVersion int64) int64 {
+	if snapshotVersion == 0 {
+		return earliestIsGenesis
+	}
+	return snapshotVersion
+}
+
 // DB implements DB-like functionalities on top of MultiTree:
 // - async snapshot rewriting
 // - Write-ahead-log
@@ -102,10 +115,9 @@ type DB struct {
 	// max concurrent tree writers within one snapshot write.
 	snapshotWriterLimit int
 
-	// cached earliest snapshot version. Loaded lazily and refreshed by
-	// pruneSnapshots. Zero means "not cached"; readers should fall back to
-	// scanning the directory.
-	earliestSnapshotCache atomic.Int64
+	// earliest retained snapshot version, filled lazily and refreshed by
+	// pruneSnapshots; zero means not cached, earliestIsGenesis means snapshot-0.
+	earliestSnapshotCache *atomic.Int64
 
 	// reusable write batch
 	wbatch wal.Batch
@@ -234,6 +246,9 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 
 	path := filepath.Join(dir, snapshot)
 	mtree, err = LoadMultiTree(path, opts.ZeroCopy, opts.CacheSize, chainId)
+	if errors.Is(err, errMissingCommitInfo) && fileLock != nil && opts.CreateIfMissing && opts.TargetVersion == 0 {
+		mtree, err = recoverTornGenesis(dir, opts, chainId, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +345,7 @@ func Load(dir string, opts Options, chainId string) (_ *DB, retErr error) {
 		snapshotInterval:       opts.SnapshotInterval,
 		triggerStateSyncExport: opts.TriggerStateSyncExport,
 		snapshotWriterLimit:    opts.SnapshotWriterLimit,
+		earliestSnapshotCache:  new(atomic.Int64),
 	}
 	ownershipMoved = true
 	db.attachTraverseStateChanges()
@@ -688,10 +704,13 @@ func (db *DB) pruneSnapshots() {
 		// truncate WAL until the earliest remaining snapshot
 		earliestVersion, err := firstSnapshotVersion(db.dir)
 		if err != nil {
+			// The snapshots are already deleted, so a cached version may name one of
+			// them. Invalidate to force readers back to a directory scan.
+			db.earliestSnapshotCache.Store(0)
 			db.logger.Error("failed to find first snapshot", "err", err)
 			return
 		}
-		db.earliestSnapshotCache.Store(earliestVersion)
+		db.earliestSnapshotCache.Store(earliestCacheEntry(earliestVersion))
 
 		// guard against walIndex underflow: when earliestVersion < initialVersion-1,
 		// the genesis placeholder snapshot has no corresponding wal entries yet.
@@ -835,11 +854,30 @@ func (db *DB) waitAsyncCommit() error {
 	return db.walError()
 }
 
+// Copy returns a read-only view of the current state that shares the live
+// snapshot's mmap. It stays valid across reloads; Close it when done.
 func (db *DB) Copy() *DB {
 	db.mtx.Lock()
 	defer db.mtx.Unlock()
 
-	return db.copy(db.cacheSize)
+	return db.readOnlyCopy(db.cacheSize)
+}
+
+// CopyWithCacheSize is Copy with an explicit node cache size. Pass 0 for a
+// short-lived copy: its cache would start cold and never pay for itself.
+func (db *DB) CopyWithCacheSize(cacheSize int) *DB {
+	db.mtx.Lock()
+	defer db.mtx.Unlock()
+
+	return db.readOnlyCopy(cacheSize)
+}
+
+// A copy has no WAL and shares the source's directory, so writes through it
+// would be lost or would rewrite the source's snapshots.
+func (db *DB) readOnlyCopy(cacheSize int) *DB {
+	cloned := db.copy(cacheSize)
+	cloned.readOnly = true
+	return cloned
 }
 
 func (db *DB) copy(cacheSize int) *DB {
@@ -851,6 +889,8 @@ func (db *DB) copy(cacheSize int) *DB {
 		dir:                 db.dir,
 		snapshotWriterLimit: db.snapshotWriterLimit,
 	}
+	// shared so a prune after this copy is taken still reaches its readers.
+	cloned.earliestSnapshotCache = db.earliestSnapshotCache
 	cloned.attachTraverseStateChanges()
 	return cloned
 }
@@ -912,8 +952,9 @@ func (db *DB) reloadMultiTree(mtree *MultiTree) error {
 		}
 	}
 
-	// retain the outgoing generation for one reload cycle: copies and lock-free
-	// readers may still hold PersistedNodes into its mmap'd snapshot.
+	// retain the outgoing generation for one reload cycle: readers of the live
+	// trees may still hold PersistedNodes into its mmap'd snapshot. Copies hold
+	// their own reference.
 	old := db.MultiTree
 	db.MultiTree = *mtree
 	db.retiredMultiTree = &old
@@ -963,17 +1004,25 @@ func (db *DB) rewriteSnapshotBackground() error {
 
 	cloned := db.copy(0)
 	wal := db.walReader
+	logger, dir, version := db.logger, db.dir, cloned.Version()
+	zeroCopy, cacheSize, chainID := db.zeroCopy, db.cacheSize, db.chainId
 	go func() {
 		defer close(ch)
 
-		cloned.logger.Info("start rewriting snapshot", "version", cloned.Version())
-		if err := cloned.RewriteSnapshotWithContext(ctx); err != nil {
+		logger.Info("start rewriting snapshot", "version", version)
+		err := cloned.RewriteSnapshotWithContext(ctx)
+		// release the clone before handing back a result, so the generation it pins
+		// can be unmapped once the DB drops it.
+		if cerr := cloned.Close(); cerr != nil {
+			logger.Error("failed to release snapshot rewrite copy", "err", cerr)
+		}
+		if err != nil {
 			// write error log but don't stop the client, it could happen when load an old version.
-			cloned.logger.Error("failed to rewrite snapshot", "err", err)
+			logger.Error("failed to rewrite snapshot", "err", err)
 			return
 		}
-		cloned.logger.Info("finished rewriting snapshot", "version", cloned.Version())
-		mtree, err := LoadMultiTree(currentPath(cloned.dir), cloned.zeroCopy, cloned.cacheSize, cloned.chainId)
+		logger.Info("finished rewriting snapshot", "version", version)
+		mtree, err := LoadMultiTree(currentPath(dir), zeroCopy, cacheSize, chainID)
 		if err != nil {
 			ch <- snapshotResult{err: err}
 			return
@@ -985,7 +1034,7 @@ func (db *DB) rewriteSnapshotBackground() error {
 			return
 		}
 
-		cloned.logger.Info("finished best-effort WAL catchup", "version", cloned.Version(), "latest", mtree.Version())
+		logger.Info("finished best-effort WAL catchup", "version", version, "latest", mtree.Version())
 
 		ch <- snapshotResult{mtree: mtree}
 	}()
@@ -1016,11 +1065,11 @@ func (db *DB) Close() error {
 
 	errs = append(errs, db.MultiTree.Close())
 
-	// nil after a previous Close
+	// copies have no wal, and a previous Close nils it.
 	if db.walReader != nil {
 		errs = append(errs, db.walReader.Close())
-		db.walReader = nil
 	}
+	db.walReader = nil
 	db.walWriter = nil
 
 	if db.retiredMultiTree != nil {
@@ -1102,27 +1151,40 @@ func (db *DB) FirstVersion() (int64, error) {
 // the earliest snapshot are pruned, so the snapshot version is the true
 // lower bound for queries.
 //
-// The result is cached and refreshed by pruneSnapshots. SDK callers may hit
-// this on every height-bound query, so we avoid scanning the snapshot
-// directory on the hot path.
+// The node Status endpoint calls this per request, so the earliest snapshot
+// version is cached and refreshed by pruneSnapshots instead of scanning the
+// snapshot directory. While snapshot-0 is the earliest one kept,
+// the result is initialVersion, read under db.mtx since SetInitialVersion and
+// Reload can still change it.
 func (db *DB) EarliestVersion() (int64, error) {
-	if v := db.earliestSnapshotCache.Load(); v > 0 {
+	v := db.earliestSnapshotCache.Load()
+	if v == 0 {
+		snapshotVersion, err := firstSnapshotVersion(db.dir)
+		if err != nil {
+			return 0, err
+		}
+		// cache the marker, not the fallback; pruneSnapshots replaces it once snapshot-0 is gone.
+		v = earliestCacheEntry(snapshotVersion)
+		db.cacheEarliestVersion(v)
+	}
+	if v > 0 {
 		return v, nil
 	}
-	v, err := firstSnapshotVersion(db.dir)
-	if err != nil {
-		return 0, err
-	}
+	// snapshot-0 is the genesis placeholder; the first queryable height is
+	// initialVersion (defaults to 1 for standard chains).
+	db.mtx.Lock()
+	v = int64(db.initialVersion)
+	db.mtx.Unlock()
 	if v == 0 {
-		// snapshot-0 is the genesis placeholder; the first queryable height is
-		// initialVersion (defaults to 1 for standard chains).
-		v = int64(db.initialVersion)
-		if v == 0 {
-			v = 1
-		}
+		v = 1
 	}
-	db.earliestSnapshotCache.Store(v)
 	return v, nil
+}
+
+// cacheEarliestVersion fills only an empty cache, so a scan that raced a prune
+// can't overwrite the prune's newer value.
+func (db *DB) cacheEarliestVersion(v int64) {
+	db.earliestSnapshotCache.CompareAndSwap(0, v)
 }
 
 // FirstStoreVersions returns the first version each store appears in the WAL.
@@ -1481,6 +1543,49 @@ func atomicRemoveDir(path string) error {
 	return os.RemoveAll(tmpPath)
 }
 
+// SetInitialVersion rewrites snapshot-0 in place, and InitChain reruns on restart,
+// so a snapshot-0 torn before any commit can be rebuilt; any other DB keeps loadErr.
+func recoverTornGenesis(dir string, opts Options, chainId string, loadErr error) (*MultiTree, error) {
+	genesis, err := isUncommittedGenesis(dir)
+	if err != nil {
+		return nil, errors.Join(loadErr, err)
+	}
+	if !genesis {
+		return nil, loadErr
+	}
+	opts.Logger.Info("recreating snapshot-0, torn before any commit", "dir", dir)
+	if err := initEmptyDB(dir, opts.InitialVersion, chainId); err != nil {
+		return nil, errors.Join(loadErr, err)
+	}
+	return LoadMultiTree(currentPath(dir), opts.ZeroCopy, opts.CacheSize, chainId)
+}
+
+// isUncommittedGenesis reports whether snapshot-0 is the only snapshot and the WAL is empty.
+func isUncommittedGenesis(dir string) (bool, error) {
+	onlyGenesis := false
+	if err := traverseSnapshots(dir, true, func(version int64) (bool, error) {
+		onlyGenesis = version == 0
+		return !onlyGenesis, nil
+	}); err != nil {
+		return false, err
+	}
+	if !onlyGenesis {
+		return false, nil
+	}
+	last, err := walLastIndex(dir)
+	return err == nil && last == 0, err
+}
+
+// walLastIndex reads the WAL without repairing it, so a live writer's log is left as is.
+func walLastIndex(dir string) (uint64, error) {
+	reader, err := openReadOnlyWAL(walPath(dir))
+	if err != nil {
+		return 0, err
+	}
+	last, err := reader.LastIndex()
+	return last, errors.Join(err, reader.Close())
+}
+
 // createDBIfNotExist detects if db does not exist and try to initialize an empty one.
 func createDBIfNotExist(dir string, initialVersion uint32, chainId string) error {
 	_, err := os.Stat(filepath.Join(dir, "current", MetadataFileName))
@@ -1511,15 +1616,8 @@ func GetLatestVersion(dir string) (int64, error) {
 		return 0, err
 	}
 
-	reader, err := openReadOnlyWAL(walPath(dir))
+	lastIndex, err := walLastIndex(dir)
 	if err != nil {
-		return 0, err
-	}
-	lastIndex, err := reader.LastIndex()
-	if err != nil {
-		return 0, errors.Join(err, reader.Close())
-	}
-	if err := reader.Close(); err != nil {
 		return 0, err
 	}
 	if lastIndex == 0 {

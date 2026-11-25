@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/crypto-org-chain/cronos-store/memiavl"
@@ -45,6 +46,9 @@ type historicalDBCache struct {
 	entries []*historicalDBEntry // index 0 is most-recently used
 	closed  bool
 	loadSem chan struct{} // bounds concurrent slow-path loads to maxSize
+	// bumped when the directory is replaced, so an in-flight load can't cache a
+	// DB mapped over the old files.
+	generation uint64
 }
 
 func newHistoricalDBCache(maxSize int) *historicalDBCache {
@@ -81,6 +85,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		c.mu.Unlock()
 		return e, nil
 	}
+	generation := c.generation
 	c.mu.Unlock()
 
 	// Cap concurrent loads at maxSize so a burst of distinct-version queries
@@ -94,10 +99,10 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 		return nil, err
 	}
 
-	// close db if we return without caching it (closed, or another goroutine won the race).
-	dbInserted := false
+	// close db unless a caller gets it (the cache closed, or another goroutine loaded it first).
+	dbHandedOff := false
 	defer func() {
-		if !dbInserted {
+		if !dbHandedOff {
 			_ = db.Close()
 		}
 	}()
@@ -107,6 +112,12 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 	if c.closed {
 		return nil, fmt.Errorf("historicalDBCache: cache is closed")
+	}
+
+	// directory replaced mid-load: this DB may map unlinked files, so it serves only this caller.
+	if c.generation != generation {
+		dbHandedOff = true
+		return &historicalDBEntry{version: version, db: db, refs: 1, evicted: true}, nil
 	}
 
 	// another goroutine may have loaded the same version while we were doing I/O.
@@ -126,7 +137,7 @@ func (c *historicalDBCache) borrow(version int64, load func() (*memiavl.DB, erro
 
 	entry := &historicalDBEntry{version: version, db: db, refs: 1}
 	c.entries = append([]*historicalDBEntry{entry}, c.entries...) // prepend as MRU
-	dbInserted = true
+	dbHandedOff = true
 	return entry, nil
 }
 
@@ -153,6 +164,20 @@ func (c *historicalDBCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	return c.evictAllLocked()
+}
+
+// invalidate drains the cache and makes in-flight loads serve their result uncached,
+// for when the directory the DBs are mapped over is being replaced.
+func (c *historicalDBCache) invalidate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	return c.evictAllLocked()
+}
+
+// evictAllLocked closes unborrowed entries; borrowed ones close on release.
+func (c *historicalDBCache) evictAllLocked() error {
 	var errs []error
 	for _, e := range c.entries {
 		e.evicted = true
@@ -184,6 +209,31 @@ func loadAtVersion(dir string, opts memiavl.Options, chainId string, version int
 	return db, nil
 }
 
+// querySnapshot is a copy-on-write view of committed state; latest-height reads
+// use it instead of rs.db, which Commit mutates in place.
+type querySnapshot struct {
+	// a copy of rs.db, so it stays open after rs.db closes, until refs reaches zero.
+	db             *memiavl.DB
+	lastCommitInfo *types.CommitInfo
+	// rs.stores when published; a reload replaces that field but never mutates the map.
+	stores map[types.StoreKey]types.CommitStore
+	// one for the publish slot plus one per reader; db is closed at zero.
+	refs atomic.Int64
+}
+
+func newQuerySnapshot(db *memiavl.DB, lastCommitInfo *types.CommitInfo, stores map[types.StoreKey]types.CommitStore) *querySnapshot {
+	snap := &querySnapshot{db: db, lastCommitInfo: lastCommitInfo, stores: stores}
+	snap.refs.Store(1)
+	return snap
+}
+
+func (s *querySnapshot) release() error {
+	if s.refs.Add(-1) == 0 {
+		return s.db.Close()
+	}
+	return nil
+}
+
 const CommitInfoFileName = "commit_infos"
 
 var (
@@ -196,9 +246,6 @@ type Store struct {
 	db      *memiavl.DB
 	logger  log.Logger
 	chainId string
-
-	// to keep it compatible with cosmos-sdk 0.46, merge the memstores into commit info
-	lastCommitInfo *types.CommitInfo
 
 	storesParams map[types.StoreKey]storeParams
 	keysByName   map[string]types.StoreKey
@@ -213,6 +260,7 @@ type Store struct {
 	supportExportNonSnapshotVersion bool
 
 	historicalDBCache *historicalDBCache
+	querySnapshot     atomic.Pointer[querySnapshot]
 }
 
 func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnapshotVersion bool, chainId string) *Store {
@@ -230,6 +278,69 @@ func NewStore(dir string, logger log.Logger, sdk46Compact, supportExportNonSnaps
 
 		historicalDBCache: newHistoricalDBCache(defaultHistoricalDBCacheSize),
 	}
+}
+
+func (rs *Store) publishQuerySnapshot() *types.CommitInfo {
+	// no cache: concurrent queries would contend on its shard locks, and every block would rebuild it.
+	// zero-copy follows rs.db: results stay mapped while the DB or a reader holds their generation; the DB drops it one reload after retiring it, or on close.
+	db := rs.db.CopyWithCacheSize(0)
+	info := rs.commitInfoFromDB(db)
+	rs.replaceQuerySnapshot(newQuerySnapshot(db, info, rs.stores))
+	return info
+}
+
+func (rs *Store) commitInfoFromDB(db *memiavl.DB) *types.CommitInfo {
+	if db.Version() == 0 {
+		return &types.CommitInfo{}
+	}
+	return rs.sdkCommitInfo(db.LastCommitInfo())
+}
+
+func (rs *Store) sdkCommitInfo(info *memiavl.CommitInfo) *types.CommitInfo {
+	commitInfo := convertCommitInfo(info)
+	// to keep the root hash compatible with cosmos-sdk 0.46
+	if rs.sdk46Compact {
+		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
+	}
+	return commitInfo
+}
+
+// replaceQuerySnapshot publishes snap (nil to unpublish) and drops the slot's
+// reference on the previous one; readers still holding it keep it mapped.
+func (rs *Store) replaceQuerySnapshot(snap *querySnapshot) {
+	if old := rs.querySnapshot.Swap(snap); old != nil {
+		rs.releaseQuerySnapshot(old)
+	}
+}
+
+func (rs *Store) releaseQuerySnapshot(snap *querySnapshot) {
+	if err := snap.release(); err != nil {
+		rs.logger.Error("failed to close query snapshot", "err", err)
+	}
+}
+
+// acquireQuerySnapshot returns the published snapshot with a reference the
+// caller must release, or nil when none is published.
+func (rs *Store) acquireQuerySnapshot() *querySnapshot {
+	for {
+		snap := rs.querySnapshot.Load()
+		if snap == nil {
+			return nil
+		}
+		for n := snap.refs.Load(); n > 0; n = snap.refs.Load() {
+			if snap.refs.CompareAndSwap(n, n+1) {
+				return snap
+			}
+		}
+		// released between Load and CompareAndSwap: a newer one, or nil on close, is published.
+	}
+}
+
+func (rs *Store) latestCommitInfo() *types.CommitInfo {
+	if snap := rs.querySnapshot.Load(); snap != nil {
+		return snap.lastCommitInfo
+	}
+	return nil
 }
 
 // flush writes all the pending change sets to memiavl tree.
@@ -262,11 +373,7 @@ func (rs *Store) WorkingHash() []byte {
 	if err := rs.flush(); err != nil {
 		panic(err)
 	}
-	commitInfo := convertCommitInfo(rs.db.WorkingCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
-	}
-	return commitInfo.Hash()
+	return rs.sdkCommitInfo(rs.db.WorkingCommitInfo()).Hash()
 }
 
 // Commit Implements interface Committer
@@ -294,20 +401,48 @@ func (rs *Store) Commit() types.CommitID {
 		}
 	}
 
-	rs.lastCommitInfo = convertCommitInfo(rs.db.LastCommitInfo())
-	if rs.sdk46Compact {
-		rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-	}
-	return rs.lastCommitInfo.CommitID()
+	return rs.publishQuerySnapshot().CommitID()
 }
 
 func (rs *Store) Close() error {
-	return stderrors.Join(rs.db.Close(), rs.historicalDBCache.close())
+	return stderrors.Join(rs.closeDB(), rs.historicalDBCache.close())
+}
+
+// closeDB is a no-op once rs.db is nil (repeat Close, failed reload).
+func (rs *Store) closeDB() error {
+	// readers still holding the snapshot keep its trees mapped past this close.
+	rs.replaceQuerySnapshot(nil)
+	if rs.db == nil {
+		return nil
+	}
+
+	err := rs.db.Close()
+	rs.db = nil
+	return err
+}
+
+// closeDBForReload releases the current db, the mounted stores and every cached
+// historical db so a replacement can be loaded over the same directory. They are
+// dropped even when closing fails, so a retry can proceed.
+func (rs *Store) closeDBForReload() error {
+	err := rs.closeDBAndHistory()
+	rs.stores = nil
+	return err
+}
+
+func (rs *Store) closeDBAndHistory() error {
+	// cached historical DBs would keep serving a history a restore or rollback unlinks.
+	return stderrors.Join(rs.closeDB(), rs.historicalDBCache.invalidate())
 }
 
 // LastCommitID Implements interface Committer
+//
+// Without a snapshot (before load, after Close or a failed reload) the version
+// comes from disk and the CommitID has no hash; version 0 would make CometBFT
+// replay from genesis.
 func (rs *Store) LastCommitID() types.CommitID {
-	if rs.lastCommitInfo == nil {
+	lastCommitInfo := rs.latestCommitInfo()
+	if lastCommitInfo == nil {
 		v, err := memiavl.GetLatestVersion(rs.dir)
 		if err != nil {
 			panic(fmt.Errorf("failed to get latest version: %w", err))
@@ -315,7 +450,7 @@ func (rs *Store) LastCommitID() types.CommitID {
 		return types.CommitID{Version: v}
 	}
 
-	return rs.lastCommitInfo.CommitID()
+	return lastCommitInfo.CommitID()
 }
 
 // SetPruning Implements interface Committer
@@ -363,15 +498,42 @@ func (rs *Store) CacheMultiStore() types.CacheMultiStore {
 	return cachemulti.NewStore(stores, nil, nil, nil)
 }
 
+func (rs *Store) cacheMultiStoreFromDB(db *memiavl.DB, mounted map[types.StoreKey]types.CommitStore, release func() error) types.CacheMultiStore {
+	closer := newQueryCloser(release, rs.logger)
+	stores := make(map[types.StoreKey]types.CacheWrapper)
+
+	// add the transient/mem stores registered in current app.
+	for k, store := range mounted {
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			stores[k] = store
+		}
+	}
+
+	// a historical db may hold trees a later StoreUpgrade deleted or renamed;
+	// skip those, there's no current StoreKey for them.
+	for _, tree := range db.Trees() {
+		key, ok := rs.keysByName[tree.Name]
+		if !ok {
+			continue
+		}
+		stores[key] = pinnedStore{Store: memiavlstore.New(tree.Tree, rs.logger), pin: closer}
+	}
+
+	return cachemulti.NewStore(stores, nil, nil, closer)
+}
+
 // CacheMultiStoreWithVersion Implements interface MultiStore
 // used to createQueryContext, abci_query or grpc query service.
+//
+// version == 0 means the latest committed snapshot, not the live working state.
 func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStore, error) {
-	if version == 0 || (rs.lastCommitInfo != nil && version == rs.lastCommitInfo.Version) {
-		return rs.CacheMultiStore(), nil
+	snap, mounted, err := rs.acquireForVersion(version)
+	if err != nil {
+		return nil, err
 	}
-	// guard int64 → uint32 cast.
-	if version < 0 || version > math.MaxUint32 {
-		return nil, fmt.Errorf("version out of range: %d", version)
+	if snap != nil {
+		// the caller's Close releases the snapshot, so it outlives later reloads.
+		return rs.cacheMultiStoreFromDB(snap.db, mounted, snap.release), nil
 	}
 	// historicalDBCache isn't used here: the returned store's lifetime is owned
 	// by the caller (closed via cachemulti.NewStore's closer arg, see PR #54),
@@ -381,27 +543,27 @@ func (rs *Store) CacheMultiStoreWithVersion(version int64) (types.CacheMultiStor
 		return nil, err
 	}
 
-	stores := make(map[types.StoreKey]types.CacheWrapper)
+	return rs.cacheMultiStoreFromDB(db, mounted, db.Close), nil
+}
 
-	// add the transient/mem stores registered in current app.
-	for k, store := range rs.stores {
-		if store.GetStoreType() != types.StoreTypeIAVL {
-			stores[k] = store
-		}
+// acquireForVersion returns the published snapshot, with a reference to release, when
+// version is 0 or its height, and a nil snapshot for any other height, which callers load
+// from disk. mounted is the snapshot's stores either way.
+func (rs *Store) acquireForVersion(version int64) (snap *querySnapshot, mounted map[types.StoreKey]types.CommitStore, err error) {
+	snap = rs.acquireQuerySnapshot()
+	if snap == nil {
+		return nil, nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "store is not loaded")
 	}
-
-	// add all the iavl stores at the target version. A historical snapshot may
-	// contain trees for stores later deleted/renamed by a StoreUpgrade; skip
-	// those since there's no current StoreKey to expose them under.
-	for _, tree := range db.Trees() {
-		key, ok := rs.keysByName[tree.Name]
-		if !ok {
-			continue
-		}
-		stores[key] = memiavlstore.New(tree.Tree, rs.logger)
+	if version == 0 || version == snap.lastCommitInfo.Version {
+		return snap, snap.stores, nil
 	}
-
-	return cachemulti.NewStore(stores, nil, nil, db), nil
+	mounted = snap.stores
+	// a historical load can queue; don't keep the latest generation mapped meanwhile.
+	rs.releaseQuerySnapshot(snap)
+	if version < 0 || version > math.MaxUint32 {
+		return nil, nil, fmt.Errorf("version out of range: %d", version)
+	}
+	return nil, mounted, nil
 }
 
 // GetStore Implements interface MultiStore
@@ -439,14 +601,24 @@ func (rs *Store) SetTracingContext(_ interface{}) types.MultiStore {
 
 // LatestVersion Implements interface MultiStore
 func (rs *Store) LatestVersion() int64 {
-	return rs.db.Version()
+	info := rs.latestCommitInfo()
+	if info == nil {
+		return 0
+	}
+	return info.Version
 }
 
 // EarliestVersion Implements interface CommitMultiStore
 func (rs *Store) EarliestVersion() int64 {
+	snap := rs.acquireQuerySnapshot()
+	if snap == nil {
+		return 0
+	}
+	defer rs.releaseQuerySnapshot(snap)
+	db := snap.db
 	// memiavl prunes WAL entries up to the earliest retained snapshot, so the
 	// earliest queryable version is the version of that snapshot.
-	v, err := rs.db.EarliestVersion()
+	v, err := db.EarliestVersion()
 	if err != nil {
 		rs.logger.Error("failed to get earliest version", "err", err)
 		return 0
@@ -507,6 +679,9 @@ func (rs *Store) LoadLatestVersionAndUpgrade(upgrades *types.StoreUpgrades) erro
 
 // LoadVersionAndUpgrade Implements interface CommitMultiStore
 // used by node startup with UpgradeStoreLoader
+//
+// A loaded store is closed before loading, since memiavl.Load needs the directory
+// lock it holds; if loading then fails, the Store is left unloaded.
 func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgrades) error {
 	if version > math.MaxUint32 {
 		return fmt.Errorf("version overflows uint32: %d", version)
@@ -532,6 +707,10 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	opts.CreateIfMissing = true
 	opts.InitialStores = initialStores
 	opts.TargetVersion = uint32(version)
+	// a previously loaded db holds the directory lock memiavl.Load needs.
+	if err := rs.closeDBForReload(); err != nil {
+		return fmt.Errorf("failed to close db: %w", err)
+	}
 	db, err := memiavl.Load(rs.dir, opts, rs.chainId)
 	if err != nil {
 		return errors.Wrapf(err, "fail to load memiavl at %s", rs.dir)
@@ -581,15 +760,7 @@ func (rs *Store) LoadVersionAndUpgrade(version int64, upgrades *types.StoreUpgra
 	rs.db = db
 	dbInstalled = true
 	rs.stores = newStores
-	// to keep the root hash compatible with cosmos-sdk 0.46
-	if db.Version() != 0 {
-		rs.lastCommitInfo = convertCommitInfo(db.LastCommitInfo())
-		if rs.sdk46Compact {
-			rs.lastCommitInfo = amendCommitInfo(rs.lastCommitInfo, rs.storesParams)
-		}
-	} else {
-		rs.lastCommitInfo = &types.CommitInfo{}
-	}
+	rs.publishQuerySnapshot()
 
 	return nil
 }
@@ -666,7 +837,11 @@ func (rs *Store) SetInterBlockCache(c types.MultiStorePersistentCache) {}
 // SetInitialVersion Implements interface CommitMultiStore
 // used by InitChain when the initial height is bigger than 1
 func (rs *Store) SetInitialVersion(version int64) error {
-	return rs.db.SetInitialVersion(version)
+	if err := rs.db.SetInitialVersion(version); err != nil {
+		return err
+	}
+	rs.publishQuerySnapshot()
+	return nil
 }
 
 // SetIAVLCacheSize Implements interface CommitMultiStore
@@ -703,10 +878,9 @@ func (rs *Store) RollbackToVersion(target int64) error {
 		return fmt.Errorf("rollback height target %d exceeds max uint32", target)
 	}
 
-	if rs.db != nil {
-		if err := rs.db.Close(); err != nil {
-			return err
-		}
+	// the mounted stores stay; only the db and the history it held are replaced.
+	if err := rs.closeDBAndHistory(); err != nil {
+		return fmt.Errorf("failed to close db: %w", err)
 	}
 
 	opts := rs.opts
@@ -715,8 +889,28 @@ func (rs *Store) RollbackToVersion(target int64) error {
 
 	var err error
 	rs.db, err = memiavl.Load(rs.dir, opts, rs.chainId)
+	if err != nil {
+		// like a failed reload, don't leave stores over the closed trees.
+		rs.stores = nil
+		return err
+	}
+	for key, store := range rs.stores {
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			continue
+		}
+		ms := store.(*memiavlstore.Store)
+		// writes made before the rollback belong to a discarded height.
+		ms.PopChangeSet()
+		tree := rs.db.TreeByName(key.Name())
+		if tree == nil {
+			// an upgrade after the target added this store; it has no tree there.
+			tree = memiavl.New(0)
+		}
+		ms.SetTree(tree)
+	}
+	rs.publishQuerySnapshot()
 
-	return err
+	return nil
 }
 
 // ListeningEnabled Implements interface CommitMultiStore
@@ -771,22 +965,17 @@ func (rs *Store) GetStoreByName(name string) types.Store {
 // Query Implements interface Queryable
 func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 	version := req.Height
-	if version == 0 {
-		version = rs.db.Version()
-	}
-	// guard int64 → uint32 cast.
-	if version < 0 || version > math.MaxUint32 {
-		return nil, fmt.Errorf("version out of range: %d", version)
-	}
 
-	// If the request's height is the latest height we've committed, then utilize
-	// the store's lastCommitInfo as this commit info may not be flushed to disk.
-	// Otherwise, we query for the commit info from disk.
-	db := rs.db
-	var borrowedEntry *historicalDBEntry
-	if rs.lastCommitInfo == nil || version != rs.lastCommitInfo.Version {
-		var err error
-		borrowedEntry, err = rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
+	snap, _, err := rs.acquireForVersion(version)
+	if err != nil {
+		return nil, err
+	}
+	var db *memiavl.DB
+	if snap != nil {
+		defer rs.releaseQuerySnapshot(snap)
+		db = snap.db
+	} else {
+		borrowedEntry, err := rs.historicalDBCache.borrow(version, func() (*memiavl.DB, error) {
 			return loadAtVersion(rs.dir, rs.opts, rs.chainId, version)
 		})
 		if err != nil {
@@ -830,9 +1019,12 @@ func (rs *Store) Query(req *types.RequestQuery) (*types.ResponseQuery, error) {
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "proof is unexpectedly empty; ensure height has not been pruned")
 	}
 
-	commitInfo := convertCommitInfo(db.LastCommitInfo())
-	if rs.sdk46Compact {
-		commitInfo = amendCommitInfo(commitInfo, rs.storesParams)
+	// the published snapshot already holds its converted commit info.
+	var commitInfo *types.CommitInfo
+	if snap != nil {
+		commitInfo = snap.lastCommitInfo
+	} else {
+		commitInfo = rs.commitInfoFromDB(db)
 	}
 
 	// Restore origin path and append proof op.

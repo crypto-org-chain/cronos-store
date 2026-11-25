@@ -2,6 +2,7 @@ package rootmulti
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/crypto-org-chain/cronos-store/memiavl"
@@ -120,6 +121,41 @@ func BenchmarkHistoricalLoad(b *testing.B) {
 		}
 		if err := db.Close(); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkLatestHeightCacheMultiStore is the store the SDK builds for every
+// latest-height gRPC query: open it, read one key, close it, over 20 stores.
+func BenchmarkLatestHeightCacheMultiStore(b *testing.B) {
+	store := NewStore(b.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	keys := make([]types.StoreKey, 20)
+	for i := range keys {
+		keys[i] = types.NewKVStoreKey(fmt.Sprintf("store-%d", i))
+		store.MountStoreWithDB(keys[i], types.StoreTypeIAVL, nil)
+	}
+	if err := store.LoadLatestVersion(); err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	for _, key := range keys {
+		kv := store.GetKVStore(key)
+		for i := 0; i < benchNumKeys; i++ {
+			kv.Set([]byte(fmt.Sprintf("key-%d", i)), []byte("value"))
+		}
+	}
+	store.Commit()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cms, err := store.CacheMultiStoreWithVersion(0)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = cms.GetKVStore(keys[i%len(keys)]).Get([]byte("key-1"))
+		if closer, ok := cms.(io.Closer); ok {
+			_ = closer.Close()
 		}
 	}
 }
