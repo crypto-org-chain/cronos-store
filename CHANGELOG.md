@@ -4,6 +4,8 @@
 
 - [#106](https://github.com/crypto-org-chain/cronos-store/pull/106) fix(memiavl): reject metadata with no commit info and cache a snapshot-0 marker instead of the initial-version fallback (a writable Load recreates snapshot-0 if its metadata was torn before any commit)
 - [#102](https://github.com/crypto-org-chain/cronos-store/pull/102) fix(store): serve latest-height reads from a copy-on-write snapshot (API breaking: memiavl copies must be closed, and DB copies are read-only)
+- [#154](https://github.com/crypto-org-chain/cronos-store/pull/154) feat: upgrade to cosmos-sdk v0.55 (fork release/v0.55.x)
+- [#155](https://github.com/crypto-org-chain/cronos-store/pull/155) ci: build rocksdb with FAIL_ON_WARNINGS=OFF
 - [#150](https://github.com/crypto-org-chain/cronos-store/pull/150) fix(memiavl): bound WAL catch-up waits and latch sync WAL write errors
 - [#138](https://github.com/crypto-org-chain/cronos-store/pull/138) feat(versiondb): add compact-versiondb command with rate limit
 - [#144](https://github.com/crypto-org-chain/cronos-store/pull/144) fix(memiavl): delete newer snapshots before cutting back the WAL on rollback
