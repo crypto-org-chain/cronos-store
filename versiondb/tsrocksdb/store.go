@@ -241,6 +241,7 @@ func (s Store) Flush() error {
 }
 
 // Close does not flush the memtable; call Flush first if durability is needed.
+// Close releases the db and cfHandle, also ones passed to NewStoreWithDB; grocksdb crashes if either is released twice.
 func (s Store) Close() error {
 	s.cfHandle.Destroy()
 	s.db.Close()

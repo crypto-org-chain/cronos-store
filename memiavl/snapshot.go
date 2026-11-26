@@ -451,14 +451,18 @@ func writeSnapshot(
 		}
 	}
 
-	// write metadata
+	return WriteSnapshotVersion(dir, version)
+}
+
+// WriteSnapshotVersion sets the version in a tree snapshot's metadata. Nodes carry their own
+// versions, so raising it gives the snapshot the tree would write after empty versions up to version.
+func WriteSnapshotVersion(snapshotDir string, version uint32) (returnErr error) {
 	var metadataBuf [SizeMetadata]byte
 	binary.LittleEndian.PutUint32(metadataBuf[:], SnapshotFileMagic)
 	binary.LittleEndian.PutUint32(metadataBuf[4:], SnapshotFormat)
 	binary.LittleEndian.PutUint32(metadataBuf[8:], version)
 
-	metadataFile := filepath.Join(dir, FileNameMetadata)
-	fpMetadata, err := createFile(metadataFile)
+	fpMetadata, err := createFile(filepath.Join(snapshotDir, FileNameMetadata))
 	if err != nil {
 		return err
 	}

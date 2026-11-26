@@ -2,6 +2,8 @@ package memiavl
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -45,6 +47,37 @@ func TestSnapshotEncodingRoundTrip(t *testing.T) {
 	require.Equal(t, RefHashes[len(ChangeSets)-1], hash)
 	require.Equal(t, len(ChangeSets), int(v))
 	require.NoError(t, snapshot.Close())
+}
+
+func TestWriteSnapshotVersion(t *testing.T) {
+	tree := New(0)
+	for _, keys := range [][]string{{"a", "b", "c"}, {"b", "d"}} {
+		cs := ChangeSet{}
+		for _, k := range keys {
+			cs.Pairs = append(cs.Pairs, &KVPair{Key: []byte(k), Value: []byte(k)})
+		}
+		tree.ApplyChangeSet(cs)
+		_, _, err := tree.SaveVersion(true)
+		require.NoError(t, err)
+	}
+	bumped := t.TempDir()
+	require.NoError(t, tree.WriteSnapshot(bumped))
+	require.NoError(t, WriteSnapshotVersion(bumped, 5))
+
+	for tree.Version() < 5 {
+		_, _, err := tree.SaveVersion(false)
+		require.NoError(t, err)
+	}
+	direct := t.TempDir()
+	require.NoError(t, tree.WriteSnapshot(direct))
+
+	for _, name := range []string{FileNameMetadata, FileNameNodes, FileNameLeaves, FileNameKVs} {
+		want, err := os.ReadFile(filepath.Join(direct, name))
+		require.NoError(t, err)
+		got, err := os.ReadFile(filepath.Join(bumped, name))
+		require.NoError(t, err)
+		require.Equal(t, want, got, name)
+	}
 }
 
 func TestSnapshotExport(t *testing.T) {
