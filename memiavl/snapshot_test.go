@@ -1,6 +1,7 @@
 package memiavl
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -192,4 +193,15 @@ func testSnapshotRoundTrip(t *testing.T, db *DB) {
 	// the imported db function normally
 	_, err = db2.Commit()
 	require.NoError(t, err)
+}
+
+func TestTreeWriteSnapshotCanceled(t *testing.T) {
+	tree := New(0)
+	tree.ApplyChangeSet(ChangeSets[0])
+	_, _, err := tree.SaveVersion(true)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, tree.WriteSnapshotWithContext(ctx, t.TempDir()), context.Canceled)
 }

@@ -166,6 +166,62 @@ func TestMultiTreeWriteSnapshotSuccessWithContext(t *testing.T) {
 	}
 }
 
+func TestMultiTreeWriteSnapshotCancelWithQueuedWritesLeavesNoMetadata(t *testing.T) {
+	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
+
+	stores := []string{store1Name, store2Name}
+	var upgrades []*TreeNameUpgrade
+	for _, name := range stores {
+		upgrades = append(upgrades, &TreeNameUpgrade{Name: name})
+	}
+	require.NoError(t, mtree.ApplyUpgrades(upgrades))
+
+	for _, storeName := range stores {
+		tree := mtree.TreeByName(storeName)
+		require.NotNil(t, tree)
+		tree.set([]byte("k"), []byte("v"))
+	}
+
+	_, err := mtree.SaveVersion(true)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	const workers = 2
+	pool := pond.New(workers, 10)
+	defer pool.StopAndWait()
+	// hold every worker so the writes stay queued until after cancel.
+	release := make(chan struct{})
+	releaseWorkers := sync.OnceFunc(func() { close(release) })
+	defer releaseWorkers()
+	for range workers {
+		pool.Submit(func() { <-release })
+	}
+
+	snapshotDir := t.TempDir()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- mtree.WriteSnapshotWithContext(ctx, snapshotDir, pool)
+	}()
+
+	// the blockers plus one write per store.
+	require.Eventually(t, func() bool {
+		return pool.SubmittedTasks() == uint64(workers+len(stores))
+	}, 10*time.Second, time.Millisecond)
+	cancel()
+	releaseWorkers()
+
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteSnapshotWithContext did not return after the workers were released")
+	}
+	// the commit info is written only after every tree, so a canceled write leaves none.
+	require.NoFileExists(t, filepath.Join(snapshotDir, MetadataFileName))
+}
+
 func TestMultiTreeWriteSnapshotEmptyTree(t *testing.T) {
 	mtree := NewEmptyMultiTree(0, 0, TestAppChainID)
 
