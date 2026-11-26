@@ -1,5 +1,5 @@
 name: Protobuf
-# Protobuf runs buf (https://buf.build/) lint and check-breakage
+# Protobuf runs buf[](https://buf.build/) lint and check-breakage
 # This workflow is only run when a .proto file has been changed
 on:
   pull_request:
@@ -14,10 +14,21 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
       - uses: technote-space/get-diff-action@f27caffdd0fb9b13f4fc191c016bb4e0632844af # v6
         with:
           PATTERNS: |
             **/**.proto
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.41.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update Buf Dependencies
+        if: env.GIT_DIFF
+        run: |
+          cd proto
+          buf dep update
       - name: lint
         run: make proto-lint
         if: env.GIT_DIFF
@@ -25,25 +36,67 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
       - uses: technote-space/get-diff-action@f27caffdd0fb9b13f4fc191c016bb4e0632844af # v6
         with:
           PATTERNS: |
             **/**.proto
-      - name: check-breakage
-        run: make proto-check-breaking
+      - name: Check if proto files exist on base branch
+        id: check_base_proto
         if: env.GIT_DIFF
+        run: |
+          if git ls-tree -r origin/${{ github.event.pull_request.base.ref }} -- proto | grep -q '\.proto$'; then
+            echo "has_proto=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_proto=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: bufbuild/buf-setup-action@v1
+        if: env.GIT_DIFF && steps.check_base_proto.outputs.has_proto == 'true'
+        with:
+          version: 1.41.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update Buf Dependencies
+        if: env.GIT_DIFF && steps.check_base_proto.outputs.has_proto == 'true'
+        run: |
+          cd proto
+          buf dep update
+      - name: check-breakage
+        if: env.GIT_DIFF && steps.check_base_proto.outputs.has_proto == 'true'
+        run: make proto-check-breaking
+        env:
+          BUF_BREAKING_AGAINST: origin/${{ github.event.pull_request.base.ref }}
   protogen:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
       - uses: technote-space/get-diff-action@f27caffdd0fb9b13f4fc191c016bb4e0632844af # v6
         with:
           PATTERNS: |
             **/**.proto
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.41.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Go
+        if: env.GIT_DIFF
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Install Proto Plugins
+        if: env.GIT_DIFF
+        run: go install github.com/cosmos/gogoproto/protoc-gen-gogofaster@v1.7.2
+      - name: Update Buf Dependencies
+        if: env.GIT_DIFF
+        run: |
+          cd proto
+          buf dep update
       - name: proto-gen-ci
         if: env.GIT_DIFF
         run: |
           make proto-gen-ci # proto-swagger-gen  FIXME swagger-gen result is not reproducible in CI
-          git checkout -- go.mod go.sum # FIXME doc gen not reproducible in CI
+          # Removed: git checkout -- go.mod go.sum # FIXME doc gen not reproducible in CI
       - name: check working directory is clean
         uses: numtide/clean-git-action@30e3d6d6e2d6e77e73761cf5324467cb74386f87 # v2

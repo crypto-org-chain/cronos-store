@@ -1,0 +1,18 @@
+version: v1
+
+name: buf.build/crypto-org-chain/cronos-store
+
+deps:
+  - buf.build/cosmos/gogo-proto
+
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - PACKAGE_SAME_DIRECTORY
+    - PACKAGE_DIRECTORY_MATCH
+
+breaking:
+  use:
+    - FILE
