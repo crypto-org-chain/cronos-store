@@ -3,6 +3,7 @@ package rootmulti
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"testing"
 
 	"github.com/crypto-org-chain/cronos-store/memiavl"
@@ -157,5 +158,60 @@ func BenchmarkLatestHeightCacheMultiStore(b *testing.B) {
 		if closer, ok := cms.(io.Closer); ok {
 			_ = closer.Close()
 		}
+	}
+}
+
+// BenchmarkBlockWithMountedReads is one block through the mounted stores: hot reads,
+// writes, WorkingHash and Commit, over 20 stores, with a node cache configured.
+func BenchmarkBlockWithMountedReads(b *testing.B) {
+	const (
+		stores  = 20
+		reads   = 2000
+		writes  = 100
+		hotKeys = 500
+	)
+	store := NewStore(b.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+	store.SetMemIAVLOptions(memiavl.Options{CacheSize: 1000, SnapshotInterval: 1 << 30})
+	storeKeys := make([]types.StoreKey, stores)
+	for i := range storeKeys {
+		storeKeys[i] = types.NewKVStoreKey(fmt.Sprintf("store-%d", i))
+		store.MountStoreWithDB(storeKeys[i], types.StoreTypeIAVL, nil)
+	}
+	if err := store.LoadLatestVersion(); err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	keys := make([][]byte, benchNumKeys)
+	for i := range keys {
+		keys[i] = []byte(fmt.Sprintf("key-%d", i))
+	}
+	for _, key := range storeKeys {
+		kv := store.GetKVStore(key)
+		for _, k := range keys {
+			kv.Set(k, []byte("value"))
+		}
+	}
+	store.Commit()
+	// read from the mmap'd snapshot, as a node does between rewrites.
+	if err := store.db.RewriteSnapshot(); err != nil {
+		b.Fatal(err)
+	}
+	if err := store.db.Reload(); err != nil {
+		b.Fatal(err)
+	}
+	store.Commit()
+
+	rng := rand.New(rand.NewSource(1))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for r := 0; r < reads; r++ {
+			store.GetKVStore(storeKeys[r%stores]).Get(keys[rng.Intn(hotKeys)])
+		}
+		for w := 0; w < writes; w++ {
+			store.GetKVStore(storeKeys[w%stores]).Set(keys[rng.Intn(len(keys))], []byte("value"))
+		}
+		store.WorkingHash()
+		store.Commit()
 	}
 }

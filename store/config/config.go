@@ -19,7 +19,7 @@ type MemIAVLConfig struct {
 	SnapshotKeepRecent uint32 `mapstructure:"snapshot-keep-recent"`
 	// SnapshotInterval defines the block interval the memiavl snapshot is taken, default to 1000.
 	SnapshotInterval uint32 `mapstructure:"snapshot-interval"`
-	// CacheSize defines the size of the cache for each memiavl store.
+	// CacheSize defines the cache size of each memiavl store in DBs loaded for historical-height queries.
 	CacheSize int `mapstructure:"cache-size"`
 }
 
