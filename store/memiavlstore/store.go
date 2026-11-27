@@ -1,6 +1,7 @@
 package memiavlstore
 
 import (
+	stderrors "errors"
 	"io"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
@@ -187,11 +188,6 @@ func (st *Store) WorkingHash() []byte {
 }
 
 func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
-	// An empty tree has no neighbours to prove absence with, and any client can ask for it.
-	if !exists && tree.IsEmpty() {
-		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "cannot prove a key is absent from an empty store")
-	}
-
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
@@ -201,6 +197,10 @@ func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocry
 	} else {
 		commitmentProof, err = tree.GetNonMembershipProof(key)
 	}
+	if stderrors.Is(err, memiavl.ErrEmptyTreeNonMembership) {
+		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, err.Error())
+	}
+	// Only a tree changing between Get and the proof, or a corrupt tree, gets here.
 	if err != nil {
 		return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build proof: %s", err)
 	}

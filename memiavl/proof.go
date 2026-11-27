@@ -10,6 +10,8 @@ import (
 	ics23 "github.com/cosmos/ics23/go"
 )
 
+var ErrEmptyTreeNonMembership = errors.New("cannot create non-existence proof for an empty tree")
+
 /*
 GetMembershipProof will produce a CommitmentProof that the given key (and queries value) exists in the iavl tree.
 If the key doesn't exist in the tree, this will return an error.
@@ -40,7 +42,7 @@ If the key exists in the tree, this will return an error.
 */
 func (t *Tree) GetNonMembershipProof(key []byte) (*ics23.CommitmentProof, error) {
 	if t.root == nil {
-		return nil, errors.New("cannot create non-existence proof for an empty tree")
+		return nil, ErrEmptyTreeNonMembership
 	}
 
 	// idx is one node right of what we want....
