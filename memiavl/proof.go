@@ -10,6 +10,7 @@ import (
 	ics23 "github.com/cosmos/ics23/go"
 )
 
+// ErrEmptyTreeNonMembership means absence can't be proven: an empty tree has no leaves to anchor the proof.
 var ErrEmptyTreeNonMembership = errors.New("cannot create non-existence proof for an empty tree")
 
 /*
