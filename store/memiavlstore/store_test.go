@@ -18,6 +18,7 @@ func TestQueryProve(t *testing.T) {
 	present, absent := []byte("b"), []byte("c")
 
 	query := func(t *testing.T, st *Store, key []byte) (*cmtprotocrypto.ProofOps, error) {
+		t.Helper()
 		res, err := st.Query(&types.RequestQuery{Path: "/key", Data: key, Prove: true})
 		if err != nil {
 			require.Nil(t, res)
