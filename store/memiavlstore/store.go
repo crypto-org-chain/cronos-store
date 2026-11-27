@@ -186,24 +186,23 @@ func (st *Store) WorkingHash() []byte {
 	return st.tree.RootHash()
 }
 
-// getProofFromTree returns an error instead of panicking: a non-membership proof
-// fails on an empty tree, which any client can reach with a prove query.
 func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
+	// An empty tree has no neighbours to prove absence with, and any client can ask for it.
+	if !exists && tree.IsEmpty() {
+		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "cannot prove a key is absent from an empty store")
+	}
+
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
 	)
-
 	if exists {
 		commitmentProof, err = tree.GetMembershipProof(key)
-		if err != nil {
-			return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build membership proof for key %X: %s", key, err)
-		}
 	} else {
 		commitmentProof, err = tree.GetNonMembershipProof(key)
-		if err != nil {
-			return nil, errors.Wrapf(sdkerrors.ErrInvalidRequest, "failed to build non-membership proof for key %X: %s", key, err)
-		}
+	}
+	if err != nil {
+		return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build proof: %s", err)
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)

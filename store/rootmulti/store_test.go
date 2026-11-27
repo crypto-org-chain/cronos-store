@@ -497,18 +497,48 @@ func TestQueryEmptyStoreName(t *testing.T) {
 	}
 }
 
-func TestQueryProveAgainstEmptyStore(t *testing.T) {
-	store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
-	store.MountStoreWithDB(types.NewKVStoreKey(testStoreName), types.StoreTypeIAVL, nil)
-	require.NoError(t, store.LoadLatestVersion())
-	t.Cleanup(func() { store.Close() })
-	store.Commit()
+func TestQueryProve(t *testing.T) {
+	testCases := []struct {
+		name string
+		// fill writes "k" at version 2; version 1 is always empty.
+		fill   bool
+		height int64
+		key    string
+		expErr error
+	}{
+		{name: "absent key, empty store", key: "a", expErr: sdkerrors.ErrInvalidRequest},
+		// version 1 is not the latest, so this goes through historicalDBCache.
+		{name: "absent key, empty historical version", fill: true, height: 1, key: "a", expErr: sdkerrors.ErrInvalidRequest},
+		{name: "absent key", fill: true, key: "a"},
+		{name: "existing key", fill: true, key: "k"},
+	}
 
-	res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte("k"), Prove: true})
-	require.Error(t, err)
-	require.Nil(t, res)
-	require.ErrorIs(t, err, sdkerrors.ErrInvalidRequest)
-	require.Contains(t, err.Error(), "failed to build non-membership proof")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(t.TempDir(), log.NewNopLogger(), false, false, TestAppChainID)
+			store.SetMemIAVLOptions(memiavl.Options{SnapshotInterval: 1, SnapshotKeepRecent: 2})
+			storeKey := types.NewKVStoreKey(testStoreName)
+			store.MountStoreWithDB(storeKey, types.StoreTypeIAVL, nil)
+			require.NoError(t, store.LoadLatestVersion())
+			t.Cleanup(func() { store.Close() })
+
+			store.Commit()
+			if tc.fill {
+				store.GetKVStore(storeKey).Set([]byte("k"), []byte("v"))
+				store.Commit()
+			}
+			require.NoError(t, store.db.WaitAsyncCommit())
+
+			res, err := store.Query(&types.RequestQuery{Path: "/" + testStoreName + "/key", Data: []byte(tc.key), Height: tc.height, Prove: true})
+			if tc.expErr != nil {
+				require.ErrorIs(t, err, tc.expErr)
+				require.Nil(t, res)
+				return
+			}
+			require.NoError(t, err)
+			require.NotEmpty(t, res.ProofOps.GetOps())
+		})
+	}
 }
 
 func TestQueryHistoricalHeightAllowsDeletedStore(t *testing.T) {
