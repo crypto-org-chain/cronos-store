@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- [#158](https://github.com/crypto-org-chain/cronos-store/pull/158) fix(memiavlstore): return an error instead of panicking when a query proof can't be built
 - [#154](https://github.com/crypto-org-chain/cronos-store/pull/154) feat: upgrade to cosmos-sdk v0.55 (fork release/v0.55.x)
 - [#155](https://github.com/crypto-org-chain/cronos-store/pull/155) ci: build rocksdb with FAIL_ON_WARNINGS=OFF
 - [#150](https://github.com/crypto-org-chain/cronos-store/pull/150) fix(memiavl): bound WAL catch-up waits and latch sync WAL write errors

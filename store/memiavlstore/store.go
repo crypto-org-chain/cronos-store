@@ -1,7 +1,7 @@
 package memiavlstore
 
 import (
-	"fmt"
+	stderrors "errors"
 	"io"
 
 	cmtprotocrypto "github.com/cometbft/cometbft/proto/tendermint/crypto"
@@ -149,8 +149,10 @@ func (st *Store) Query(req *types.RequestQuery) (res *types.ResponseQuery, err e
 			break
 		}
 
-		// get proof from tree and convert to merkle.Proof before adding to result
-		res.ProofOps = getProofFromTree(st.tree, req.Data, res.Value != nil)
+		res.ProofOps, err = getProofFromTree(st.tree, req.Data, res.Value != nil)
+		if err != nil {
+			return nil, err
+		}
 	case "/subspace":
 		pairs := memiavl.Pairs{
 			Pairs: make([]memiavl.Pair, 0),
@@ -185,31 +187,24 @@ func (st *Store) WorkingHash() []byte {
 	return st.tree.RootHash()
 }
 
-// Takes a MutableTree, a key, and a flag for creating existence or absence proof and returns the
-// appropriate merkle.Proof. Since this must be called after querying for the value, this function should never error
-// Thus, it will panic on error rather than returning it
-func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) *cmtprotocrypto.ProofOps {
+func getProofFromTree(tree *memiavl.Tree, key []byte, exists bool) (*cmtprotocrypto.ProofOps, error) {
 	var (
 		commitmentProof *ics23.CommitmentProof
 		err             error
 	)
-
 	if exists {
-		// value was found
 		commitmentProof, err = tree.GetMembershipProof(key)
-		if err != nil {
-			// sanity check: If value was found, membership proof must be creatable
-			panic(fmt.Sprintf("unexpected value for empty proof: %s", err.Error()))
-		}
 	} else {
-		// value wasn't found
 		commitmentProof, err = tree.GetNonMembershipProof(key)
-		if err != nil {
-			// sanity check: If value wasn't found, nonmembership proof must be creatable
-			panic(fmt.Sprintf("unexpected error for nonexistence proof: %s", err.Error()))
-		}
+	}
+	if stderrors.Is(err, memiavl.ErrEmptyTreeNonMembership) {
+		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, err.Error())
+	}
+	// Only a tree changing between Get and the proof, or a corrupt tree, gets here.
+	if err != nil {
+		return nil, errors.Wrapf(sdkerrors.ErrLogic, "failed to build proof: %s", err)
 	}
 
 	op := types.NewIavlCommitmentOp(key, commitmentProof)
-	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}
+	return &cmtprotocrypto.ProofOps{Ops: []cmtprotocrypto.ProofOp{op.ProofOp()}}, nil
 }
